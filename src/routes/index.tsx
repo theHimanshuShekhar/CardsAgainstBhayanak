@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useAuth } from "../contexts/AuthContext";
 
 export const Route = createFileRoute("/")({ component: Home });
@@ -23,18 +23,18 @@ function Home() {
               Ready to be terrible? Create a new game or join one with a room code.
             </p>
             <div className="flex flex-wrap gap-3">
-              <a
-                href="/game/create"
+              <Link
+                to="/games/create"
                 className="rounded-full bg-[var(--lagoon-deep)] px-6 py-2.5 text-sm font-semibold text-white no-underline transition hover:-translate-y-0.5"
               >
                 Create Game
-              </a>
-              <a
-                href="/game/join"
+              </Link>
+              <Link
+                to="/games/join"
                 className="rounded-full border border-[rgba(50,143,151,0.3)] bg-[rgba(79,184,178,0.14)] px-6 py-2.5 text-sm font-semibold text-[var(--lagoon-deep)] no-underline transition hover:-translate-y-0.5 hover:bg-[rgba(79,184,178,0.24)]"
               >
                 Join Game
-              </a>
+              </Link>
               <button
                 onClick={logout}
                 className="rounded-full border border-[rgba(23,58,64,0.2)] bg-white/50 px-6 py-2.5 text-sm font-semibold text-[var(--sea-ink)] transition hover:-translate-y-0.5"
