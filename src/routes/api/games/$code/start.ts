@@ -8,6 +8,7 @@ import {
   publishEvent,
 } from "../../../../lib/game-state";
 import { getRedis } from "../../../../lib/redis";
+import { handleGameStarted } from "../../../../lib/game-event-handler";
 
 export const Route = createFileRoute("/api/games/$code/start")({
   server: {
@@ -58,6 +59,9 @@ export const Route = createFileRoute("/api/games/$code/start")({
           .where(eq(gameSessions.roomCode, roomCode));
 
         await publishEvent(roomCode, "game:started", { config });
+
+        // Load decks and start round 1 (non-blocking — respond immediately)
+        handleGameStarted(roomCode).catch(console.error);
 
         return Response.json({ ok: true });
       },
