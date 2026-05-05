@@ -8,7 +8,13 @@ import tailwindcss from '@tailwindcss/vite'
 
 const config = defineConfig({
   resolve: { tsconfigPaths: true },
-  plugins: [devtools(), tailwindcss(), tanstackStart(), viteReact()],
+  plugins: [
+    devtools(),
+    tailwindcss(),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tanstackStart({ routeFileIgnorePattern: "\\.(test|spec)\\.(ts|tsx)$" } as any),
+    viteReact(),
+  ],
 })
 
 export default config
