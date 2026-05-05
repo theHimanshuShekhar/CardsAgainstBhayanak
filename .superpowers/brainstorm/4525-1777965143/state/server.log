@@ -1,0 +1,15 @@
+{"type":"server-started","port":59857,"host":"127.0.0.1","url_host":"localhost","url":"http://localhost:59857","screen_dir":"/home/hshekhar/code/CardsAgainstBhayanak/.superpowers/brainstorm/4525-1777965143/content","state_dir":"/home/hshekhar/code/CardsAgainstBhayanak/.superpowers/brainstorm/4525-1777965143/state"}
+{"type":"screen-added","file":"/home/hshekhar/code/CardsAgainstBhayanak/.superpowers/brainstorm/4525-1777965143/content/architecture.html"}
+{"type":"screen-added","file":"/home/hshekhar/code/CardsAgainstBhayanak/.superpowers/brainstorm/4525-1777965143/content/architecture-v2.html"}
+{"type":"screen-added","file":"/home/hshekhar/code/CardsAgainstBhayanak/.superpowers/brainstorm/4525-1777965143/content/visual-style.html"}
+{"type":"screen-added","file":"/home/hshekhar/code/CardsAgainstBhayanak/.superpowers/brainstorm/4525-1777965143/content/visual-style-v2.html"}
+{"type":"screen-added","file":"/home/hshekhar/code/CardsAgainstBhayanak/.superpowers/brainstorm/4525-1777965143/content/screens-flow.html"}
+{"type":"screen-added","file":"/home/hshekhar/code/CardsAgainstBhayanak/.superpowers/brainstorm/4525-1777965143/content/game-screen-v2.html"}
+{"type":"screen-added","file":"/home/hshekhar/code/CardsAgainstBhayanak/.superpowers/brainstorm/4525-1777965143/content/game-screen-v3.html"}
+{"type":"screen-added","file":"/home/hshekhar/code/CardsAgainstBhayanak/.superpowers/brainstorm/4525-1777965143/content/game-screen-v4.html"}
+{"type":"screen-added","file":"/home/hshekhar/code/CardsAgainstBhayanak/.superpowers/brainstorm/4525-1777965143/content/waiting.html"}
+{"type":"screen-added","file":"/home/hshekhar/code/CardsAgainstBhayanak/.superpowers/brainstorm/4525-1777965143/content/responsive.html"}
+{"type":"screen-added","file":"/home/hshekhar/code/CardsAgainstBhayanak/.superpowers/brainstorm/4525-1777965143/content/responsive-v2.html"}
+{"type":"screen-added","file":"/home/hshekhar/code/CardsAgainstBhayanak/.superpowers/brainstorm/4525-1777965143/content/hand-scroll.html"}
+{"type":"screen-added","file":"/home/hshekhar/code/CardsAgainstBhayanak/.superpowers/brainstorm/4525-1777965143/content/submitted-wrap.html"}
+{"type":"server-stopped","reason":"idle timeout"}

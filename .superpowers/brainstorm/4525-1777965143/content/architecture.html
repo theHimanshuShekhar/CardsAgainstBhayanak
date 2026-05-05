@@ -1,0 +1,71 @@
+<h2>System Architecture</h2>
+<p class="subtitle">CardsAgainstBhayanak — Full Stack Design</p>
+
+<div class="section">
+  <span class="label">Infrastructure (Docker Compose)</span>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-top:12px">
+    <div style="background:#1a1a2e;border:1px solid #7c3aed;border-radius:8px;padding:16px;text-align:center">
+      <div style="font-size:24px;margin-bottom:8px">⚡</div>
+      <h3 style="color:#a78bfa;margin:0 0 6px">TanStack Start</h3>
+      <p style="margin:0;font-size:13px;color:#94a3b8">React SSR + API routes<br>Vinxi WebSocket handlers<br>TailwindCSS + shadcn/ui</p>
+    </div>
+    <div style="background:#1a1a2e;border:1px solid #dc2626;border-radius:8px;padding:16px;text-align:center">
+      <div style="font-size:24px;margin-bottom:8px">🔴</div>
+      <h3 style="color:#f87171;margin:0 0 6px">Redis</h3>
+      <p style="margin:0;font-size:13px;color:#94a3b8">Live game state<br>Pub/Sub for WS events<br>Player hands &amp; decks</p>
+    </div>
+    <div style="background:#1a1a2e;border:1px solid #2563eb;border-radius:8px;padding:16px;text-align:center">
+      <div style="font-size:24px;margin-bottom:8px">🐘</div>
+      <h3 style="color:#60a5fa;margin:0 0 6px">PostgreSQL</h3>
+      <p style="margin:0;font-size:13px;color:#94a3b8">Card data (73 packs)<br>Game history &amp; scores<br>Drizzle ORM</p>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <span class="label">Data Flow — One Game Round</span>
+  <div style="background:#0f172a;border-radius:8px;padding:16px;margin-top:12px;font-family:monospace;font-size:13px;line-height:2;color:#94a3b8">
+    <span style="color:#a78bfa">Player submits card</span>
+    → <span style="color:#fbbf24">POST /api/game/play</span>
+    → <span style="color:#f87171">Redis: store card in round</span>
+    → <span style="color:#34d399">Pub/Sub: broadcast "card played"</span>
+    → <span style="color:#60a5fa">WS handler pushes event to all clients</span>
+    <br>
+    <span style="color:#a78bfa">Czar picks winner</span>
+    → <span style="color:#fbbf24">POST /api/game/pick</span>
+    → <span style="color:#f87171">Redis: update scores</span>
+    → <span style="color:#60a5fa">PostgreSQL: save round result</span>
+    → <span style="color:#34d399">Pub/Sub: broadcast "round ended"</span>
+  </div>
+</div>
+
+<div class="section">
+  <span class="label">Key Modules</span>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px">
+    <div style="background:#0f172a;border-radius:6px;padding:12px">
+      <h3 style="color:#a78bfa;margin:0 0 6px;font-size:14px">🃏 Card Seeder</h3>
+      <p style="margin:0;font-size:12px;color:#94a3b8">One-time script: fetches all 73 packs from REST Against Humanity API → stores in PostgreSQL. Never hits external API at runtime.</p>
+    </div>
+    <div style="background:#0f172a;border-radius:6px;padding:12px">
+      <h3 style="color:#a78bfa;margin:0 0 6px;font-size:14px">🎮 Game Engine</h3>
+      <p style="margin:0;font-size:12px;color:#94a3b8">Server-side state machine: WAITING → DEALING → PLAYING → JUDGING → SCORING → ENDED. Lives in a shared server module.</p>
+    </div>
+    <div style="background:#0f172a;border-radius:6px;padding:12px">
+      <h3 style="color:#a78bfa;margin:0 0 6px;font-size:14px">📡 WS Hub</h3>
+      <p style="margin:0;font-size:12px;color:#94a3b8">Vinxi WebSocket route per game room. Subscribes to Redis channel for that room, pushes all events to connected clients.</p>
+    </div>
+    <div style="background:#0f172a;border-radius:6px;padding:12px">
+      <h3 style="color:#a78bfa;margin:0 0 6px;font-size:14px">🏠 Lobby</h3>
+      <p style="margin:0;font-size:12px;color:#94a3b8">Host creates room → 6-char code. Players join by code + name. Host configures packs, rounds, max players, house rules.</p>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <span class="label">House Rules Included</span>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+    <span style="background:#7c3aed22;border:1px solid #7c3aed;border-radius:20px;padding:4px 12px;font-size:12px;color:#a78bfa">🤖 Rando Cardrissian</span>
+    <span style="background:#7c3aed22;border:1px solid #7c3aed;border-radius:20px;padding:4px 12px;font-size:12px;color:#a78bfa">🎌 Happy Ending (Haiku final round)</span>
+    <span style="background:#7c3aed22;border:1px solid #7c3aed;border-radius:20px;padding:4px 12px;font-size:12px;color:#a78bfa">🔥 Packing Heat (+1 card on pick-2)</span>
+  </div>
+</div>

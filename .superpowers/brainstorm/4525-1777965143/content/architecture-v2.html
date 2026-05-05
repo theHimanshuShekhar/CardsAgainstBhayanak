@@ -1,0 +1,89 @@
+<h2>System Architecture — Updated</h2>
+<p class="subtitle">CardsAgainstBhayanak — with optional persistent profiles</p>
+
+<div class="section">
+  <span class="label">Infrastructure (Docker Compose)</span>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-top:12px">
+    <div style="background:#1a1a2e;border:1px solid #7c3aed;border-radius:8px;padding:16px;text-align:center">
+      <div style="font-size:24px;margin-bottom:8px">⚡</div>
+      <h3 style="color:#a78bfa;margin:0 0 6px">TanStack Start</h3>
+      <p style="margin:0;font-size:13px;color:#94a3b8">React SSR + API routes<br>Vinxi WebSocket handlers<br>TailwindCSS + shadcn/ui</p>
+    </div>
+    <div style="background:#1a1a2e;border:1px solid #dc2626;border-radius:8px;padding:16px;text-align:center">
+      <div style="font-size:24px;margin-bottom:8px">🔴</div>
+      <h3 style="color:#f87171;margin:0 0 6px">Redis</h3>
+      <p style="margin:0;font-size:13px;color:#94a3b8">Live game state<br>Pub/Sub for WS events<br>Player hands &amp; decks</p>
+    </div>
+    <div style="background:#1a1a2e;border:1px solid #2563eb;border-radius:8px;padding:16px;text-align:center">
+      <div style="font-size:24px;margin-bottom:8px">🐘</div>
+      <h3 style="color:#60a5fa;margin:0 0 6px">PostgreSQL</h3>
+      <p style="margin:0;font-size:13px;color:#94a3b8">Card data (73 packs)<br>User profiles + history<br>Game scores &amp; results</p>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <span class="label">Player Identity — Two Paths</span>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px">
+    <div style="background:#0f172a;border:1px dashed #475569;border-radius:8px;padding:14px">
+      <h3 style="color:#94a3b8;margin:0 0 8px;font-size:14px">👤 Guest</h3>
+      <ol style="margin:0;padding-left:18px;font-size:13px;color:#64748b;line-height:1.8">
+        <li>Enter display name</li>
+        <li>Enter room code</li>
+        <li>Play — scores tracked in-session only</li>
+      </ol>
+    </div>
+    <div style="background:#0f172a;border:1px solid #7c3aed;border-radius:8px;padding:14px">
+      <h3 style="color:#a78bfa;margin:0 0 8px;font-size:14px">🔑 Permanent Profile</h3>
+      <ol style="margin:0;padding-left:18px;font-size:13px;color:#94a3b8;line-height:1.8">
+        <li>Choose username + passphrase</li>
+        <li>JWT stored in browser</li>
+        <li>Join any game linked to profile</li>
+        <li>History + lifetime stats tracked</li>
+      </ol>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <span class="label">PostgreSQL Schema (key tables)</span>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:12px;font-family:monospace;font-size:12px">
+    <div style="background:#0f172a;border-radius:6px;padding:12px">
+      <div style="color:#f87171;margin-bottom:6px">users</div>
+      <div style="color:#94a3b8;line-height:1.8">id (uuid)<br>username (unique)<br>passphrase_hash<br>created_at</div>
+    </div>
+    <div style="background:#0f172a;border-radius:6px;padding:12px">
+      <div style="color:#f87171;margin-bottom:6px">game_sessions</div>
+      <div style="color:#94a3b8;line-height:1.8">id (uuid)<br>room_code (6-char)<br>config (json)<br>status<br>created_at</div>
+    </div>
+    <div style="background:#0f172a;border-radius:6px;padding:12px">
+      <div style="color:#f87171;margin-bottom:6px">game_players</div>
+      <div style="color:#94a3b8;line-height:1.8">id<br>session_id<br>user_id (nullable)<br>display_name<br>score<br>is_host</div>
+    </div>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:10px;font-family:monospace;font-size:12px">
+    <div style="background:#0f172a;border-radius:6px;padding:12px">
+      <div style="color:#f87171;margin-bottom:6px">packs</div>
+      <div style="color:#94a3b8;line-height:1.8">id<br>name<br>official</div>
+    </div>
+    <div style="background:#0f172a;border-radius:6px;padding:12px">
+      <div style="color:#f87171;margin-bottom:6px">black_cards</div>
+      <div style="color:#94a3b8;line-height:1.8">id<br>pack_id<br>text<br>pick (1 or 2)</div>
+    </div>
+    <div style="background:#0f172a;border-radius:6px;padding:12px">
+      <div style="color:#f87171;margin-bottom:6px">white_cards</div>
+      <div style="color:#94a3b8;line-height:1.8">id<br>pack_id<br>text</div>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <span class="label">User Stats Tracked</span>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+    <span style="background:#1e293b;border:1px solid #334155;border-radius:20px;padding:4px 12px;font-size:12px;color:#94a3b8">Games played</span>
+    <span style="background:#1e293b;border:1px solid #334155;border-radius:20px;padding:4px 12px;font-size:12px;color:#94a3b8">Games won</span>
+    <span style="background:#1e293b;border:1px solid #334155;border-radius:20px;padding:4px 12px;font-size:12px;color:#94a3b8">Total Awesome Points</span>
+    <span style="background:#1e293b;border:1px solid #334155;border-radius:20px;padding:4px 12px;font-size:12px;color:#94a3b8">Best single-game score</span>
+    <span style="background:#1e293b;border:1px solid #334155;border-radius:20px;padding:4px 12px;font-size:12px;color:#94a3b8">Game history (last 50)</span>
+  </div>
+</div>

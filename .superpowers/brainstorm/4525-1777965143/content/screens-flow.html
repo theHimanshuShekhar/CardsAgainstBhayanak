@@ -1,0 +1,243 @@
+<h2>Screen Flow</h2>
+<p class="subtitle">All screens — click through to review the full journey</p>
+
+<style>
+  .screen-label { font-size:10px;letter-spacing:2px;text-transform:uppercase;color:#a78bfa;margin-bottom:8px;font-weight:700 }
+  .screen { background:linear-gradient(135deg,#1a0533 0%,#0d1a33 100%);border-radius:12px;padding:20px;border:1px solid #7c3aed44;margin-bottom:28px }
+  .logo { font-family:sans-serif;font-weight:900;font-size:16px;background:linear-gradient(90deg,#f97316,#ec4899,#a855f7);-webkit-background-clip:text;-webkit-text-fill-color:transparent;letter-spacing:-0.5px }
+  .btn-primary { background:linear-gradient(90deg,#a855f7,#ec4899);border-radius:8px;padding:10px 20px;font-size:13px;color:#fff;font-weight:700;border:none;display:inline-block;text-align:center }
+  .btn-outline { background:transparent;border:1px solid #7c3aed;border-radius:8px;padding:10px 20px;font-size:13px;color:#a78bfa;font-weight:600;display:inline-block;text-align:center }
+  .btn-ghost { background:transparent;border:1px solid #334155;border-radius:8px;padding:10px 20px;font-size:13px;color:#64748b;font-weight:600;display:inline-block;text-align:center }
+  .input { background:#0d0d1a;border:1px solid #334155;border-radius:6px;padding:9px 12px;font-size:13px;color:#e2e8f0;width:100%;box-sizing:border-box }
+  .input:focus { border-color:#a855f7 }
+  .input-label { font-size:11px;color:#64748b;margin-bottom:4px;display:block }
+  .badge-czar { background:linear-gradient(90deg,#f97316,#ec4899);border-radius:20px;padding:2px 8px;font-size:9px;color:#fff;font-weight:700 }
+  .player-row { display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:6px }
+  .black-card { background:#000;border-radius:10px;padding:18px 20px;display:flex;flex-direction:column;justify-content:space-between;min-height:120px;box-shadow:0 8px 32px rgba(0,0,0,0.7) }
+  .white-card { background:#fff;border-radius:8px;padding:12px 14px;min-height:80px;display:flex;flex-direction:column;justify-content:space-between }
+  .divider { border:none;border-top:1px solid #1e293b;margin:20px 0 }
+</style>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- SCREEN 1: HOME -->
+<!-- ═══════════════════════════════════════════════════════ -->
+<div class="screen-label">Screen 1 — Home</div>
+<div class="screen">
+  <div style="text-align:center;padding:20px 0 28px">
+    <div style="font-family:sans-serif;font-weight:900;font-size:32px;background:linear-gradient(90deg,#f97316,#ec4899,#a855f7);-webkit-background-clip:text;-webkit-text-fill-color:transparent;line-height:1.1;margin-bottom:6px">
+      Cards Against<br>Bhayanak
+    </div>
+    <div style="font-size:11px;color:#7c3aed;letter-spacing:3px;text-transform:uppercase;margin-bottom:32px">A party game for horrible people</div>
+
+    <div style="display:flex;flex-direction:column;gap:12px;max-width:260px;margin:0 auto">
+      <div class="btn-primary" style="font-size:15px;padding:13px">🎮 Create Game</div>
+      <div class="btn-outline" style="font-size:15px;padding:13px">🚪 Join Game</div>
+      <div class="btn-ghost" style="font-size:15px;padding:13px">🔑 Sign In / Register</div>
+    </div>
+
+    <div style="margin-top:20px;font-size:11px;color:#334155">Signed in as <span style="color:#a78bfa">@shreya</span> · <span style="color:#475569;cursor:pointer">Sign out</span></div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- SCREEN 2: SIGN IN / REGISTER -->
+<!-- ═══════════════════════════════════════════════════════ -->
+<div class="screen-label">Screen 2 — Sign In / Register</div>
+<div class="screen">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:20px">
+    <span style="color:#475569;font-size:13px;cursor:pointer">← Back</span>
+    <div class="logo">CardsAgainstBhayanak</div>
+  </div>
+
+  <div style="max-width:300px;margin:0 auto">
+    <!-- Tab toggle -->
+    <div style="display:flex;background:#0d0d1a;border-radius:8px;padding:3px;margin-bottom:20px">
+      <div style="flex:1;text-align:center;padding:7px;border-radius:6px;background:linear-gradient(90deg,#a855f7,#ec4899);font-size:12px;font-weight:700;color:#fff">Sign In</div>
+      <div style="flex:1;text-align:center;padding:7px;font-size:12px;color:#64748b;cursor:pointer">Register</div>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:14px">
+      <div>
+        <span class="input-label">Username</span>
+        <div class="input" style="color:#64748b">shreya_99</div>
+      </div>
+      <div>
+        <span class="input-label">Passphrase</span>
+        <div class="input" style="color:#334155;letter-spacing:4px">••••••••</div>
+      </div>
+      <div class="btn-primary" style="text-align:center;padding:12px">Sign In</div>
+    </div>
+
+    <div style="text-align:center;margin-top:14px;font-size:11px;color:#475569">No account yet? Switch to Register above</div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- SCREEN 3: CREATE GAME -->
+<!-- ═══════════════════════════════════════════════════════ -->
+<div class="screen-label">Screen 3 — Create Game</div>
+<div class="screen">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:20px">
+    <span style="color:#475569;font-size:13px;cursor:pointer">← Back</span>
+    <div class="logo">CardsAgainstBhayanak</div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+    <div>
+      <span class="input-label">Number of rounds</span>
+      <div class="input">8</div>
+    </div>
+    <div>
+      <span class="input-label">Max players</span>
+      <div class="input">10</div>
+    </div>
+  </div>
+
+  <div style="margin-top:14px">
+    <span class="input-label">Card packs <span style="color:#a78bfa">(6 selected)</span></span>
+    <div style="background:#0d0d1a;border:1px solid #334155;border-radius:6px;padding:10px;max-height:110px;overflow-y:auto;margin-top:4px">
+      <div style="display:flex;flex-wrap:wrap;gap:6px">
+        <span style="background:#7c3aed33;border:1px solid #7c3aed;border-radius:20px;padding:3px 10px;font-size:11px;color:#a78bfa">✓ CAH Base Set</span>
+        <span style="background:#7c3aed33;border:1px solid #7c3aed;border-radius:20px;padding:3px 10px;font-size:11px;color:#a78bfa">✓ First Expansion</span>
+        <span style="background:#7c3aed33;border:1px solid #7c3aed;border-radius:20px;padding:3px 10px;font-size:11px;color:#a78bfa">✓ Science Pack</span>
+        <span style="background:#0d0d1a;border:1px solid #334155;border-radius:20px;padding:3px 10px;font-size:11px;color:#475569">Pride Pack</span>
+        <span style="background:#0d0d1a;border:1px solid #334155;border-radius:20px;padding:3px 10px;font-size:11px;color:#475569">Geek Pack</span>
+        <span style="background:#0d0d1a;border:1px solid #334155;border-radius:20px;padding:3px 10px;font-size:11px;color:#475569">Fantasy Pack</span>
+        <span style="background:#0d0d1a;border:1px solid #334155;border-radius:20px;padding:3px 10px;font-size:11px;color:#475569">90s Pack</span>
+        <span style="background:#7c3aed33;border:1px solid #7c3aed;border-radius:20px;padding:3px 10px;font-size:11px;color:#a78bfa">✓ Weed Pack</span>
+        <span style="background:#7c3aed33;border:1px solid #7c3aed;border-radius:20px;padding:3px 10px;font-size:11px;color:#a78bfa">✓ Red Box</span>
+        <span style="background:#7c3aed33;border:1px solid #7c3aed;border-radius:20px;padding:3px 10px;font-size:11px;color:#a78bfa">✓ Blue Box</span>
+      </div>
+    </div>
+  </div>
+
+  <div style="margin-top:14px">
+    <span class="input-label">House rules</span>
+    <div style="display:flex;flex-direction:column;gap:8px;margin-top:6px">
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+        <div style="width:16px;height:16px;background:linear-gradient(90deg,#a855f7,#ec4899);border-radius:4px;flex-shrink:0;display:flex;align-items:center;justify-content:center">
+          <span style="color:#fff;font-size:10px">✓</span>
+        </div>
+        <span style="font-size:12px;color:#e2e8f0">🤖 Rando Cardrissian</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+        <div style="width:16px;height:16px;background:linear-gradient(90deg,#a855f7,#ec4899);border-radius:4px;flex-shrink:0;display:flex;align-items:center;justify-content:center">
+          <span style="color:#fff;font-size:10px">✓</span>
+        </div>
+        <span style="font-size:12px;color:#e2e8f0">🎌 Happy Ending (Haiku final round)</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+        <div style="width:16px;height:16px;background:#1e293b;border:1px solid #334155;border-radius:4px;flex-shrink:0"></div>
+        <span style="font-size:12px;color:#64748b">🔥 Packing Heat</span>
+      </label>
+    </div>
+  </div>
+
+  <div style="margin-top:20px">
+    <div class="btn-primary" style="text-align:center;padding:12px;font-size:14px">Create Game Session</div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- SCREEN 4: JOIN GAME -->
+<!-- ═══════════════════════════════════════════════════════ -->
+<div class="screen-label">Screen 4 — Join Game</div>
+<div class="screen">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:24px">
+    <span style="color:#475569;font-size:13px;cursor:pointer">← Back</span>
+    <div class="logo">CardsAgainstBhayanak</div>
+  </div>
+
+  <div style="max-width:300px;margin:0 auto;display:flex;flex-direction:column;gap:16px">
+    <div>
+      <span class="input-label">Your name <span style="color:#7c3aed">(from your profile)</span></span>
+      <div class="input" style="color:#e2e8f0">shreya_99</div>
+    </div>
+    <div>
+      <span class="input-label">Room code</span>
+      <div class="input" style="letter-spacing:6px;font-size:18px;font-weight:700;color:#a78bfa;text-align:center">BHY4NK</div>
+    </div>
+    <div class="btn-primary" style="text-align:center;padding:12px;font-size:14px">Join Game</div>
+    <div style="text-align:center;font-size:11px;color:#334155">Playing as guest? <span style="color:#a78bfa">Clear name to edit</span></div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════ -->
+<!-- SCREEN 5: GAME SESSION -->
+<!-- ═══════════════════════════════════════════════════════ -->
+<div class="screen-label">Screen 5 — Game Session</div>
+<div class="screen" style="padding:14px">
+
+  <!-- Top bar -->
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+    <div class="logo" style="font-size:13px">CardsAgainstBhayanak</div>
+    <div style="font-size:11px;color:#64748b">Round <span style="color:#a78bfa;font-weight:700">3</span> / 8 &nbsp;·&nbsp; Room <span style="color:#a78bfa;font-weight:700">BHY4NK</span></div>
+  </div>
+
+  <!-- Player list -->
+  <div style="background:#0d0d1a;border-radius:8px;padding:8px;margin-bottom:14px">
+    <div class="player-row" style="background:rgba(249,115,22,0.1);border:1px solid #f9731633">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:13px;font-weight:700;color:#fed7aa">Arjun</span>
+        <span class="badge-czar">CARD CZAR</span>
+      </div>
+      <span style="font-weight:700;color:#f97316">4 ★</span>
+    </div>
+    <div class="player-row">
+      <span style="font-size:13px;color:#e2e8f0">shreya_99 <span style="font-size:10px;color:#34d399">✓ played</span></span>
+      <span style="font-weight:700;color:#a78bfa">3 ★</span>
+    </div>
+    <div class="player-row">
+      <span style="font-size:13px;color:#e2e8f0">Dev</span>
+      <span style="font-weight:700;color:#a78bfa">2 ★</span>
+    </div>
+    <div class="player-row">
+      <span style="font-size:13px;color:#94a3b8">🤖 Rando <span style="font-size:10px;color:#34d399">✓ played</span></span>
+      <span style="font-weight:700;color:#64748b">1 ★</span>
+    </div>
+  </div>
+
+  <!-- Black question card -->
+  <div class="black-card" style="margin-bottom:14px">
+    <div style="font-family:sans-serif;font-size:16px;font-weight:700;color:#fff;line-height:1.5">
+      What's that smell?
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:flex-end;margin-top:16px">
+      <div style="font-size:9px;color:#ffffff66;font-weight:700;letter-spacing:1px">CARDS AGAINST BHAYANAK</div>
+      <div style="font-size:9px;color:#ffffff66">PICK 1</div>
+    </div>
+  </div>
+
+  <!-- Submitted white cards (revealed after all played) -->
+  <div style="margin-bottom:10px">
+    <div style="font-size:10px;color:#64748b;letter-spacing:1px;margin-bottom:8px;text-transform:uppercase">Submitted answers — Czar picks the winner</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div class="white-card" style="cursor:pointer;transition:transform 0.1s">
+        <div style="font-size:13px;font-weight:700;color:#000;line-height:1.4">Barack Obama's birth certificate.</div>
+        <div style="font-size:9px;color:#00000055;font-weight:700;letter-spacing:1px;margin-top:10px">CARDS AGAINST BHAYANAK</div>
+      </div>
+      <div class="white-card" style="cursor:pointer;box-shadow:0 0 0 2px #a855f7,0 8px 24px rgba(168,85,247,0.3)">
+        <div style="font-size:13px;font-weight:700;color:#000;line-height:1.4">Elderly Japanese men.</div>
+        <div style="font-size:9px;color:#00000055;font-weight:700;letter-spacing:1px;margin-top:10px">CARDS AGAINST BHAYANAK</div>
+      </div>
+      <div class="white-card" style="cursor:pointer">
+        <div style="font-size:13px;font-weight:700;color:#000;line-height:1.4">Soup that is too hot.</div>
+        <div style="font-size:9px;color:#00000055;font-weight:700;letter-spacing:1px;margin-top:10px">CARDS AGAINST BHAYANAK</div>
+      </div>
+      <div class="white-card" style="background:#f1f5f9;border:1px dashed #94a3b8">
+        <div style="font-size:12px;color:#94a3b8;line-height:1.4;font-style:italic">Dev hasn't played yet…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Player's own hand (below the fold hint) -->
+  <div style="border-top:1px solid #1e293b;padding-top:10px;margin-top:4px">
+    <div style="font-size:10px;color:#64748b;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px">Your hand</div>
+    <div style="display:flex;gap:8px;overflow-x:auto;padding-bottom:4px">
+      <div style="background:#fff;border-radius:6px;padding:10px;min-width:100px;flex-shrink:0;font-size:11px;font-weight:700;color:#000;line-height:1.3;opacity:0.5">A disappointing birthday party.</div>
+      <div style="background:#fff;border-radius:6px;padding:10px;min-width:100px;flex-shrink:0;font-size:11px;font-weight:700;color:#000;line-height:1.3;opacity:0.5">Genghis Khan.</div>
+      <div style="background:#fff;border-radius:6px;padding:10px;min-width:100px;flex-shrink:0;font-size:11px;font-weight:700;color:#000;line-height:1.3;border:2px solid #34d399">Already played ✓</div>
+    </div>
+  </div>
+
+</div>
