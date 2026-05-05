@@ -9,7 +9,10 @@
     "dev": "vite dev --port 3000",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "seed": "tsx scripts/seed-cards.ts",
+    "db:push": "drizzle-kit push"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.1.18",
