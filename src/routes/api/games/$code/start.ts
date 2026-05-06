@@ -1,4 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { z } from "zod";
 import { eq } from "drizzle-orm";
 import { db } from "../../../../db/client";
 import { gameSessions } from "../../../../db/schema";
@@ -24,11 +25,19 @@ export const Route = createFileRoute("/api/games/$code/start")({
           return Response.json({ error: "Game already started" }, { status: 409 });
         }
 
+        const StartBody = z.object({ playerId: z.string() });
         const body = await request.json().catch(() => ({}));
-        const { playerId } = body as { playerId?: string };
+        const parsed = StartBody.safeParse(body);
+        if (!parsed.success) {
+          return Response.json(
+            { error: parsed.error.issues[0].message },
+            { status: 400 }
+          );
+        }
+        const { playerId } = parsed.data;
 
         const players = await getGamePlayers(roomCode);
-        const requestor = playerId ? players[playerId] : null;
+        const requestor = players[playerId] ?? null;
         if (!requestor?.isHost) {
           return Response.json(
             { error: "Only the host can start the game" },

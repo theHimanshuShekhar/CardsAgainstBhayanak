@@ -1,11 +1,12 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState, useEffect } from "react";
+import { z } from "zod";
 import { useGameSocket } from "../../../hooks/useGameSocket";
 
+const LobbySearch = z.object({ playerId: z.string().optional().default("") });
+
 export const Route = createFileRoute("/games/$code/lobby")({
-  validateSearch: (s: Record<string, unknown>) => ({
-    playerId: String(s.playerId ?? ""),
-  }),
+  validateSearch: LobbySearch.parse,
   component: LobbyScreen,
 });
 
