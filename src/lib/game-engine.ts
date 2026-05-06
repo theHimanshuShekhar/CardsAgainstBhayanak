@@ -230,9 +230,16 @@ export async function submitCards(
   const allPlayed = nonCzarPlayers.every(([id]) => submissions[id]);
 
   if (allPlayed) {
+    const allCardIds = Object.values(submissions).flat().map(Number);
+    const cardRows = await db
+      .select({ id: whiteCards.id, text: whiteCards.text })
+      .from(whiteCards)
+      .where(inArray(whiteCards.id, allCardIds));
+    const textMap = Object.fromEntries(cardRows.map((c) => [c.id, c.text]));
+
     const anonymized = Object.entries(submissions).map(([, cards], idx) => ({
       submissionId: `sub_${idx}`,
-      cards: cards.map(Number),
+      cards: cards.map((id) => ({ id: Number(id), text: textMap[Number(id)] ?? "" })),
     }));
     await publishEvent(roomCode, "all:played", { submissions: anonymized });
   }

@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { newRedisSubscriber } from "../../../../lib/redis";
-import { getGameStatus } from "../../../../lib/game-state";
+import { getGameStatus, getFullGameState } from "../../../../lib/game-state";
 
 export const Route = createFileRoute("/api/games/$code/events")({
   server: {
@@ -34,6 +34,10 @@ export const Route = createFileRoute("/api/games/$code/events")({
                 clearInterval(ping);
               }
             }, 25000);
+
+            // Send initial state so the client can hydrate without waiting
+            const snapshot = await getFullGameState(roomCode);
+            send(JSON.stringify({ event: "game:snapshot", payload: snapshot }));
 
             subscriber = newRedisSubscriber();
             await subscriber.subscribe(`game:${roomCode}:channel`);

@@ -1,12 +1,10 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useAuth } from "../../contexts/AuthContext";
 
 export const Route = createFileRoute("/games/create")({
   component: CreateGameScreen,
 });
-
-const DEFAULT_PACK_IDS = [1];
 
 function CreateGameScreen() {
   const { user, token } = useAuth();
@@ -19,6 +17,27 @@ function CreateGameScreen() {
   const [packingHeat, setPackingHeat] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [packList, setPackList] = useState<Array<{ id: number; name: string }>>([]);
+  const [selectedPackIds, setSelectedPackIds] = useState<Set<number>>(new Set([1]));
+
+  useEffect(() => {
+    fetch("/api/packs")
+      .then((r) => r.json())
+      .then((data: Array<{ id: number; name: string }>) => {
+        setPackList(data);
+        if (data.length > 0) setSelectedPackIds(new Set([data[0].id]));
+      })
+      .catch(() => {});
+  }, []);
+
+  function togglePack(id: number) {
+    setSelectedPackIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
@@ -35,7 +54,7 @@ function CreateGameScreen() {
           displayName,
           totalRounds,
           maxPlayers,
-          packIds: DEFAULT_PACK_IDS,
+          packIds: Array.from(selectedPackIds),
           houseRules: { randoCardrissian, happyEnding, packingHeat },
         }),
       });
@@ -121,6 +140,43 @@ function CreateGameScreen() {
               </label>
             ))}
           </div>
+
+          {packList.length > 0 && (
+            <div>
+              <label className={labelCls}>Card packs ({selectedPackIds.size} selected)</label>
+              <div style={{
+                display: "flex",
+                flexWrap: "wrap",
+                gap: 6,
+                maxHeight: 160,
+                overflowY: "auto",
+                paddingRight: 4,
+                scrollbarWidth: "thin",
+                scrollbarColor: "#4c1d95 transparent",
+              } as React.CSSProperties}>
+                {packList.map((pack) => (
+                  <button
+                    type="button"
+                    key={pack.id}
+                    onClick={() => togglePack(pack.id)}
+                    style={{
+                      padding: "4px 10px",
+                      borderRadius: 999,
+                      fontSize: 11,
+                      fontWeight: 600,
+                      cursor: "pointer",
+                      background: selectedPackIds.has(pack.id) ? "rgba(168,85,247,0.25)" : "#1e293b",
+                      border: selectedPackIds.has(pack.id) ? "1px solid #a855f7" : "1px solid #334155",
+                      color: selectedPackIds.has(pack.id) ? "#d8b4fe" : "#64748b",
+                      transition: "all 0.1s",
+                    }}
+                  >
+                    {pack.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           {error && <p className="text-red-400 text-sm text-center">{error}</p>}
 
