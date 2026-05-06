@@ -24,7 +24,7 @@ function RootDocument({ children }: { children: React.ReactNode }) {
       <head>
         <HeadContent />
       </head>
-      <body style={{ margin: 0, background: '#0d1a33' }}>
+      <body className="m-0 bg-[#0d1a33] text-white antialiased">
         <AuthProvider>
           <Header />
           {children}

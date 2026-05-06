@@ -23,15 +23,15 @@ export function SubmittedAnswers({
 }: SubmittedAnswersProps) {
   return (
     <div>
-      <p style={{ fontSize: 10, color: "#475569", textTransform: "uppercase", letterSpacing: 2, marginBottom: 8 }}>
+      <p className="text-[10px] text-slate-600 uppercase tracking-[2px] mb-2">
         {isCzar ? "Pick the winner" : "Submitted answers"}
       </p>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 8 }}>
+      <div className="grid gap-2 [grid-template-columns:repeat(auto-fill,minmax(140px,1fr))]">
         {submissions.map((sub) => {
           const isWinner = sub.submissionId === winningSubmissionId;
           return (
-            <div key={sub.submissionId} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <div key={sub.submissionId} className="flex flex-col gap-1">
               {sub.cards.map((card, i) => (
                 <CahCard
                   key={`${sub.submissionId}-${i}`}
@@ -39,14 +39,12 @@ export function SubmittedAnswers({
                   text={card.text}
                   size="full"
                   selected={isCzar && !winningSubmissionId}
+                  winner={isWinner}
                   onClick={isCzar && !winningSubmissionId ? () => onPick?.(sub.submissionId) : undefined}
-                  style={isWinner ? {
-                    boxShadow: "0 0 0 2.5px #facc15, 0 0 20px rgba(250,204,21,0.4)",
-                  } : undefined}
                 />
               ))}
               {isWinner && sub.playerName && (
-                <p style={{ textAlign: "center", color: "#facc15", fontSize: 12, fontWeight: 700 }}>
+                <p className="text-center text-yellow-400 text-xs font-bold">
                   {sub.playerName} 🏆
                 </p>
               )}

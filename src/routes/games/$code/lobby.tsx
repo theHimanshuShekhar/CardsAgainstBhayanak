@@ -84,47 +84,34 @@ function LobbyScreen() {
   }
 
   return (
-    <div
-      className="min-h-screen flex items-center justify-center px-4"
-      style={{ background: "linear-gradient(135deg, #1a0533 0%, #0d1a33 100%)" }}
-    >
+    <div className="min-h-[calc(100vh-3rem)] flex items-center justify-center px-4 bg-gradient-to-br from-[#1a0533] to-[#0d1a33]">
       <div className="w-full max-w-md">
         <div className="text-center mb-8">
-          <p className="text-slate-400 text-xs uppercase tracking-widest mb-1">Room code</p>
-          <p
-            className="font-black text-5xl tracking-widest"
-            style={{
-              background: "linear-gradient(90deg, #f97316, #ec4899, #a855f7)",
-              WebkitBackgroundClip: "text",
-              WebkitTextFillColor: "transparent",
-            }}
-          >
+          <p className="text-slate-400 text-[10px] uppercase tracking-widest mb-1">Room code</p>
+          <p className="font-black text-5xl tracking-widest bg-gradient-to-r from-orange-500 via-pink-500 to-purple-500 bg-clip-text text-transparent">
             {code}
           </p>
         </div>
 
         <div className="bg-[#0d0d1a] border border-purple-900/30 rounded-2xl p-6 mb-4">
-          <p className="text-xs text-slate-500 uppercase tracking-widest mb-3">
+          <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-3">
             Players ({activePlayers.length})
           </p>
           <ul className="flex flex-col gap-2">
             {activePlayers.map((p) => (
               <li
                 key={p.id}
-                className="flex items-center justify-between py-2 px-3 rounded-lg bg-[#1e293b]"
+                className="flex items-center justify-between py-2 px-3 rounded-lg bg-slate-800"
               >
                 <span className="text-sm font-semibold text-white">{p.name}</span>
                 <span className="flex gap-1.5 items-center">
                   {p.isHost && (
-                    <span
-                      className="text-xs font-bold px-2 py-0.5 rounded-full text-white"
-                      style={{ background: "linear-gradient(90deg,#f97316,#ec4899)" }}
-                    >
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full text-white bg-gradient-to-r from-orange-500 to-pink-500">
                       HOST
                     </span>
                   )}
                   {p.id === playerId && (
-                    <span className="text-xs font-bold text-purple-400">You</span>
+                    <span className="text-[10px] font-bold text-purple-400">You</span>
                   )}
                 </span>
               </li>
@@ -133,7 +120,7 @@ function LobbyScreen() {
 
           {spectators.length > 0 && (
             <>
-              <p className="text-xs text-slate-500 uppercase tracking-widest mt-4 mb-2">
+              <p className="text-[10px] text-slate-500 uppercase tracking-widest mt-4 mb-2">
                 Watching ({spectators.length})
               </p>
               <ul className="flex flex-col gap-1">
@@ -153,8 +140,7 @@ function LobbyScreen() {
           <button
             onClick={handleStart}
             disabled={loading || activePlayers.length < 3}
-            className="w-full py-3 rounded-xl font-bold text-white text-sm disabled:opacity-40"
-            style={{ background: "linear-gradient(90deg, #7c3aed, #ec4899)" }}
+            className="w-full py-3 rounded-xl font-bold text-white text-sm disabled:opacity-40 bg-gradient-to-r from-violet-700 to-pink-500 border-0 cursor-pointer"
           >
             {loading ? "Starting…" : `Start Game (${activePlayers.length}/3 min)`}
           </button>

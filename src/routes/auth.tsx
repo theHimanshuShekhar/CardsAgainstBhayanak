@@ -39,32 +39,33 @@ function AuthScreen() {
     }
   }
 
-  return (
-    <main className="flex min-h-[calc(100vh-8rem)] items-center justify-center px-4">
-      <div className="w-full max-w-sm">
-        <h1 className="mb-6 text-center text-2xl font-bold text-[var(--sea-ink)]">
-          Cards Against Bhayanak
-        </h1>
+  const inputCls =
+    "w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-2.5 text-sm text-white outline-none focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20";
 
-        <div className="mb-6 flex rounded-full border border-[rgba(50,143,151,0.3)] bg-[rgba(79,184,178,0.08)] p-1">
+  return (
+    <main className="flex min-h-[calc(100vh-3rem)] items-center justify-center px-4">
+      <div className="w-full max-w-sm">
+
+        <div className="flex bg-slate-800 rounded-full p-1 mb-6">
           {(["login", "register"] as const).map((t) => (
             <button
               key={t}
               onClick={() => { setTab(t); setError(null); }}
-              className={`flex-1 rounded-full py-2 text-sm font-semibold transition ${
+              className={[
+                "flex-1 rounded-full py-2 text-sm font-semibold transition-colors cursor-pointer border-0",
                 tab === t
-                  ? "bg-[var(--lagoon-deep)] text-white shadow"
-                  : "text-[var(--sea-ink-soft)] hover:text-[var(--sea-ink)]"
-              }`}
+                  ? "bg-gradient-to-r from-violet-700 to-pink-500 text-white"
+                  : "text-slate-400 hover:text-white bg-transparent",
+              ].join(" ")}
             >
               {t === "login" ? "Sign In" : "Register"}
             </button>
           ))}
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
+        <form onSubmit={handleSubmit} className="flex flex-col gap-4">
           <div>
-            <label className="mb-1 block text-sm font-medium text-[var(--sea-ink)]">
+            <label className="block text-[10px] text-slate-500 uppercase tracking-widest mb-1">
               Username
             </label>
             <input
@@ -75,13 +76,13 @@ function AuthScreen() {
               minLength={1}
               maxLength={32}
               autoComplete="username"
-              className="w-full rounded-xl border border-[rgba(50,143,151,0.3)] bg-white/60 px-4 py-2.5 text-sm text-[var(--sea-ink)] outline-none focus:border-[var(--lagoon-deep)] focus:ring-2 focus:ring-[rgba(79,184,178,0.3)]"
+              className={inputCls}
               placeholder="your_handle"
             />
           </div>
 
           <div>
-            <label className="mb-1 block text-sm font-medium text-[var(--sea-ink)]">
+            <label className="block text-[10px] text-slate-500 uppercase tracking-widest mb-1">
               Passphrase
             </label>
             <input
@@ -91,13 +92,13 @@ function AuthScreen() {
               required
               minLength={6}
               autoComplete={tab === "login" ? "current-password" : "new-password"}
-              className="w-full rounded-xl border border-[rgba(50,143,151,0.3)] bg-white/60 px-4 py-2.5 text-sm text-[var(--sea-ink)] outline-none focus:border-[var(--lagoon-deep)] focus:ring-2 focus:ring-[rgba(79,184,178,0.3)]"
+              className={inputCls}
               placeholder="correct horse battery staple"
             />
           </div>
 
           {error && (
-            <p className="rounded-xl bg-red-50 px-4 py-2.5 text-sm text-red-600">
+            <p className="rounded-xl bg-red-950/50 border border-red-900/50 px-4 py-2.5 text-sm text-red-400">
               {error}
             </p>
           )}
@@ -105,11 +106,12 @@ function AuthScreen() {
           <button
             type="submit"
             disabled={loading}
-            className="w-full rounded-full bg-[var(--lagoon-deep)] py-2.5 text-sm font-semibold text-white transition hover:-translate-y-0.5 disabled:opacity-60"
+            className="py-2.5 rounded-xl font-bold text-white text-sm bg-gradient-to-r from-violet-700 to-pink-500 disabled:opacity-50 cursor-pointer border-0"
           >
             {loading ? "Please wait…" : tab === "login" ? "Sign In" : "Create Account"}
           </button>
         </form>
+
       </div>
     </main>
   );

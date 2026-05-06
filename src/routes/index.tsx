@@ -7,62 +7,68 @@ function Home() {
   const { user, logout } = useAuth();
 
   return (
-    <main className="page-wrap px-4 pb-8 pt-14">
-      <section className="island-shell rise-in relative overflow-hidden rounded-[2rem] px-6 py-10 sm:px-10 sm:py-14">
-        <div className="pointer-events-none absolute -left-20 -top-24 h-56 w-56 rounded-full bg-[radial-gradient(circle,rgba(79,184,178,0.32),transparent_66%)]" />
-        <div className="pointer-events-none absolute -bottom-20 -right-20 h-56 w-56 rounded-full bg-[radial-gradient(circle,rgba(47,106,74,0.18),transparent_66%)]" />
+    <main className="flex min-h-[calc(100vh-3rem)] items-center justify-center px-4 py-12">
+      <div className="w-full max-w-sm flex flex-col gap-8 text-center">
 
-        <p className="island-kicker mb-3">Cards Against Bhayanak</p>
+        <div>
+          <h1 className="text-5xl font-black bg-gradient-to-r from-orange-500 via-pink-500 to-purple-500 bg-clip-text text-transparent leading-tight mb-3">
+            Cards Against<br />Bhayanak
+          </h1>
+          <p className="text-slate-500 text-sm">
+            A party game for horrible people with good Wi-Fi.
+          </p>
+        </div>
 
-        {user ? (
-          <>
-            <h1 className="display-title mb-4 text-4xl font-bold tracking-tight text-[var(--sea-ink)] sm:text-5xl">
-              Welcome back, {user.username}
-            </h1>
-            <p className="mb-8 max-w-xl text-base text-[var(--sea-ink-soft)] sm:text-lg">
-              Ready to be terrible? Create a new game or join one with a room code.
-            </p>
-            <div className="flex flex-wrap gap-3">
+        <div className="flex flex-col gap-3">
+          {user ? (
+            <>
+              <p className="text-slate-600 text-[10px] uppercase tracking-widest">
+                Signed in as {user.username}
+              </p>
               <Link
                 to="/games/create"
-                className="rounded-full bg-[var(--lagoon-deep)] px-6 py-2.5 text-sm font-semibold text-white no-underline transition hover:-translate-y-0.5"
+                className="block py-3 rounded-xl font-bold text-white text-sm bg-gradient-to-r from-violet-700 to-pink-500 no-underline"
               >
                 Create Game
               </Link>
               <Link
                 to="/games/join"
-                className="rounded-full border border-[rgba(50,143,151,0.3)] bg-[rgba(79,184,178,0.14)] px-6 py-2.5 text-sm font-semibold text-[var(--lagoon-deep)] no-underline transition hover:-translate-y-0.5 hover:bg-[rgba(79,184,178,0.24)]"
+                className="block py-3 rounded-xl font-bold text-sm text-violet-400 border border-violet-900/40 no-underline hover:bg-violet-900/20"
               >
                 Join Game
               </Link>
               <button
                 onClick={logout}
-                className="rounded-full border border-[rgba(23,58,64,0.2)] bg-white/50 px-6 py-2.5 text-sm font-semibold text-[var(--sea-ink)] transition hover:-translate-y-0.5"
+                className="text-[11px] text-slate-700 hover:text-slate-500 bg-transparent border-0 cursor-pointer"
               >
                 Sign Out
               </button>
-            </div>
-          </>
-        ) : (
-          <>
-            <h1 className="display-title mb-4 text-4xl font-bold tracking-tight text-[var(--sea-ink)] sm:text-5xl">
-              Horrible cards. Hilarious people.
-            </h1>
-            <p className="mb-8 max-w-xl text-base text-[var(--sea-ink-soft)] sm:text-lg">
-              A real-time multiplayer card game for people with questionable taste.
-              Sign in or create an account to start playing.
-            </p>
-            <div className="flex flex-wrap gap-3">
-              <a
-                href="/auth"
-                className="rounded-full bg-[var(--lagoon-deep)] px-6 py-2.5 text-sm font-semibold text-white no-underline transition hover:-translate-y-0.5"
+            </>
+          ) : (
+            <>
+              <Link
+                to="/games/create"
+                className="block py-3 rounded-xl font-bold text-white text-sm bg-gradient-to-r from-violet-700 to-pink-500 no-underline"
+              >
+                Create Game
+              </Link>
+              <Link
+                to="/games/join"
+                className="block py-3 rounded-xl font-bold text-sm text-violet-400 border border-violet-900/40 no-underline hover:bg-violet-900/20"
+              >
+                Join Game
+              </Link>
+              <Link
+                to="/auth"
+                className="block py-2 text-[11px] text-slate-700 no-underline hover:text-slate-500"
               >
                 Sign In / Register
-              </a>
-            </div>
-          </>
-        )}
-      </section>
+              </Link>
+            </>
+          )}
+        </div>
+
+      </div>
     </main>
   );
 }

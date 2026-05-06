@@ -48,104 +48,56 @@ function EndScreen() {
   const winner = finalScores[0];
 
   return (
-    <div style={{
-      minHeight: "100vh",
-      display: "flex",
-      flexDirection: "column",
-      alignItems: "center",
-      justifyContent: "center",
-      padding: 16,
-      gap: 32,
-      background: "linear-gradient(135deg, #1a0533 0%, #0d1a33 100%)",
-      fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif",
-    }}>
-      <h1 style={{
-        fontWeight: 900,
-        fontSize: 32,
-        textAlign: "center",
-        background: "linear-gradient(90deg, #f97316, #ec4899, #a855f7)",
-        WebkitBackgroundClip: "text",
-        WebkitTextFillColor: "transparent",
-      }}>
+    <div className="min-h-[calc(100vh-3rem)] flex flex-col items-center justify-center px-4 gap-8 bg-gradient-to-br from-[#1a0533] to-[#0d1a33]">
+
+      <h1 className="font-black text-4xl text-center bg-gradient-to-r from-orange-500 via-pink-500 to-purple-500 bg-clip-text text-transparent">
         Game Over
       </h1>
 
       {winner && (
-        <div style={{ textAlign: "center" }}>
-          <p style={{ color: "#facc15", fontSize: 20, fontWeight: 900 }}>👑 {winner.name}</p>
-          <p style={{ color: "#64748b", fontSize: 14 }}>{winner.score} Awesome Points</p>
+        <div className="text-center">
+          <p className="text-yellow-400 text-xl font-black">👑 {winner.name}</p>
+          <p className="text-slate-500 text-sm mt-1">{winner.score} Awesome Points</p>
         </div>
       )}
 
-      <div style={{
-        width: "100%",
-        maxWidth: 360,
-        background: "#0d0d1a",
-        border: "1px solid rgba(126,34,206,0.3)",
-        borderRadius: 16,
-        padding: 24,
-      }}>
-        <p style={{ fontSize: 10, color: "#475569", textTransform: "uppercase", letterSpacing: 2, marginBottom: 12 }}>
-          Final Scoreboard
-        </p>
-        <ol style={{ display: "flex", flexDirection: "column", gap: 8, listStyle: "none", padding: 0, margin: 0 }}>
+      <div className="w-full max-w-sm bg-[#0d0d1a] border border-purple-900/30 rounded-2xl p-6">
+        <p className="text-[10px] text-slate-600 uppercase tracking-[2px] mb-3">Final Scoreboard</p>
+        <ol className="flex flex-col gap-2 list-none p-0 m-0">
           {finalScores.map((p, idx) => (
             <li
               key={p.id}
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-                padding: "8px 12px",
-                borderRadius: 10,
-                background: idx === 0 ? "rgba(250,204,21,0.08)" : "#1e293b",
-              }}
+              className={[
+                "flex items-center justify-between px-3 py-2 rounded-[10px]",
+                idx === 0 ? "bg-yellow-400/8" : "bg-slate-800",
+              ].join(" ")}
             >
-              <span style={{ fontSize: 14, fontWeight: 600, color: "#fff" }}>
+              <span className="text-sm font-semibold text-white">
                 {idx === 0 ? "👑 " : `${idx + 1}. `}{p.name}
               </span>
-              <span style={{ fontWeight: 800, color: "#a78bfa" }}>{p.score}★</span>
+              <span className="font-extrabold text-violet-400">{p.score}★</span>
             </li>
           ))}
         </ol>
       </div>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 12, width: "100%", maxWidth: 280 }}>
+      <div className="flex flex-col gap-3 w-full max-w-[280px]">
         {isHost && (
           <Link
             to="/games/create"
-            style={{
-              display: "block",
-              textAlign: "center",
-              padding: "12px 0",
-              borderRadius: 12,
-              fontWeight: 700,
-              color: "#fff",
-              fontSize: 14,
-              background: "linear-gradient(90deg, #7c3aed, #ec4899)",
-              textDecoration: "none",
-            }}
+            className="block text-center py-3 rounded-xl font-bold text-white text-sm bg-gradient-to-r from-violet-700 to-pink-500 no-underline"
           >
             Play Again
           </Link>
         )}
         <Link
           to="/"
-          style={{
-            display: "block",
-            textAlign: "center",
-            padding: "12px 0",
-            borderRadius: 12,
-            fontWeight: 700,
-            fontSize: 14,
-            color: "#a78bfa",
-            border: "1px solid rgba(126,34,206,0.4)",
-            textDecoration: "none",
-          }}
+          className="block text-center py-3 rounded-xl font-bold text-sm text-violet-400 border border-violet-900/40 no-underline hover:bg-violet-900/20"
         >
           Back to Home
         </Link>
       </div>
+
     </div>
   );
 }

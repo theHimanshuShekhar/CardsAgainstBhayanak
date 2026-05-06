@@ -33,41 +33,30 @@ export function Scoreboard({
 
   if (layout === "strip") {
     return (
-      <div style={{ display: "flex", gap: 8, overflowX: "auto", paddingBottom: 4, scrollbarWidth: "none" }}>
+      <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-none">
         {sorted.map((p) => (
           <div
             key={p.id}
-            style={{
-              flexShrink: 0,
-              display: "flex",
-              alignItems: "center",
-              gap: 6,
-              padding: "6px 12px",
-              borderRadius: 999,
-              background: p.isCzar ? "rgba(249,115,22,0.15)" : "#1e293b",
-              border: p.isCzar ? "1px solid rgba(249,115,22,0.4)" : "1px solid transparent",
-              color: p.isCzar ? "#fed7aa" : "#e2e8f0",
-              fontSize: 12,
-              fontWeight: 600,
-            }}
+            className={[
+              "shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold",
+              p.isCzar
+                ? "bg-orange-500/15 border border-orange-500/40 text-orange-200"
+                : "bg-slate-800 border border-transparent text-slate-200",
+            ].join(" ")}
           >
             <span>{p.name}</span>
             {p.isCzar && (
-              <span style={{
-                padding: "2px 6px",
-                borderRadius: 999,
-                background: "linear-gradient(90deg,#f97316,#ec4899)",
-                color: "#fff",
-                fontWeight: 700,
-                fontSize: 9,
-              }}>
+              <span className="px-1.5 py-0.5 rounded-full bg-gradient-to-r from-orange-500 to-pink-500 text-white font-bold text-[9px]">
                 CZAR
               </span>
             )}
-            <span style={{ color: p.isCzar ? "#94a3b8" : p.hasPlayed ? "#34d399" : "#94a3b8", fontSize: 10 }}>
+            <span className={[
+              "text-[10px]",
+              p.isCzar ? "text-slate-400" : p.hasPlayed ? "text-emerald-400" : "text-slate-400",
+            ].join(" ")}>
               {p.isCzar ? "⚖" : p.hasPlayed ? "✓" : "…"}
             </span>
-            <span style={{ color: "#a78bfa", fontWeight: 800 }}>{p.score}★</span>
+            <span className="text-violet-400 font-extrabold">{p.score}★</span>
           </div>
         ))}
       </div>
@@ -75,77 +64,58 @@ export function Scoreboard({
   }
 
   return (
-    <div style={{
-      display: "flex",
-      flexDirection: "column",
-      gap: 4,
-      height: "100%",
-      background: "#0d0d1a",
-      borderRadius: 8,
-      padding: 10,
-    }}>
-      <p style={{ fontSize: 10, color: "#475569", textTransform: "uppercase", letterSpacing: 2, marginBottom: 4 }}>
+    <div className="flex flex-col gap-1 h-full bg-[#0d0d1a] rounded-lg p-2.5">
+      <p className="text-[10px] text-slate-600 uppercase tracking-[2px] mb-1">
         Scoreboard · Round {currentRound}/{totalRounds}
       </p>
 
       {sorted.map((p) => (
         <div
           key={p.id}
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            borderRadius: 8,
-            padding: "6px 8px",
-            background: p.isCzar ? "rgba(249,115,22,0.1)" : "transparent",
-            border: p.isCzar ? "1px solid rgba(249,115,22,0.2)" : "1px solid transparent",
-          }}
+          className={[
+            "flex items-center justify-between rounded-lg px-2 py-1.5",
+            p.isCzar
+              ? "bg-orange-500/10 border border-orange-500/20"
+              : "border border-transparent",
+          ].join(" ")}
         >
-          <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-            <span style={{ fontSize: 12, fontWeight: 700, color: p.isCzar ? "#fed7aa" : "#e2e8f0", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span className={[
+              "text-xs font-bold truncate",
+              p.isCzar ? "text-orange-200" : "text-slate-200",
+            ].join(" ")}>
               {p.name}
             </span>
             {p.isCzar && (
-              <span style={{
-                flexShrink: 0,
-                padding: "1px 5px",
-                borderRadius: 999,
-                background: "linear-gradient(90deg,#f97316,#ec4899)",
-                color: "#fff",
-                fontWeight: 700,
-                fontSize: 8,
-              }}>
+              <span className="shrink-0 px-[5px] py-px rounded-full bg-gradient-to-r from-orange-500 to-pink-500 text-white font-bold text-[8px]">
                 CZAR
               </span>
             )}
             {p.isPending && (
-              <span style={{ color: "#475569", fontSize: 9, flexShrink: 0 }}>pending</span>
+              <span className="text-slate-600 text-[9px] shrink-0">pending</span>
             )}
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+          <div className="flex items-center gap-1.5 shrink-0">
             {!p.isCzar && (
-              <span style={{ color: p.hasPlayed ? "#34d399" : "#94a3b8", fontSize: 10 }}>
+              <span className={`text-[10px] ${p.hasPlayed ? "text-emerald-400" : "text-slate-400"}`}>
                 {p.hasPlayed ? "✓" : "…"}
               </span>
             )}
-            <span style={{ color: "#a78bfa", fontWeight: 800, fontSize: 11 }}>{p.score}★</span>
+            <span className="text-violet-400 font-extrabold text-[11px]">{p.score}★</span>
           </div>
         </div>
       ))}
 
-      <div style={{ flex: 1 }} />
+      <div className="flex-1" />
 
-      <div style={{ borderTop: "1px solid #1e293b", paddingTop: 8 }}>
-        <div style={{ background: "#1e293b", borderRadius: 999, height: 4 }}>
-          <div style={{
-            height: "100%",
-            borderRadius: 999,
-            width: `${progressPct}%`,
-            background: "linear-gradient(90deg, #a855f7, #ec4899)",
-            transition: "width 0.3s",
-          }} />
+      <div className="border-t border-slate-800 pt-2">
+        <div className="bg-slate-800 rounded-full h-1">
+          <div
+            className="h-full rounded-full bg-gradient-to-r from-purple-500 to-pink-500 transition-[width] duration-300"
+            style={{ width: `${progressPct}%` }}
+          />
         </div>
-        <p style={{ textAlign: "right", marginTop: 4, fontSize: 8, color: "#475569" }}>
+        <p className="text-right mt-1 text-[8px] text-slate-600">
           {playedCount} / {totalNonCzar} played
         </p>
       </div>

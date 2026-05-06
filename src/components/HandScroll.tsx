@@ -32,22 +32,11 @@ export function HandScroll({ cards, playedIds, disabled, onPlay }: HandScrollPro
   }, [cards]);
 
   return (
-    <div style={{ position: "relative", overflow: "hidden" }}>
+    <div className="relative overflow-hidden">
       {showChevron && (
         <>
-          <div style={{
-            position: "absolute", top: 0, right: 0,
-            width: 64, height: "100%",
-            background: "linear-gradient(to right, transparent, #0d1a33)",
-            pointerEvents: "none", zIndex: 2,
-          }} />
-          <div style={{
-            position: "absolute", right: 10, top: "50%",
-            transform: "translateY(-50%)", zIndex: 3,
-            color: "rgba(167,139,250,0.85)", fontSize: 20,
-            pointerEvents: "none",
-            animation: "cabChevron 1.6s ease-in-out infinite",
-          }}>
+          <div className="absolute top-0 right-0 w-16 h-full bg-gradient-to-r from-transparent to-[#0d1a33] pointer-events-none z-10" />
+          <div className="absolute right-2.5 top-[50%] z-20 text-violet-400/85 text-xl pointer-events-none animate-cab-chevron">
             ›
           </div>
         </>
@@ -55,14 +44,7 @@ export function HandScroll({ cards, playedIds, disabled, onPlay }: HandScrollPro
 
       <div
         ref={scrollRef}
-        style={{
-          display: "flex",
-          gap: 8,
-          overflowX: "auto",
-          paddingBottom: 4,
-          scrollbarWidth: "none",
-          msOverflowStyle: "none",
-        } as React.CSSProperties}
+        className="flex gap-2 overflow-x-auto pb-1 scrollbar-none"
       >
         {cards.map((card) => (
           <CahCard
@@ -71,19 +53,11 @@ export function HandScroll({ cards, playedIds, disabled, onPlay }: HandScrollPro
             text={card.text}
             size="hand"
             played={playedIds.has(card.id)}
+            disabled={disabled}
             onClick={disabled || playedIds.has(card.id) ? undefined : () => onPlay(card.id)}
-            style={{ opacity: disabled ? 0.4 : 1 } as React.CSSProperties}
           />
         ))}
       </div>
-
-      <style>{`
-        @keyframes cabChevron {
-          0%, 100% { opacity: 0.5; transform: translateY(-50%) translateX(0); }
-          50%       { opacity: 1;   transform: translateY(-50%) translateX(4px); }
-        }
-        div::-webkit-scrollbar { display: none; }
-      `}</style>
     </div>
   );
 }

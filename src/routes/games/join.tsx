@@ -51,19 +51,16 @@ function JoinGameScreen() {
   }
 
   const inputCls =
-    "w-full bg-[#1e293b] border border-slate-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-purple-500";
+    "w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-purple-500";
 
   return (
-    <div
-      className="min-h-screen flex items-center justify-center px-4"
-      style={{ background: "linear-gradient(135deg, #1a0533 0%, #0d1a33 100%)" }}
-    >
+    <div className="min-h-[calc(100vh-3rem)] flex items-center justify-center px-4 bg-gradient-to-br from-[#1a0533] to-[#0d1a33]">
       <div className="w-full max-w-sm bg-[#0d0d1a] border border-purple-900/30 rounded-2xl p-8 shadow-2xl">
         <h2 className="text-center font-black text-xl text-white mb-6">Join Game</h2>
 
         <form onSubmit={handleJoin} className="flex flex-col gap-4">
           <div>
-            <label className="block text-xs text-slate-400 mb-1 uppercase tracking-widest">
+            <label className="block text-[10px] text-slate-500 mb-1 uppercase tracking-widest">
               Display name
             </label>
             <input
@@ -75,7 +72,7 @@ function JoinGameScreen() {
           </div>
 
           <div>
-            <label className="block text-xs text-slate-400 mb-1 uppercase tracking-widest">
+            <label className="block text-[10px] text-slate-500 mb-1 uppercase tracking-widest">
               Room code
             </label>
             <input
@@ -89,20 +86,21 @@ function JoinGameScreen() {
           </div>
 
           <div>
-            <label className="block text-xs text-slate-400 mb-2 uppercase tracking-widest">
+            <label className="block text-[10px] text-slate-500 mb-2 uppercase tracking-widest">
               Join as
             </label>
-            <div className="flex bg-[#1e293b] rounded-lg p-1 gap-1">
+            <div className="flex bg-slate-800 rounded-lg p-1 gap-1">
               {(["Player", "Spectator"] as const).map((mode) => (
                 <button
                   type="button"
                   key={mode}
                   onClick={() => setAsSpectator(mode === "Spectator")}
-                  className={`flex-1 py-1.5 rounded-md text-sm font-semibold transition-colors ${
+                  className={[
+                    "flex-1 py-1.5 rounded-md text-sm font-semibold transition-colors border-0 cursor-pointer",
                     (mode === "Spectator") === asSpectator
                       ? "bg-purple-600 text-white"
-                      : "text-slate-400 hover:text-white"
-                  }`}
+                      : "text-slate-400 hover:text-white bg-transparent",
+                  ].join(" ")}
                 >
                   {mode}
                 </button>
@@ -115,8 +113,7 @@ function JoinGameScreen() {
           <button
             type="submit"
             disabled={loading}
-            className="py-2 rounded-xl font-bold text-white text-sm disabled:opacity-50"
-            style={{ background: "linear-gradient(90deg, #7c3aed, #ec4899)" }}
+            className="py-2 rounded-xl font-bold text-white text-sm disabled:opacity-50 bg-gradient-to-r from-violet-700 to-pink-500 border-0 cursor-pointer"
           >
             {loading ? "Joining…" : "Join Game"}
           </button>

@@ -2,34 +2,11 @@ import { Link } from '@tanstack/react-router'
 
 export default function Header() {
   return (
-    <header style={{
-      position: 'sticky',
-      top: 0,
-      zIndex: 50,
-      background: 'rgba(13, 3, 26, 0.88)',
-      backdropFilter: 'blur(12px)',
-      WebkitBackdropFilter: 'blur(12px)',
-      borderBottom: '1px solid rgba(100, 116, 139, 0.15)',
-    }}>
-      <div style={{
-        maxWidth: 900,
-        margin: '0 auto',
-        padding: '0 16px',
-        height: 48,
-        display: 'flex',
-        alignItems: 'center',
-      }}>
+    <header className="sticky top-0 z-50 backdrop-blur-md border-b border-white/5 bg-[#0d0319]/90">
+      <div className="mx-auto max-w-[900px] px-4 h-12 flex items-center">
         <Link
           to="/"
-          style={{
-            textDecoration: 'none',
-            fontWeight: 900,
-            fontSize: 16,
-            letterSpacing: '-0.01em',
-            background: 'linear-gradient(90deg, #f97316, #ec4899, #a855f7)',
-            WebkitBackgroundClip: 'text',
-            WebkitTextFillColor: 'transparent',
-          }}
+          className="font-black text-base tracking-tight no-underline bg-gradient-to-r from-orange-500 via-pink-500 to-purple-500 bg-clip-text text-transparent"
         >
           CardsAgainstBhayanak
         </Link>

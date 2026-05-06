@@ -67,7 +67,6 @@ function GameSessionScreen() {
 
   useEffect(() => {
     fetchHand();
-    // Restore active round state on mount/refresh
     fetch(`/api/games/${code}/round`)
       .then((r) => r.json())
       .then((data: any) => {
@@ -199,40 +198,18 @@ function GameSessionScreen() {
     .map((p) => p.name);
 
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        display: "flex",
-        flexDirection: "column",
-        background: "linear-gradient(135deg, #1a0533 0%, #0d1a33 100%)",
-        fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif",
-      }}
-    >
-      {/* Top bar */}
-      <div style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        padding: "12px 16px",
-        borderBottom: "1px solid rgba(100,116,139,0.2)",
-      }}>
-        <span style={{
-          fontWeight: 900,
-          fontSize: 15,
-          background: "linear-gradient(90deg, #f97316, #ec4899, #a855f7)",
-          WebkitBackgroundClip: "text",
-          WebkitTextFillColor: "transparent",
-        }}>
-          CardsAgainstBhayanak
-        </span>
-        <span style={{ fontSize: 12, color: "#475569" }}>
-          Round <span style={{ color: "#a855f7" }}>{roundNum}</span>/{totalRounds}
+    <div className="min-h-[calc(100vh-3rem)] flex flex-col bg-gradient-to-br from-[#1a0533] to-[#0d1a33] font-sans">
+
+      {/* Round info bar */}
+      <div className="flex items-center justify-end px-4 py-2 border-b border-white/5">
+        <span className="text-xs text-slate-500">
+          Round <span className="text-purple-400">{roundNum}</span>/{totalRounds}
           {" · "}
-          <span style={{ color: "#a855f7", fontFamily: "monospace" }}>{code}</span>
+          <span className="text-purple-400 font-mono">{code}</span>
         </span>
       </div>
 
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 16, padding: 16, maxWidth: 900, margin: "0 auto", width: "100%" }}>
+      <div className="flex-1 flex flex-col gap-4 p-4 max-w-[900px] mx-auto w-full">
 
         {/* Mobile scoreboard strip */}
         <div className="md:hidden">
@@ -247,21 +224,16 @@ function GameSessionScreen() {
         </div>
 
         {/* Black card + scoreboard panel */}
-        <div style={{ display: "flex", gap: 16, alignItems: "stretch" }}>
+        <div className="flex gap-4 items-stretch">
           {blackCard ? (
             <CahCard variant="black" text={blackCard.text} pick={blackCard.pick} size="full" />
           ) : (
-            <div style={{
-              width: 170, minHeight: 238, borderRadius: 10,
-              background: "#111", display: "flex",
-              alignItems: "center", justifyContent: "center",
-              color: "#475569", fontSize: 12,
-            }}>
+            <div className="w-[170px] min-h-[238px] rounded-[10px] bg-black flex items-center justify-center text-slate-700 text-xs">
               Waiting…
             </div>
           )}
 
-          <div className="hidden md:flex" style={{ flex: 1 }}>
+          <div className="hidden md:flex flex-1">
             <Scoreboard
               players={playerList}
               currentRound={roundNum}
@@ -286,8 +258,8 @@ function GameSessionScreen() {
 
         {/* Hand */}
         {!isSpectator && hand.length > 0 && (
-          <div style={{ borderTop: "1px solid #1e293b", paddingTop: 16 }}>
-            <p style={{ fontSize: 10, color: "#475569", textTransform: "uppercase", letterSpacing: 2, marginBottom: 8 }}>
+          <div className="border-t border-slate-800 pt-4">
+            <p className="text-[10px] text-slate-600 uppercase tracking-[2px] mb-2">
               {isCzar ? "Your hand (Czar — wait for submissions)" : "Your hand · tap to play"}
             </p>
             <HandScroll
@@ -300,7 +272,7 @@ function GameSessionScreen() {
         )}
 
         {!connected && (
-          <p style={{ textAlign: "center", color: "#eab308", fontSize: 12 }}>Reconnecting…</p>
+          <p className="text-center text-yellow-500 text-xs">Reconnecting…</p>
         )}
       </div>
     </div>

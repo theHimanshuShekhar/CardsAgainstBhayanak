@@ -76,14 +76,11 @@ function CreateGameScreen() {
   }
 
   const inputCls =
-    "w-full bg-[#1e293b] border border-slate-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-purple-500";
-  const labelCls = "block text-xs text-slate-400 mb-1 uppercase tracking-widest";
+    "w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-purple-500";
+  const labelCls = "block text-[10px] text-slate-500 mb-1 uppercase tracking-widest";
 
   return (
-    <div
-      className="min-h-screen flex items-center justify-center px-4"
-      style={{ background: "linear-gradient(135deg, #1a0533 0%, #0d1a33 100%)" }}
-    >
+    <div className="min-h-[calc(100vh-3rem)] flex items-center justify-center px-4 bg-gradient-to-br from-[#1a0533] to-[#0d1a33]">
       <div className="w-full max-w-md bg-[#0d0d1a] border border-purple-900/30 rounded-2xl p-8 shadow-2xl">
         <h2 className="text-center font-black text-xl text-white mb-6">Create Game</h2>
 
@@ -97,6 +94,7 @@ function CreateGameScreen() {
               required
             />
           </div>
+
           <div className="flex gap-4">
             <div className="flex-1">
               <label className={labelCls}>Rounds</label>
@@ -144,32 +142,18 @@ function CreateGameScreen() {
           {packList.length > 0 && (
             <div>
               <label className={labelCls}>Card packs ({selectedPackIds.size} selected)</label>
-              <div style={{
-                display: "flex",
-                flexWrap: "wrap",
-                gap: 6,
-                maxHeight: 160,
-                overflowY: "auto",
-                paddingRight: 4,
-                scrollbarWidth: "thin",
-                scrollbarColor: "#4c1d95 transparent",
-              } as React.CSSProperties}>
+              <div className="flex flex-wrap gap-1.5 max-h-40 overflow-y-auto pr-1 scrollbar-none">
                 {packList.map((pack) => (
                   <button
                     type="button"
                     key={pack.id}
                     onClick={() => togglePack(pack.id)}
-                    style={{
-                      padding: "4px 10px",
-                      borderRadius: 999,
-                      fontSize: 11,
-                      fontWeight: 600,
-                      cursor: "pointer",
-                      background: selectedPackIds.has(pack.id) ? "rgba(168,85,247,0.25)" : "#1e293b",
-                      border: selectedPackIds.has(pack.id) ? "1px solid #a855f7" : "1px solid #334155",
-                      color: selectedPackIds.has(pack.id) ? "#d8b4fe" : "#64748b",
-                      transition: "all 0.1s",
-                    }}
+                    className={[
+                      "px-2.5 py-1 rounded-full text-[11px] font-semibold cursor-pointer border transition-all duration-100",
+                      selectedPackIds.has(pack.id)
+                        ? "bg-purple-500/25 border-purple-500 text-purple-200"
+                        : "bg-slate-800 border-slate-700 text-slate-500 hover:text-slate-300",
+                    ].join(" ")}
                   >
                     {pack.name}
                   </button>
@@ -183,8 +167,7 @@ function CreateGameScreen() {
           <button
             type="submit"
             disabled={loading}
-            className="py-2 rounded-xl font-bold text-white text-sm disabled:opacity-50"
-            style={{ background: "linear-gradient(90deg, #7c3aed, #ec4899)" }}
+            className="py-2 rounded-xl font-bold text-white text-sm disabled:opacity-50 bg-gradient-to-r from-violet-700 to-pink-500 border-0 cursor-pointer"
           >
             {loading ? "Creating…" : "Create Game"}
           </button>
