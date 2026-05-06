@@ -94,3 +94,33 @@ Tailwind CSS v4 — configured via `src/styles.css` (`@import "tailwindcss"`, `@
 
 ### Tests
 All tests are integration tests hitting real Redis and Postgres — no mocks. Docker services must be running. Test files live alongside source files and are excluded from the route tree via `routeFileIgnorePattern` in `vite.config.ts`.
+
+## TanStack Documentation
+
+Fetch up-to-date TanStack docs with: `npx @tanstack/intent@latest load <skill-id>`
+
+| Topic | Skill ID |
+|---|---|
+| Start core overview (Vite plugin, entry points, routeTree) | `@tanstack/start-client-core#start-core` |
+| **Server API routes** (`server.handlers` pattern) | `@tanstack/start-client-core#start-core/server-routes` |
+| Server functions (`createServerFn`, `useServerFn`) | `@tanstack/start-client-core#start-core/server-functions` |
+| Middleware (`createMiddleware`, context passing) | `@tanstack/start-client-core#start-core/middleware` |
+| Execution model (server/client boundaries, env vars) | `@tanstack/start-client-core#start-core/execution-model` |
+| Deployment (Cloudflare, Vercel, Node, SPA, SSR) | `@tanstack/start-client-core#start-core/deployment` |
+| Server runtime (cookies, sessions, `AsyncLocalStorage`) | `@tanstack/start-server-core#start-server-core` |
+| React Start bindings (`createStart`, `StartClient`) | `@tanstack/react-start#react-start` |
+| Next.js → TanStack Start migration | `@tanstack/react-start#lifecycle/migrate-from-nextjs` |
+| React Server Components (RSC, `renderServerComponent`) | `@tanstack/react-start#react-start/server-components` |
+| Router core (route trees, `createRouter`, file naming) | `@tanstack/router-core#router-core` |
+| **Search params** (`validateSearch`, Zod adapters) | `@tanstack/router-core#router-core/search-params` |
+| **Path params** (`$paramName`, `useParams`) | `@tanstack/router-core#router-core/path-params` |
+| Data loading (`loader`, `staleTime`, deferred data) | `@tanstack/router-core#router-core/data-loading` |
+| Navigation (`Link`, `useNavigate`, preloading) | `@tanstack/router-core#router-core/navigation` |
+| Auth & route guards (`beforeLoad`, `redirect`) | `@tanstack/router-core#router-core/auth-and-guards` |
+| Code splitting (`.lazy.tsx`, `autoCodeSplitting`) | `@tanstack/router-core#router-core/code-splitting` |
+| Not-found & error handling (`notFoundComponent`) | `@tanstack/router-core#router-core/not-found-and-errors` |
+| SSR (streaming, dehydration/hydration) | `@tanstack/router-core#router-core/ssr` |
+| Type safety (never cast, `Register`, `getRouteApi`) | `@tanstack/router-core#router-core/type-safety` |
+| Router bundler plugin (Vite, Webpack, route gen) | `@tanstack/router-plugin#router-plugin` |
+| Virtual file routes (programmatic route trees) | `@tanstack/virtual-file-routes#virtual-file-routes` |
+| Devtools setup (Vite plugin, `@tanstack/devtools-vite`) | `@tanstack/devtools-vite#devtools-vite-plugin` |
