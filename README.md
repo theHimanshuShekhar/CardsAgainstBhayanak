@@ -1,193 +1,87 @@
-Welcome to your new TanStack Start app! 
+# Cards Against Bhayanak
 
-# Getting Started
+> A party game for horrible people with good Wi-Fi.
 
-To run this application:
+Play at **[cards.bhayanak.net](https://cards.bhayanak.net)**
+
+---
+
+## What is this?
+
+Cards Against Bhayanak is a real-time multiplayer Cards Against Humanity clone for when you've exhausted your board game collection, your friends have questionable taste, and someone inevitably says "we should make our own version."
+
+Someone did.
+
+Each round, one player becomes the **Card Czar** and draws a black card with a fill-in-the-blank prompt. Everyone else plays the funniest (or most disturbing) white card from their hand. The Czar picks a winner. Repeat until someone rage-quits or you run out of rounds.
+
+---
+
+## How to Play
+
+1. Go to [cards.bhayanak.net](https://cards.bhayanak.net)
+2. Create a game or join one with a room code
+3. Wait for enough people to show up (minimum 3, maximum chaos)
+4. The host starts the game
+5. Play cards. Pick winners. Lose faith in your friends. Gain points.
+6. The person with the most points wins. Everyone else loses. Nobody learns anything.
+
+---
+
+## Features
+
+- Real-time multiplayer via SSE (no WebSockets were harmed)
+- 73 card packs — pick your poison
+- Card Czar rotation every round
+- Rando Cardrissian: an AI player who wins more than he should
+- Spectator mode for people who showed up late or have dignity
+- Mobile-friendly because bad decisions shouldn't require a laptop
+
+---
+
+## Running Locally
+
+You'll need Docker, Node.js, and a complete disregard for your evening plans.
 
 ```bash
+# Start Postgres + Redis
+docker compose up postgres redis -d
+
+# Install deps
 pnpm install
+
+# Seed card data (downloads from REST Against Humanity API)
+pnpm seed
+
+# Start dev server
 pnpm dev
 ```
 
-# Building For Production
+Open [http://localhost:3000](http://localhost:3000). Try not to play alone.
 
-To build this application for production:
+### Environment Variables
 
-```bash
-pnpm build
-```
+| Variable | Default |
+|---|---|
+| `DATABASE_URL` | `postgres://cab:cab_secret@localhost:5432/cardsagainstbhayanak` |
+| `REDIS_URL` | `redis://localhost:6379` |
+| `JWT_SECRET` | `dev_secret_change_in_production` |
 
-## Testing
+---
 
-This project uses [Vitest](https://vitest.dev/) for testing. You can run the tests with:
+## Stack
 
-```bash
-pnpm test
-```
+- **TanStack Start** — framework
+- **TanStack Router** — file-based routing
+- **Drizzle ORM** — database access
+- **Postgres** — durable game history
+- **Redis** — live game state, pub/sub
+- **Tailwind CSS v4** — styles
+- **Zod** — validation, because `any` is a lifestyle choice we rejected
 
-## Styling
+---
 
-This project uses [Tailwind CSS](https://tailwindcss.com/) for styling.
+## Disclaimer
 
-### Removing Tailwind CSS
+Cards Against Humanity is a trademark of Cards Against Humanity LLC. This project is not affiliated with or endorsed by them. It's just a bunch of bad jokes on a server.
 
-If you prefer not to use Tailwind CSS:
-
-1. Remove the demo pages in `src/routes/demo/`
-2. Replace the Tailwind import in `src/styles.css` with your own styles
-3. Remove `tailwindcss()` from the plugins array in `vite.config.ts`
-4. Uninstall the packages: `pnpm add @tailwindcss/vite tailwindcss --dev`
-
-
-
-## Routing
-
-This project uses [TanStack Router](https://tanstack.com/router) with file-based routing. Routes are managed as files in `src/routes`.
-
-### Adding A Route
-
-To add a new route to your application just add a new file in the `./src/routes` directory.
-
-TanStack will automatically generate the content of the route file for you.
-
-Now that you have two routes you can use a `Link` component to navigate between them.
-
-### Adding Links
-
-To use SPA (Single Page Application) navigation you will need to import the `Link` component from `@tanstack/react-router`.
-
-```tsx
-import { Link } from "@tanstack/react-router";
-```
-
-Then anywhere in your JSX you can use it like so:
-
-```tsx
-<Link to="/about">About</Link>
-```
-
-This will create a link that will navigate to the `/about` route.
-
-More information on the `Link` component can be found in the [Link documentation](https://tanstack.com/router/v1/docs/framework/react/api/router/linkComponent).
-
-### Using A Layout
-
-In the File Based Routing setup the layout is located in `src/routes/__root.tsx`. Anything you add to the root route will appear in all the routes. The route content will appear in the JSX where you render `{children}` in the `shellComponent`.
-
-Here is an example layout that includes a header:
-
-```tsx
-import { HeadContent, Scripts, createRootRoute } from '@tanstack/react-router'
-
-export const Route = createRootRoute({
-  head: () => ({
-    meta: [
-      { charSet: 'utf-8' },
-      { name: 'viewport', content: 'width=device-width, initial-scale=1' },
-      { title: 'My App' },
-    ],
-  }),
-  shellComponent: ({ children }) => (
-    <html lang="en">
-      <head>
-        <HeadContent />
-      </head>
-      <body>
-        <header>
-          <nav>
-            <Link to="/">Home</Link>
-            <Link to="/about">About</Link>
-          </nav>
-        </header>
-        {children}
-        <Scripts />
-      </body>
-    </html>
-  ),
-})
-```
-
-More information on layouts can be found in the [Layouts documentation](https://tanstack.com/router/latest/docs/framework/react/guide/routing-concepts#layouts).
-
-## Server Functions
-
-TanStack Start provides server functions that allow you to write server-side code that seamlessly integrates with your client components.
-
-```tsx
-import { createServerFn } from '@tanstack/react-start'
-
-const getServerTime = createServerFn({
-  method: 'GET',
-}).handler(async () => {
-  return new Date().toISOString()
-})
-
-// Use in a component
-function MyComponent() {
-  const [time, setTime] = useState('')
-  
-  useEffect(() => {
-    getServerTime().then(setTime)
-  }, [])
-  
-  return <div>Server time: {time}</div>
-}
-```
-
-## API Routes
-
-You can create API routes by using the `server` property in your route definitions:
-
-```tsx
-import { createFileRoute } from '@tanstack/react-router'
-import { json } from '@tanstack/react-start'
-
-export const Route = createFileRoute('/api/hello')({
-  server: {
-    handlers: {
-      GET: () => json({ message: 'Hello, World!' }),
-    },
-  },
-})
-```
-
-## Data Fetching
-
-There are multiple ways to fetch data in your application. You can use TanStack Query to fetch data from a server. But you can also use the `loader` functionality built into TanStack Router to load the data for a route before it's rendered.
-
-For example:
-
-```tsx
-import { createFileRoute } from '@tanstack/react-router'
-
-export const Route = createFileRoute('/people')({
-  loader: async () => {
-    const response = await fetch('https://swapi.dev/api/people')
-    return response.json()
-  },
-  component: PeopleComponent,
-})
-
-function PeopleComponent() {
-  const data = Route.useLoaderData()
-  return (
-    <ul>
-      {data.results.map((person) => (
-        <li key={person.name}>{person.name}</li>
-      ))}
-    </ul>
-  )
-}
-```
-
-Loaders simplify your data fetching logic dramatically. Check out more information in the [Loader documentation](https://tanstack.com/router/latest/docs/framework/react/guide/data-loading#loader-parameters).
-
-# Demo files
-
-Files prefixed with `demo` can be safely deleted. They are there to provide a starting point for you to play around with the features you've installed.
-
-# Learn More
-
-You can learn more about all of the offerings from TanStack in the [TanStack documentation](https://tanstack.com).
-
-For TanStack Start specific documentation, visit [TanStack Start](https://tanstack.com/start).
+Play responsibly. Or don't. That's kind of the point.
