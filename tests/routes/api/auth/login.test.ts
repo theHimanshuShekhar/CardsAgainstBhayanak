@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { db } from "../../../db/client";
-import { users } from "../../../db/schema";
+import { db } from "../../../../src/db/client";
+import { users } from "../../../../src/db/schema";
 import { eq } from "drizzle-orm";
-import { hashPassphrase, verifyPassphrase } from "../../../lib/password";
+import { hashPassphrase, verifyPassphrase } from "../../../../src/lib/password";
 
 const TEST_USERNAME = "__vitest_login_user__";
 const TEST_PASSPHRASE = "correcthorsebatterystaple";

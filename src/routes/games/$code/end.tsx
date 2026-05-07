@@ -3,7 +3,7 @@ import { useState, useEffect } from "react";
 import { z } from "zod";
 import { useGameSocket } from "../../../hooks/useGameSocket";
 
-const EndSearch = z.object({ playerId: z.string().optional().default("") });
+const EndSearch = z.object({ playerId: z.coerce.string().optional().default("") });
 
 export const Route = createFileRoute("/games/$code/end")({
   validateSearch: EndSearch.parse,

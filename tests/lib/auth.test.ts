@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { signToken, verifyToken } from "./auth";
+import { signToken, verifyToken } from "../../src/lib/auth";
 
 describe("JWT helpers", () => {
   it("signs and verifies a token round-trip", async () => {

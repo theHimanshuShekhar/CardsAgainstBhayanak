@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { generateRoomCode } from "./room-code";
+import { generateRoomCode } from "../../src/lib/room-code";
 
 describe("generateRoomCode", () => {
   it("generates a 6-character code", () => {

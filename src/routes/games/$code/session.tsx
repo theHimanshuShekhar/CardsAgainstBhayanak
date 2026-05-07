@@ -7,7 +7,7 @@ import { Scoreboard } from "../../../components/Scoreboard";
 import { HandScroll } from "../../../components/HandScroll";
 import { SubmittedAnswers } from "../../../components/SubmittedAnswers";
 
-const SessionSearch = z.object({ playerId: z.string().optional().default("") });
+const SessionSearch = z.object({ playerId: z.coerce.string().optional().default("") });
 
 export const Route = createFileRoute("/games/$code/session")({
   validateSearch: SessionSearch.parse,
@@ -96,6 +96,16 @@ function GameSessionScreen() {
       );
       const round = payload.round ?? {};
       if (round.czarId) setCzarId(round.czarId);
+      // If round is already active (round:started may have been missed during navigation),
+      // re-fetch the round to get the black card text.
+      if (round.blackCardId) {
+        fetch(`/api/games/${code}/round`)
+          .then((r) => r.json())
+          .then((data: any) => {
+            if (data.round?.blackCard) setBlackCard(data.round.blackCard);
+          })
+          .catch(() => {});
+      }
     });
 
     on("round:started", (payload: any) => {
