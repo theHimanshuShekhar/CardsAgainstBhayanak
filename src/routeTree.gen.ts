@@ -10,7 +10,6 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as AuthRouteImport } from './routes/auth'
-import { Route as AboutRouteImport } from './routes/about'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as GamesJoinRouteImport } from './routes/games/join'
 import { Route as GamesCreateRouteImport } from './routes/games/create'
@@ -28,16 +27,10 @@ import { Route as ApiGamesCodePlayRouteImport } from './routes/api/games/$code/p
 import { Route as ApiGamesCodePickRouteImport } from './routes/api/games/$code/pick'
 import { Route as ApiGamesCodeJoinRouteImport } from './routes/api/games/$code/join'
 import { Route as ApiGamesCodeHandRouteImport } from './routes/api/games/$code/hand'
-import { Route as ApiGamesCodeEventsRouteImport } from './routes/api/games/$code/events'
 
 const AuthRoute = AuthRouteImport.update({
   id: '/auth',
   path: '/auth',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const AboutRoute = AboutRouteImport.update({
-  id: '/about',
-  path: '/about',
   getParentRoute: () => rootRouteImport,
 } as any)
 const IndexRoute = IndexRouteImport.update({
@@ -125,15 +118,9 @@ const ApiGamesCodeHandRoute = ApiGamesCodeHandRouteImport.update({
   path: '/api/games/$code/hand',
   getParentRoute: () => rootRouteImport,
 } as any)
-const ApiGamesCodeEventsRoute = ApiGamesCodeEventsRouteImport.update({
-  id: '/api/games/$code/events',
-  path: '/api/games/$code/events',
-  getParentRoute: () => rootRouteImport,
-} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
-  '/about': typeof AboutRoute
   '/auth': typeof AuthRoute
   '/api/packs': typeof ApiPacksRoute
   '/games/create': typeof GamesCreateRoute
@@ -144,7 +131,6 @@ export interface FileRoutesByFullPath {
   '/games/$code/lobby': typeof GamesCodeLobbyRoute
   '/games/$code/session': typeof GamesCodeSessionRoute
   '/api/games/': typeof ApiGamesIndexRoute
-  '/api/games/$code/events': typeof ApiGamesCodeEventsRoute
   '/api/games/$code/hand': typeof ApiGamesCodeHandRoute
   '/api/games/$code/join': typeof ApiGamesCodeJoinRoute
   '/api/games/$code/pick': typeof ApiGamesCodePickRoute
@@ -155,7 +141,6 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
-  '/about': typeof AboutRoute
   '/auth': typeof AuthRoute
   '/api/packs': typeof ApiPacksRoute
   '/games/create': typeof GamesCreateRoute
@@ -166,7 +151,6 @@ export interface FileRoutesByTo {
   '/games/$code/lobby': typeof GamesCodeLobbyRoute
   '/games/$code/session': typeof GamesCodeSessionRoute
   '/api/games': typeof ApiGamesIndexRoute
-  '/api/games/$code/events': typeof ApiGamesCodeEventsRoute
   '/api/games/$code/hand': typeof ApiGamesCodeHandRoute
   '/api/games/$code/join': typeof ApiGamesCodeJoinRoute
   '/api/games/$code/pick': typeof ApiGamesCodePickRoute
@@ -178,7 +162,6 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
-  '/about': typeof AboutRoute
   '/auth': typeof AuthRoute
   '/api/packs': typeof ApiPacksRoute
   '/games/create': typeof GamesCreateRoute
@@ -189,7 +172,6 @@ export interface FileRoutesById {
   '/games/$code/lobby': typeof GamesCodeLobbyRoute
   '/games/$code/session': typeof GamesCodeSessionRoute
   '/api/games/': typeof ApiGamesIndexRoute
-  '/api/games/$code/events': typeof ApiGamesCodeEventsRoute
   '/api/games/$code/hand': typeof ApiGamesCodeHandRoute
   '/api/games/$code/join': typeof ApiGamesCodeJoinRoute
   '/api/games/$code/pick': typeof ApiGamesCodePickRoute
@@ -202,7 +184,6 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
-    | '/about'
     | '/auth'
     | '/api/packs'
     | '/games/create'
@@ -213,7 +194,6 @@ export interface FileRouteTypes {
     | '/games/$code/lobby'
     | '/games/$code/session'
     | '/api/games/'
-    | '/api/games/$code/events'
     | '/api/games/$code/hand'
     | '/api/games/$code/join'
     | '/api/games/$code/pick'
@@ -224,7 +204,6 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
-    | '/about'
     | '/auth'
     | '/api/packs'
     | '/games/create'
@@ -235,7 +214,6 @@ export interface FileRouteTypes {
     | '/games/$code/lobby'
     | '/games/$code/session'
     | '/api/games'
-    | '/api/games/$code/events'
     | '/api/games/$code/hand'
     | '/api/games/$code/join'
     | '/api/games/$code/pick'
@@ -246,7 +224,6 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
-    | '/about'
     | '/auth'
     | '/api/packs'
     | '/games/create'
@@ -257,7 +234,6 @@ export interface FileRouteTypes {
     | '/games/$code/lobby'
     | '/games/$code/session'
     | '/api/games/'
-    | '/api/games/$code/events'
     | '/api/games/$code/hand'
     | '/api/games/$code/join'
     | '/api/games/$code/pick'
@@ -269,7 +245,6 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
-  AboutRoute: typeof AboutRoute
   AuthRoute: typeof AuthRoute
   ApiPacksRoute: typeof ApiPacksRoute
   GamesCreateRoute: typeof GamesCreateRoute
@@ -280,7 +255,6 @@ export interface RootRouteChildren {
   GamesCodeLobbyRoute: typeof GamesCodeLobbyRoute
   GamesCodeSessionRoute: typeof GamesCodeSessionRoute
   ApiGamesIndexRoute: typeof ApiGamesIndexRoute
-  ApiGamesCodeEventsRoute: typeof ApiGamesCodeEventsRoute
   ApiGamesCodeHandRoute: typeof ApiGamesCodeHandRoute
   ApiGamesCodeJoinRoute: typeof ApiGamesCodeJoinRoute
   ApiGamesCodePickRoute: typeof ApiGamesCodePickRoute
@@ -297,13 +271,6 @@ declare module '@tanstack/react-router' {
       path: '/auth'
       fullPath: '/auth'
       preLoaderRoute: typeof AuthRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/about': {
-      id: '/about'
-      path: '/about'
-      fullPath: '/about'
-      preLoaderRoute: typeof AboutRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/': {
@@ -425,19 +392,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiGamesCodeHandRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/api/games/$code/events': {
-      id: '/api/games/$code/events'
-      path: '/api/games/$code/events'
-      fullPath: '/api/games/$code/events'
-      preLoaderRoute: typeof ApiGamesCodeEventsRouteImport
-      parentRoute: typeof rootRouteImport
-    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
-  AboutRoute: AboutRoute,
   AuthRoute: AuthRoute,
   ApiPacksRoute: ApiPacksRoute,
   GamesCreateRoute: GamesCreateRoute,
@@ -448,7 +407,6 @@ const rootRouteChildren: RootRouteChildren = {
   GamesCodeLobbyRoute: GamesCodeLobbyRoute,
   GamesCodeSessionRoute: GamesCodeSessionRoute,
   ApiGamesIndexRoute: ApiGamesIndexRoute,
-  ApiGamesCodeEventsRoute: ApiGamesCodeEventsRoute,
   ApiGamesCodeHandRoute: ApiGamesCodeHandRoute,
   ApiGamesCodeJoinRoute: ApiGamesCodeJoinRoute,
   ApiGamesCodePickRoute: ApiGamesCodePickRoute,

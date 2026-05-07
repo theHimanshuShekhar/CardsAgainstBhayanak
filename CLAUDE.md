@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 # Development (requires Docker services running)
 docker compose up postgres redis -d
-pnpm dev                        # starts on http://localhost:3000
+pnpm dev                        # starts app + WebSocket server together on port 3000
 
 # Build & type-check
 pnpm build                      # production build; also regenerates routeTree.gen.ts
@@ -16,7 +16,7 @@ pnpm tsc --noEmit               # type-check only
 # Tests (require live Postgres + Redis on default ports)
 pnpm test                       # run all tests once
 pnpm test:watch                 # watch mode
-pnpm vitest run src/lib/game-engine.test.ts   # run a single test file
+pnpm vitest run tests/lib/game-engine.test.ts  # run a single test file
 
 # Database
 pnpm db:push                    # push schema changes to Postgres (Drizzle, no migrations)
@@ -55,10 +55,12 @@ export const Route = createFileRoute("/api/games/$code/hand")({
 
 All request body and query param validation uses **Zod** (`safeParse` → return 400 on failure). Route `validateSearch` also uses Zod schemas (`.parse` as the validator function).
 
-### Real-time: SSE not WebSockets
-Real-time events use Server-Sent Events (SSE) at `GET /api/games/$code/events`. The server publishes to Redis pub/sub (`game:{code}:channel`); the SSE handler subscribes and streams to the client. Vinxi/h3 WebSocket routing is not used.
+### Real-time: WebSocket (same port as app)
+Real-time events use native WebSocket at `ws://host/api/games/$code/ws`. The server publishes to Redis pub/sub (`game:{code}:channel`); the WS handler subscribes and forwards messages to all connected peers in the room.
 
-The client hook is `src/hooks/useGameSocket.ts` — uses `EventSource`, exposes `on(eventName, handler)`. On connect, the SSE endpoint immediately publishes a `game:snapshot` event with full current state so clients hydrate without waiting.
+The WS handler lives in `src/ws/handler.ts` and is attached to Vite's HTTP server via a custom Vite plugin in `vite.config.ts` (`gameWsPlugin`). No separate process needed — everything runs on port 3000.
+
+The client hook is `src/hooks/useGameSocket.ts` — uses native `WebSocket`, exposes `on(eventName, handler)`, and implements exponential-backoff reconnection (1 s → 30 s). On connect, the server sends a `game:snapshot` event with full current state so clients hydrate without waiting.
 
 ### State: Redis (live) + Postgres (durable)
 **Redis** (ioredis, 24h TTL) holds all live game state:
@@ -70,7 +72,7 @@ The client hook is `src/hooks/useGameSocket.ts` — uses `EventSource`, exposes 
 
 **Postgres** (Drizzle ORM, `pnpm db:push`) stores durable history: `users`, `packs`, `black_cards`, `white_cards`, `game_sessions`, `game_players`, `game_rounds`.
 
-Two Redis connections are needed: one shared singleton (`getRedis()`) for commands, and a **dedicated connection per SSE subscriber** (`newRedisSubscriber()`) because a subscribed ioredis client cannot issue regular commands.
+Two Redis connections are needed: one shared singleton (`getRedis()`) for commands, and a **dedicated connection per room** (`newRedisSubscriber()`) because a subscribed ioredis client cannot issue regular commands. Rooms share one subscriber; it is torn down when the last peer disconnects.
 
 ### Game Flow
 ```
@@ -93,7 +95,7 @@ Player IDs in Redis are the Postgres `game_players.id` (as a string). Rando Card
 Tailwind CSS v4 — configured via `src/styles.css` (`@import "tailwindcss"`, `@theme`, `@utility`) rather than `tailwind.config.ts` (which does not exist). Custom utilities (e.g. `scrollbar-none`) go in `src/styles.css` using `@utility`.
 
 ### Tests
-All tests are integration tests hitting real Redis and Postgres — no mocks. Docker services must be running. Test files live alongside source files and are excluded from the route tree via `routeFileIgnorePattern` in `vite.config.ts`.
+All tests are integration tests hitting real Redis and Postgres — no mocks. Docker services must be running. Test files live in `tests/` at the project root, mirroring the `src/` structure (`tests/lib/`, `tests/db/`, `tests/routes/`).
 
 ## TanStack Documentation
 

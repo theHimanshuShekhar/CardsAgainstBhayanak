@@ -1,6 +1,6 @@
 import { describe, it, expect, afterAll } from "vitest";
-import { db } from "./client";
-import { packs, blackCards, whiteCards } from "./schema";
+import { db } from "../../src/db/client";
+import { packs, blackCards, whiteCards } from "../../src/db/schema";
 import { eq } from "drizzle-orm";
 
 const TEST_PACK_NAME = "__vitest_test_pack__";

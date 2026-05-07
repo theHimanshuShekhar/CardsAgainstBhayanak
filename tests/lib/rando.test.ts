@@ -1,8 +1,8 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { getRedis } from "./redis";
-import { createGameState } from "./game-state";
-import { loadDecksIntoRedis } from "./game-engine";
-import { ensureRandoInGame, playRandoCard, RANDO_ID } from "./rando";
+import { getRedis } from "../../src/lib/redis";
+import { createGameState } from "../../src/lib/game-state";
+import { loadDecksIntoRedis } from "../../src/lib/game-engine";
+import { ensureRandoInGame, playRandoCard, RANDO_ID } from "../../src/lib/rando";
 
 const ROOM = "RNDTST";
 const CONFIG = {

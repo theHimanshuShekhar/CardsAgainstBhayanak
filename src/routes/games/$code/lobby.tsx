@@ -3,7 +3,7 @@ import { useState, useEffect } from "react";
 import { z } from "zod";
 import { useGameSocket } from "../../../hooks/useGameSocket";
 
-const LobbySearch = z.object({ playerId: z.string().optional().default("") });
+const LobbySearch = z.object({ playerId: z.coerce.string().optional().default("") });
 
 export const Route = createFileRoute("/games/$code/lobby")({
   validateSearch: LobbySearch.parse,

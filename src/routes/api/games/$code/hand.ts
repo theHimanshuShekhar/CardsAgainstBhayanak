@@ -11,7 +11,7 @@ export const Route = createFileRoute("/api/games/$code/hand")({
       GET: async ({ request, params }) => {
         const roomCode = params.code.toUpperCase();
         const url = new URL(request.url);
-        const HandQuery = z.object({ playerId: z.string().min(1, "playerId required") });
+        const HandQuery = z.object({ playerId: z.coerce.string().min(1, "playerId required") });
         const parsed = HandQuery.safeParse(Object.fromEntries(url.searchParams));
         if (!parsed.success) {
           return Response.json({ error: parsed.error.issues[0].message }, { status: 400 });

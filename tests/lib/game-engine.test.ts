@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { getRedis } from "./redis";
-import { createGameState } from "./game-state";
-import { loadDecksIntoRedis, dealHands, submitCards } from "./game-engine";
+import { getRedis } from "../../src/lib/redis";
+import { createGameState } from "../../src/lib/game-state";
+import { loadDecksIntoRedis, dealHands, submitCards } from "../../src/lib/game-engine";
 
 const ROOM = "ENGTST";
 const CONFIG = {

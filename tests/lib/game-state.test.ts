@@ -5,8 +5,8 @@ import {
   addPlayerToGame,
   getGamePlayers,
   removePlayerFromGame,
-} from "./game-state";
-import { getRedis } from "./redis";
+} from "../../src/lib/game-state";
+import { getRedis } from "../../src/lib/redis";
 
 const TEST_ROOM = "TSTEST";
 

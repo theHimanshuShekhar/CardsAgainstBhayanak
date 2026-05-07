@@ -1,9 +1,9 @@
 import { describe, it, expect, afterAll } from "vitest";
-import { db } from "../../../db/client";
-import { users } from "../../../db/schema";
+import { db } from "../../../../src/db/client";
+import { users } from "../../../../src/db/schema";
 import { eq } from "drizzle-orm";
-import { hashPassphrase } from "../../../lib/password";
-import { signToken } from "../../../lib/auth";
+import { hashPassphrase } from "../../../../src/lib/password";
+import { signToken } from "../../../../src/lib/auth";
 
 const TEST_USERNAME = "__vitest_reg_user__";
 
