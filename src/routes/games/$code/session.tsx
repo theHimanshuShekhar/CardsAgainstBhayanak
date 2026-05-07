@@ -212,7 +212,7 @@ function GameSessionScreen() {
 
       {/* Round info bar */}
       <div className="flex items-center justify-end px-4 py-2 border-b border-white/5">
-        <span className="text-xs text-slate-500">
+        <span data-testid="round-display" className="text-xs text-slate-500">
           Round <span className="text-purple-400">{roundNum}</span>/{totalRounds}
           {" · "}
           <span className="text-purple-400 font-mono">{code}</span>
@@ -236,7 +236,7 @@ function GameSessionScreen() {
         {/* Black card + scoreboard panel */}
         <div className="flex gap-4 items-stretch">
           {blackCard ? (
-            <CahCard variant="black" text={blackCard.text} pick={blackCard.pick} size="full" />
+            <CahCard variant="black" text={blackCard.text} pick={blackCard.pick} size="full" testId="black-card" />
           ) : (
             <div className="w-[170px] min-h-[238px] rounded-[10px] bg-black flex items-center justify-center text-slate-700 text-xs">
               Waiting…

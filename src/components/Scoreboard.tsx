@@ -72,6 +72,9 @@ export function Scoreboard({
       {sorted.map((p) => (
         <div
           key={p.id}
+          data-testid="score-panel-entry"
+          data-player={p.name}
+          data-score={p.score}
           className={[
             "flex items-center justify-between rounded-lg px-2 py-1.5",
             p.isCzar

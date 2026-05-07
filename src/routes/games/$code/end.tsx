@@ -55,7 +55,7 @@ function EndScreen() {
       </h1>
 
       {winner && (
-        <div className="text-center">
+        <div data-testid="winner-display" data-player={winner.name} className="text-center">
           <p className="text-yellow-400 text-xl font-black">👑 {winner.name}</p>
           <p className="text-slate-500 text-sm mt-1">{winner.score} Awesome Points</p>
         </div>
@@ -67,6 +67,9 @@ function EndScreen() {
           {finalScores.map((p, idx) => (
             <li
               key={p.id}
+              data-testid="final-score-entry"
+              data-player={p.name}
+              data-score={p.score}
               className={[
                 "flex items-center justify-between px-3 py-2 rounded-[10px]",
                 idx === 0 ? "bg-yellow-400/8" : "bg-slate-800",

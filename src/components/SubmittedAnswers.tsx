@@ -41,6 +41,7 @@ export function SubmittedAnswers({
                   selected={isCzar && !winningSubmissionId}
                   winner={isWinner}
                   onClick={isCzar && !winningSubmissionId ? () => onPick?.(sub.submissionId) : undefined}
+                  testId={i === 0 ? "submission" : undefined}
                 />
               ))}
               {isWinner && sub.playerName && (

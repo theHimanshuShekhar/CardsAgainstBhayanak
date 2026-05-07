@@ -101,6 +101,8 @@ function LobbyScreen() {
             {activePlayers.map((p) => (
               <li
                 key={p.id}
+                data-testid="player-list-item"
+                data-player={p.name}
                 className="flex items-center justify-between py-2 px-3 rounded-lg bg-slate-800"
               >
                 <span className="text-sm font-semibold text-white">{p.name}</span>
@@ -125,7 +127,7 @@ function LobbyScreen() {
               </p>
               <ul className="flex flex-col gap-1">
                 {spectators.map((p) => (
-                  <li key={p.id} className="text-sm text-slate-400 px-3 py-1">
+                  <li key={p.id} data-testid="spectator-list-item" data-player={p.name} className="text-sm text-slate-400 px-3 py-1">
                     {p.name}
                   </li>
                 ))}

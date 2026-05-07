@@ -10,6 +10,7 @@ interface CahCardProps {
   onClick?: () => void;
   placeholder?: string;
   className?: string;
+  testId?: string;
 }
 
 export function CahCard({
@@ -24,6 +25,7 @@ export function CahCard({
   onClick,
   placeholder,
   className = "",
+  testId,
 }: CahCardProps) {
   const isBlack = variant === "black";
   const isFull = size === "full";
@@ -55,6 +57,8 @@ export function CahCard({
   return (
     <div
       onClick={interactive ? onClick : undefined}
+      data-testid={testId}
+      data-played={played ? "true" : undefined}
       className={[
         "flex flex-col justify-between font-card font-extrabold leading-[1.35] shrink-0 rounded-[10px] select-none transition-[transform,box-shadow] duration-100",
         sizeClass,

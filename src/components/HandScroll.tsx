@@ -55,6 +55,7 @@ export function HandScroll({ cards, playedIds, disabled, onPlay }: HandScrollPro
             played={playedIds.has(card.id)}
             disabled={disabled}
             onClick={disabled || playedIds.has(card.id) ? undefined : () => onPlay(card.id)}
+            testId="hand-card"
           />
         ))}
       </div>
