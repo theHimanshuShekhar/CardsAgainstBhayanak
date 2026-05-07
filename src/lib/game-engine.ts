@@ -307,7 +307,8 @@ export async function pickWinner(
   if (currentRound >= totalRounds) {
     await endGame(roomCode, session.id, freshPlayers);
   } else {
-    setTimeout(() => startRound(roomCode).catch(console.error), 10_000);
+    const delay = Number(process.env.ROUND_DELAY_MS ?? 10_000);
+    setTimeout(() => startRound(roomCode).catch(console.error), delay);
   }
 }
 
