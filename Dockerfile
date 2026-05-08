@@ -1,0 +1,22 @@
+FROM node:22-alpine AS base
+RUN corepack enable pnpm
+
+# ── Build stage ──────────────────────────────────────────────────────────────
+FROM base AS build
+WORKDIR /app
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY . .
+RUN pnpm build
+
+# ── Production stage ─────────────────────────────────────────────────────────
+FROM base AS prod
+WORKDIR /app
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile --prod
+COPY --from=build /app/dist ./dist
+COPY server.mjs ./
+
+ENV NODE_ENV=production PORT=3000
+EXPOSE 3000
+CMD ["node", "server.mjs"]
