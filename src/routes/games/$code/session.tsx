@@ -97,7 +97,7 @@ function GameSessionScreen() {
       const round = payload.round ?? {};
       if (round.czarId) setCzarId(round.czarId);
       // If round is already active (round:started may have been missed during navigation),
-      // re-fetch the round to get the black card text.
+      // re-fetch the round and hand.
       if (round.blackCardId) {
         fetch(`/api/games/${code}/round`)
           .then((r) => r.json())
@@ -105,6 +105,7 @@ function GameSessionScreen() {
             if (data.round?.blackCard) setBlackCard(data.round.blackCard);
           })
           .catch(() => {});
+        fetchHand();
       }
     });
 

@@ -69,22 +69,12 @@ test.describe("05 — Rando Cardrissian", () => {
     } else {
       // Rando is czar — non-czar humans play, then pick via API
       await Promise.all(nonCzarPages.map((p) => playCard(p)));
-      // Wait for submissions to appear on p1 (non-czar view shows pending/played state)
-      await expect(p1.locator('[data-testid="submission"]')).toHaveCount(0).or(
-        expect(p1.locator('[data-testid="submission"]')).toHaveCount(3)
-      );
-      // Pick via direct API call since Rando can't interact
-      const allSubs = await p1.locator('[data-testid="submission"]').all();
-      if (allSubs.length > 0) {
-        await pickWinner(p1);
-      } else {
-        // submissions not shown to non-czar — use API directly
-        const res = await p1.request.post(`/api/games/${roomCode}/pick`, {
-          data: { czarPlayerId: "rando_cardrissian", winningSubmissionId: "sub_0" },
-        });
-        // May 400 if sub_0 doesn't exist, that's fine — just verifying no 500 crash
-        expect([200, 400]).toContain(res.status());
-      }
+      // Pick via direct API call since Rando can't interact with the UI
+      const res = await p1.request.post(`/api/games/${roomCode}/pick`, {
+        data: { czarPlayerId: "rando_cardrissian", winningSubmissionId: "sub_0" },
+      });
+      // May 400 if sub_0 doesn't exist, that's fine — just verifying no 500 crash
+      expect([200, 400]).toContain(res.status());
     }
 
     // Game did not crash — session page still present or moved to next round

@@ -162,7 +162,6 @@ export async function startRound(roomCode: string): Promise<void> {
     .hset(`game:${roomCode}:round`, {
       blackCardId,
       czarId,
-      submissions: JSON.stringify({}),
       winnerId: "",
     })
     .expire(`game:${roomCode}:round`, TTL)
@@ -198,6 +197,16 @@ async function getHaikuCardId(): Promise<string> {
   return String(injected.id);
 }
 
+function getSubmissionsFromHash(hash: Record<string, string>): Record<string, string[]> {
+  const result: Record<string, string[]> = {};
+  for (const [key, value] of Object.entries(hash)) {
+    if (key.startsWith("sub:")) {
+      result[key.slice(4)] = JSON.parse(value);
+    }
+  }
+  return result;
+}
+
 export async function submitCards(
   roomCode: string,
   playerId: string,
@@ -211,37 +220,44 @@ export async function submitCards(
     if (!inHand) throw new Error(`Card ${cardId} not in hand`);
   }
 
-  const roundRaw = await redis.hget(`game:${roomCode}:round`, "submissions");
-  const submissions: Record<string, string[]> = JSON.parse(roundRaw ?? "{}");
-  if (submissions[playerId]) throw new Error("Already submitted this round");
-
-  submissions[playerId] = cardIds;
+  // Use individual hash fields (sub:{playerId}) to avoid concurrent-write race conditions.
+  const subField = `sub:${playerId}`;
+  const existing = await redis.hget(`game:${roomCode}:round`, subField);
+  if (existing) throw new Error("Already submitted this round");
 
   await redis.srem(handKey, ...cardIds);
-  await redis.hset(`game:${roomCode}:round`, "submissions", JSON.stringify(submissions));
+  await redis.hset(`game:${roomCode}:round`, subField, JSON.stringify(cardIds));
 
   await publishEvent(roomCode, "card:played", { playerId });
 
-  const players = await getGamePlayers(roomCode);
-  const czarId = await redis.hget(`game:${roomCode}:round`, "czarId");
+  const [players, czarId, roundHash] = await Promise.all([
+    getGamePlayers(roomCode),
+    redis.hget(`game:${roomCode}:round`, "czarId"),
+    redis.hgetall(`game:${roomCode}:round`),
+  ]);
+  const submissions = getSubmissionsFromHash(roundHash);
   const nonCzarPlayers = Object.entries(players).filter(
-    ([id, p]) => !p.isSpectator && id !== czarId
+    ([id, p]) => !p.isSpectator && !p.isPending && id !== czarId
   );
-  const allPlayed = nonCzarPlayers.every(([id]) => submissions[id]);
+  const allPlayed = nonCzarPlayers.length > 0 && nonCzarPlayers.every(([id]) => submissions[id]);
 
   if (allPlayed) {
-    const allCardIds = Object.values(submissions).flat().map(Number);
-    const cardRows = await db
-      .select({ id: whiteCards.id, text: whiteCards.text })
-      .from(whiteCards)
-      .where(inArray(whiteCards.id, allCardIds));
-    const textMap = Object.fromEntries(cardRows.map((c) => [c.id, c.text]));
+    // Atomic guard: only the first caller publishes all:played
+    const claimed = await redis.hsetnx(`game:${roomCode}:round`, "allPlayedFired", "1");
+    if (claimed) {
+      const allCardIds = Object.values(submissions).flat().map(Number);
+      const cardRows = await db
+        .select({ id: whiteCards.id, text: whiteCards.text })
+        .from(whiteCards)
+        .where(inArray(whiteCards.id, allCardIds));
+      const textMap = Object.fromEntries(cardRows.map((c) => [c.id, c.text]));
 
-    const anonymized = Object.entries(submissions).map(([, cards], idx) => ({
-      submissionId: `sub_${idx}`,
-      cards: cards.map((id) => ({ id: Number(id), text: textMap[Number(id)] ?? "" })),
-    }));
-    await publishEvent(roomCode, "all:played", { submissions: anonymized });
+      const anonymized = Object.entries(submissions).map(([, cards], idx) => ({
+        submissionId: `sub_${idx}`,
+        cards: cards.map((id) => ({ id: Number(id), text: textMap[Number(id)] ?? "" })),
+      }));
+      await publishEvent(roomCode, "all:played", { submissions: anonymized });
+    }
   }
 
   return { allPlayed };
@@ -257,8 +273,8 @@ export async function pickWinner(
   const currentRound = Number(metaRaw.currentRound ?? 1);
   const totalRounds = Number(metaRaw.totalRounds ?? 8);
 
-  const subRaw = await redis.hget(`game:${roomCode}:round`, "submissions");
-  const submissions: Record<string, string[]> = JSON.parse(subRaw ?? "{}");
+  const roundHash = await redis.hgetall(`game:${roomCode}:round`);
+  const submissions = getSubmissionsFromHash(roundHash);
   const submissionEntries = Object.entries(submissions);
   const submissionIdx = parseInt(winningSubmissionId.replace("sub_", ""), 10);
   const [winnerId, winningCards] = submissionEntries[submissionIdx];

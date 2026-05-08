@@ -44,10 +44,7 @@ export async function playRandoCard(roomCode: string, pick: number): Promise<voi
 
   await redis.srem(handKey, ...chosen);
 
-  const roundRaw = await redis.hget(`game:${roomCode}:round`, "submissions");
-  const submissions: Record<string, string[]> = JSON.parse(roundRaw ?? "{}");
-  submissions[RANDO_ID] = chosen;
-  await redis.hset(`game:${roomCode}:round`, "submissions", JSON.stringify(submissions));
+  await redis.hset(`game:${roomCode}:round`, `sub:${RANDO_ID}`, JSON.stringify(chosen));
 
   await publishEvent(roomCode, "card:played", { playerId: RANDO_ID });
 }

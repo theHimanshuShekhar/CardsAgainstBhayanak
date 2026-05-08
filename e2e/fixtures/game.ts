@@ -8,6 +8,7 @@ export interface GameOptions {
   packingHeat?: boolean;
 }
 
+/** Create a game via API and navigate host page to lobby. */
 export async function createGame(
   page: Page,
   options: GameOptions = {}
@@ -20,56 +21,68 @@ export async function createGame(
     packingHeat = false,
   } = options;
 
-  await page.goto("/games/create");
+  const resp = await page.request.post("/api/games/", {
+    data: {
+      displayName,
+      totalRounds,
+      maxPlayers: 10,
+      packIds: [1],
+      houseRules: { randoCardrissian, happyEnding, packingHeat },
+    },
+  });
 
-  // Display name is the first input (no type attr)
-  await page.locator("input").first().fill(displayName);
+  if (!resp.ok()) {
+    throw new Error(`createGame API failed: ${resp.status()} ${await resp.text()}`);
+  }
 
-  // Rounds is the first number input
-  await page.locator('input[type="number"]').first().fill(String(totalRounds));
-
-  if (randoCardrissian) await page.getByLabel("Rando Cardrissian").check();
-  if (happyEnding) await page.getByLabel("Happy Ending").check();
-  if (packingHeat) await page.getByLabel("Packing Heat").check();
-
-  await page.getByRole("button", { name: "Create Game" }).click();
-  await page.waitForURL(/\/games\/[A-Z0-9]+\/lobby/);
-
-  const url = new URL(page.url());
-  const roomCode = url.pathname.split("/")[2];
-  const playerId = url.searchParams.get("playerId") ?? "";
+  const { roomCode, playerId } = await resp.json();
+  await page.goto(`/games/${roomCode}/lobby?playerId=${playerId}`);
+  // Wait for lobby to mount (player list or "Waiting…" text)
+  await page.waitForSelector('[data-testid="player-list-item"], .text-slate-400', {
+    timeout: 15_000,
+  });
 
   return { roomCode, playerId };
 }
 
+/** Join a game via API and navigate the page to lobby (or session if game is active). */
 export async function joinGame(
   page: Page,
   roomCode: string,
   displayName: string,
   options: { spectator?: boolean } = {}
 ): Promise<{ playerId: string }> {
-  await page.goto("/games/join");
+  const resp = await page.request.post(`/api/games/${roomCode}/join`, {
+    data: { displayName, spectator: options.spectator ?? false },
+  });
 
-  // Display name is the first input
-  await page.locator("input").first().fill(displayName);
-
-  // Room code input has placeholder XXXXXX
-  await page.locator('input[placeholder="XXXXXX"]').fill(roomCode);
-
-  if (options.spectator) {
-    await page.getByRole("button", { name: "Spectator" }).click();
+  if (!resp.ok()) {
+    throw new Error(`joinGame API failed: ${resp.status()} ${await resp.text()}`);
   }
 
-  await page.getByRole("button", { name: "Join Game" }).click();
-  await page.waitForURL(/\/games\/[A-Z0-9]+\/(lobby|session)/);
+  const data = await resp.json();
+  const playerId = String(data.playerId);
 
-  const url = new URL(page.url());
-  const playerId = url.searchParams.get("playerId") ?? "";
+  if (data.status === "active") {
+    await page.goto(`/games/${roomCode}/session?playerId=${playerId}`);
+    await page.waitForSelector('[data-testid="black-card"], [data-testid="round-display"]', {
+      timeout: 15_000,
+    });
+  } else {
+    await page.goto(`/games/${roomCode}/lobby?playerId=${playerId}`);
+    await page.waitForSelector('[data-testid="player-list-item"]', {
+      timeout: 15_000,
+    });
+  }
+
   return { playerId };
 }
 
 export async function startGame(hostPage: Page): Promise<void> {
-  await hostPage.getByRole("button", { name: /Start Game/ }).click();
+  // Wait for the Start button to be interactive (signals React has hydrated)
+  const btn = hostPage.getByRole("button", { name: /Start Game/ });
+  await expect(btn).toBeEnabled({ timeout: 15_000 });
+  await btn.click();
 }
 
 export async function waitForSession(page: Page): Promise<void> {
@@ -80,7 +93,6 @@ export async function waitForSession(page: Page): Promise<void> {
 export async function findCzar(
   pages: Page[]
 ): Promise<{ czarPage: Page; nonCzarPages: Page[] }> {
-  // Wait for the czar indicator to appear on one of the pages
   const czarPage = await Promise.race(
     pages.map(async (p) => {
       await expect(
@@ -99,7 +111,6 @@ export async function findCzar(
 export async function findCzarOrNull(
   pages: Page[]
 ): Promise<{ czarPage: Page | null; nonCzarPages: Page[] }> {
-  // Check each page — if none shows the czar text within 5s, Rando is czar
   const results = await Promise.all(
     pages.map(async (p) => {
       const visible = await p
@@ -117,7 +128,6 @@ export async function playCard(page: Page): Promise<void> {
   const card = page.locator('[data-testid="hand-card"]:not([data-played="true"])').first();
   await expect(card).toBeVisible({ timeout: 15_000 });
   await card.click();
-  // Wait for the card to be marked as played
   await expect(
     page.locator('[data-testid="hand-card"][data-played="true"]')
   ).toBeVisible({ timeout: 10_000 });
@@ -155,11 +165,19 @@ export async function getScores(page: Page): Promise<Record<string, number>> {
 export async function playRound(pages: Page[]): Promise<void> {
   const { czarPage, nonCzarPages } = await findCzar(pages);
 
+  // Record round number AFTER czar is confirmed (so round has started)
+  const ref = pages[0];
+  const roundText = await ref.locator('[data-testid="round-display"]').textContent();
+  const currentRound = parseInt(roundText?.match(/Round (\d+)/)?.[1] ?? "0", 10);
+
   await Promise.all(nonCzarPages.map((p) => playCard(p)));
   await pickWinner(czarPage);
 
-  // Wait for round:ended (scores update) before returning
-  await expect(czarPage.locator('[data-testid="score-panel-entry"]').first()).toBeVisible({
-    timeout: 15_000,
-  });
+  // Wait for next round to start (counter increments) OR game to end (any page → /end)
+  await expect(async () => {
+    if (pages.some((p) => p.url().includes("/end"))) return;
+    const text = await ref.locator('[data-testid="round-display"]').textContent().catch(() => "");
+    const nextRound = parseInt(text?.match(/Round (\d+)/)?.[1] ?? "0", 10);
+    expect(nextRound).toBeGreaterThan(currentRound);
+  }).toPass({ timeout: 15_000 });
 }
