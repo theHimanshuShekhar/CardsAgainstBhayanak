@@ -28,7 +28,7 @@ services:
   app:
     build: .
     ports:
-      - "3000:3000"
+      - "4823:3000"
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-cab}:${POSTGRES_PASSWORD:-cab_secret}@postgres:5432/${POSTGRES_DB:-cardsagainstbhayanak}
       REDIS_URL: redis://redis:6379
