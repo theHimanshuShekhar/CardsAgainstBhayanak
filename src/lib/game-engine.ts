@@ -1,7 +1,7 @@
 import { getRedis } from "./redis";
 import { publishEvent, getGamePlayers, type GamePlayer } from "./game-state";
 import { db } from "../db/client";
-import { blackCards, whiteCards, gameSessions, gameRounds } from "../db/schema";
+import { blackCards, whiteCards, gameSessions, gamePlayers, gameRounds } from "../db/schema";
 import { inArray, eq } from "drizzle-orm";
 
 const TTL = 86400;
@@ -340,6 +340,30 @@ async function endGame(
     .update(gameSessions)
     .set({ status: "ended", endedAt: new Date() })
     .where(eq(gameSessions.id, sessionId));
+
+  // Find max score to determine winners
+  const maxScore = Math.max(...Object.values(players).map((p) => p.score), 0);
+  const winnerIds = Object.entries(players)
+    .filter(([, p]) => p.score === maxScore)
+    .map(([id]) => id);
+
+  // Persist final scores and mark winners concurrently
+  try {
+    await Promise.all(
+      Object.entries(players).map(([playerId, player]) => {
+        // Only update actual DB players (not Rando)
+        if (!/^\d+$/.test(playerId)) return Promise.resolve();
+        const playerIdNum = Number(playerId);
+        const isWinner = winnerIds.includes(playerId);
+        return db
+          .update(gamePlayers)
+          .set({ finalScore: player.score, isWinner })
+          .where(eq(gamePlayers.id, playerIdNum));
+      })
+    );
+  } catch (err) {
+    console.error("Error persisting final scores:", err);
+  }
 
   const finalScores = Object.fromEntries(
     Object.entries(players).map(([id, p]) => [id, { name: p.name, score: p.score }])

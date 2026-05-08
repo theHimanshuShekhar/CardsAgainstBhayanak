@@ -22,9 +22,13 @@ function Home() {
         <div className="flex flex-col gap-3">
           {user ? (
             <>
-              <p className="text-slate-600 text-[10px] uppercase tracking-widest">
+              <Link
+                to="/users/$username"
+                params={{ username: user.username }}
+                className="text-slate-600 text-[10px] uppercase tracking-widest no-underline hover:text-slate-500"
+              >
                 Signed in as {user.username}
-              </p>
+              </Link>
               <Link
                 to="/games/create"
                 className="block py-3 rounded-xl font-bold text-white text-sm bg-gradient-to-r from-violet-700 to-pink-500 no-underline"

@@ -59,6 +59,7 @@ export const gamePlayers = pgTable("game_players", {
   isHost: boolean("is_host").notNull().default(false),
   joinedRound: integer("joined_round"),
   finalScore: integer("final_score"),
+  isWinner: boolean("is_winner").notNull().default(false),
 });
 
 export const gameRounds = pgTable("game_rounds", {

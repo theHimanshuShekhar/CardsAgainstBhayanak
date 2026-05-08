@@ -27,6 +27,7 @@ export const Route = createFileRoute("/api/users/$username/stats")({
           .select({
             sessionId: gamePlayers.sessionId,
             finalScore: gamePlayers.finalScore,
+            isWinner: gamePlayers.isWinner,
             status: gameSessions.status,
             endedAt: gameSessions.endedAt,
           })
@@ -46,6 +47,8 @@ export const Route = createFileRoute("/api/users/$username/stats")({
 
         const completed = sessions.filter((s) => s.status === "ended");
         const gamesPlayed = completed.length;
+        const gamesWon = completed.filter((s) => s.isWinner).length;
+        const gamesLost = completed.filter((s) => !s.isWinner).length;
         const totalPoints = completed.reduce(
           (acc, s) => acc + (s.finalScore ?? 0),
           0
@@ -59,11 +62,14 @@ export const Route = createFileRoute("/api/users/$username/stats")({
           username: user.username,
           createdAt: user.createdAt,
           gamesPlayed,
+          gamesWon,
+          gamesLost,
           totalPoints,
           bestScore,
           recentSessions: completed.slice(-50).map((s) => ({
             sessionId: s.sessionId,
             finalScore: s.finalScore,
+            isWinner: s.isWinner,
             endedAt: s.endedAt,
           })),
         });

@@ -5,9 +5,11 @@ import { db } from "../../../../db/client";
 import { gameSessions, gamePlayers } from "../../../../db/schema";
 import {
   getGameStatus,
+  getGamePlayers,
   addPlayerToGame,
   publishEvent,
 } from "../../../../lib/game-state";
+import { getRedis } from "../../../../lib/redis";
 import { verifyToken } from "../../../../lib/auth";
 
 const JoinBody = z.object({
@@ -37,6 +39,19 @@ export const Route = createFileRoute("/api/games/$code/join")({
         }
         if (status === "ended") {
           return Response.json({ error: "Game has already ended" }, { status: 410 });
+        }
+
+        // Check max players if not a spectator
+        if (!spectator) {
+          const metaRaw = await getRedis().hgetall(`game:${roomCode}`);
+          const config = JSON.parse(metaRaw.config ?? "{}");
+          const currentPlayers = await getGamePlayers(roomCode);
+          const nonSpectatorCount = Object.entries(currentPlayers).filter(
+            ([id, p]) => !p.isSpectator && id !== "rando_cardrissian"
+          ).length;
+          if (nonSpectatorCount >= config.maxPlayers) {
+            return Response.json({ error: "Game is full" }, { status: 400 });
+          }
         }
 
         const isPending = status === "active" && !spectator;

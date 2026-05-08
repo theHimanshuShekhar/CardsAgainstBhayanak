@@ -1,4 +1,4 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useState, useEffect } from "react";
 import { z } from "zod";
 import { useGameSocket } from "../../../hooks/useGameSocket";
@@ -20,8 +20,10 @@ function EndScreen() {
   const { code } = Route.useParams();
   const { playerId } = Route.useSearch();
   const { on } = useGameSocket(code);
+  const navigate = useNavigate();
   const [finalScores, setFinalScores] = useState<FinalPlayer[]>([]);
   const [isHost, setIsHost] = useState(false);
+  const [isRematchLoading, setIsRematchLoading] = useState(false);
 
   useEffect(() => {
     on("game:snapshot", (payload: any) => {
@@ -43,7 +45,16 @@ function EndScreen() {
         .sort((a, b) => b.score - a.score);
       setFinalScores(entries);
     });
-  }, [on, playerId]);
+
+    on("game:rematch", (payload: any) => {
+      if (!payload?.newRoomCode || !payload?.playerIdMap) return;
+      const newPlayerId = payload.playerIdMap[playerId];
+      const targetRoute = newPlayerId
+        ? `/games/${payload.newRoomCode}/lobby?playerId=${newPlayerId}`
+        : `/games/${payload.newRoomCode}/lobby`;
+      navigate({ to: targetRoute });
+    });
+  }, [on, playerId, navigate]);
 
   const winner = finalScores[0];
 
@@ -86,12 +97,32 @@ function EndScreen() {
 
       <div className="flex flex-col gap-3 w-full max-w-[280px]">
         {isHost && (
-          <Link
-            to="/games/create"
-            className="block text-center py-3 rounded-xl font-bold text-white text-sm bg-gradient-to-r from-violet-700 to-pink-500 no-underline"
+          <button
+            onClick={async () => {
+              setIsRematchLoading(true);
+              try {
+                const res = await fetch(`/api/games/${code}/rematch`, { method: "POST" });
+                if (!res.ok) {
+                  console.error("Rematch failed:", res.statusText);
+                  setIsRematchLoading(false);
+                  return;
+                }
+                const { newRoomCode, playerIdMap } = await res.json();
+                const newPlayerId = playerIdMap[playerId];
+                navigate({
+                  to: `/games/${newRoomCode}/lobby`,
+                  search: newPlayerId ? { playerId: newPlayerId } : undefined,
+                });
+              } catch (err) {
+                console.error("Rematch error:", err);
+                setIsRematchLoading(false);
+              }
+            }}
+            disabled={isRematchLoading}
+            className="block text-center py-3 rounded-xl font-bold text-white text-sm bg-gradient-to-r from-violet-700 to-pink-500 no-underline disabled:opacity-50"
           >
-            Play Again
-          </Link>
+            {isRematchLoading ? "Starting..." : "Play Again"}
+          </button>
         )}
         <Link
           to="/"

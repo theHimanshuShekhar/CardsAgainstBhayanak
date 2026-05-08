@@ -125,7 +125,7 @@ Three visual zones:
 **Spectator view:** Identical layout to the full game screen — top bar, middle row (question card + scoreboard), and submitted answer cards — but with no hand section. The scoreboard lists active players and their scores; spectators are shown in a separate "Watching" count below the scoreboard. Spectators see submitted cards only after all players have played (same reveal timing as players), and see the winning card highlighted after the Czar picks.
 
 ### 7. Round Result
-After Czar picks: winner's card is highlighted with a gold glow, winner's name revealed beneath it, score increments in the scoreboard. Round auto-advances after 10 seconds; host can click "Next Round" to advance immediately.
+After Czar picks: winner's card is highlighted with a gold glow, winner's name revealed beneath it, score increments in the scoreboard. Round auto-advances after 10 seconds.
 
 ### 8. End Screen / Final Scoreboard
 Full scoreboard with winner crowned. "Play Again" button (host) resets to Lobby with same players and config.
