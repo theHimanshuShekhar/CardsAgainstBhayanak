@@ -13,10 +13,13 @@ RUN pnpm build
 FROM base AS prod
 WORKDIR /app
 COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile --prod
+RUN pnpm install --frozen-lockfile
 COPY --from=build /app/dist ./dist
-COPY server.mjs ./
+COPY server.mjs drizzle.config.ts entrypoint.sh ./
+COPY src/db ./src/db
+COPY scripts ./scripts
+RUN chmod +x entrypoint.sh
 
 ENV NODE_ENV=production PORT=3000
 EXPOSE 3000
-CMD ["node", "server.mjs"]
+CMD ["./entrypoint.sh"]
