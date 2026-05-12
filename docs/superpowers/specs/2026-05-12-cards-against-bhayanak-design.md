@@ -904,8 +904,9 @@ services:
   app:      # TanStack Start (Node, port 3000) — built from local Dockerfile
   postgres: # postgres:16-alpine, named volume, healthcheck
   redis:    # valkey/valkey:latest, AOF enabled, named volume, healthcheck
-  cloudflared: # cloudflare/cloudflared:latest, TUNNEL_TOKEN from env
 ```
+
+Cloudflare Tunnel runs **outside** the Compose stack — user manages it independently on the host. The app container exposes port 3000 to the Docker network only; `cloudflared` on the host (systemd unit or separate container) routes external traffic to `http://localhost:3000` or `http://app:3000` via the host's network.
 
 ### Dockerfile (multi-stage)
 - `build` stage: `node:22-alpine` + pnpm, runs `pnpm install --frozen-lockfile` + `pnpm build`
@@ -919,14 +920,16 @@ services:
 | `SESSION_SECRET` | HMAC secret for sessionToken |
 | `PORT` | App port (default 3000) |
 | `NODE_ENV` | `development` \| `production` |
-| `TUNNEL_TOKEN` | Cloudflare Tunnel token |
 | `AXIOM_TOKEN` | API token for Axiom log shipping (prod only) |
 | `AXIOM_DATASET` | Axiom dataset name (default `cab-prod`) |
+| `POSTHOG_API_KEY` | PostHog project API key (public; used by both client and server) |
+| `POSTHOG_HOST` | PostHog host (default `https://us.i.posthog.com`) |
+| `POSTHOG_PERSONAL_API_KEY` | PostHog personal API key (build-time only, for sourcemap upload) |
 | `CAB_RNG_SEED` | Seedable PRNG seed (tests only; unset in prod = crypto-seeded) |
 
 ### Notes
-- App port not exposed to host (only to Docker network) — Cloudflare Tunnel forwards `yourdomain.com` → `http://app:3000`
-- Tunnel natively proxies WebSocket upgrades — no extra config needed
+- App exposes port 3000 on the host (`ports: ["3000:3000"]` in prod compose, or `127.0.0.1:3000:3000` if Cloudflare Tunnel runs on the same host) — user's Cloudflare Tunnel setup (run separately) routes external traffic to it.
+- Cloudflare Tunnel natively proxies WebSocket upgrades — no special config needed on the app side.
 - `docker-compose.prod.yml` override: `restart: unless-stopped`, memory limits (app: 512M, postgres: 1G, redis: 256M), `NODE_ENV=production`
 - Health checks: postgres `pg_isready`, redis `redis-cli ping`, app `GET /healthz` (returns 200 with `{ db, redis, activeGames, uptime }` or 503 if any dependency is down)
 - Volumes: `postgres_data`, `redis_data` (both backed up via host volume mount)
@@ -942,6 +945,122 @@ Structured JSON logs via [`pino`](https://github.com/pinojs/pino):
 Loggers (named) per module: `cab.ws`, `cab.api`, `cab.engine`, `cab.seed`, `cab.sweeper`. Log levels: `trace` (per-message WS spam, dev only), `debug` (state transitions), `info` (game lifecycle: created/started/ended), `warn` (recoverable issues like seed retries), `error` (5xx, unhandled exceptions).
 
 Every log line carries `{ roomCode?, playerId? }` when applicable for filtering.
+
+---
+
+## Product Analytics, Session Replay & Error Tracking (PostHog)
+
+Single PostHog Cloud project (`app.posthog.com`). Three features enabled:
+1. **Product analytics** — event-based behaviour tracking
+2. **Session replay** — full session recordings with privacy masking
+3. **Error tracking** — client and server exception capture
+
+### SDKs
+- **Client:** [`posthog-js`](https://posthog.com/docs/libraries/js) initialised in `src/lib/posthog-client.ts` (loaded in `__root.tsx`)
+- **Server:** [`posthog-node`](https://posthog.com/docs/libraries/node) initialised in `src/lib/posthog-server.ts`, used by API routes, WS handler, and game-event-handler for server-side events
+
+### User identification
+
+No accounts → use an anonymous distinct ID:
+- On first page mount, generate a stable browser-scoped UUID stored in `localStorage.cab_anon_id`. PostHog `distinct_id`.
+- On joining a game, call `posthog.identify(anonId, { username, currentRoom: roomCode })` to attach the chosen handle (still anonymous — no PII).
+- Server-side events use the same `anonId` sent from client via WS auth payload (added to `CabSession`).
+
+### Privacy / masking
+- **Session replay:** Use PostHog's `mask_all_inputs: true` and `mask_all_text: false`, but explicitly mask card content via `data-ph-no-capture` attribute on `.card-text` and `.card-back-mark` elements. Cards Against Humanity content is often crude — never recorded.
+- Hand cards, prompts in transit, and submission contents are all `data-ph-no-capture`.
+- Only UI shell (buttons, layout, animations) is captured for replay.
+
+### Configuration
+
+```ts
+// src/lib/posthog-client.ts
+posthog.init(POSTHOG_KEY, {
+  api_host: 'https://us.i.posthog.com',
+  person_profiles: 'identified_only',  // don't create profiles for anonymous pageviews
+  session_recording: {
+    maskAllInputs: true,
+    maskTextSelector: '[data-ph-no-capture], .card-text, .card-back-mark',
+    recordCanvas: false,
+  },
+  capture_pageview: true,
+  capture_pageleave: true,
+  autocapture: {
+    css_selector_allowlist: ['[data-ph]'],  // only autocapture annotated elements
+  },
+  loaded: (ph) => {
+    if (location.hostname === 'localhost') ph.opt_out_capturing()
+  },
+})
+```
+
+### Event taxonomy
+
+All events use snake_case names with `cab_` prefix to namespace them in PostHog.
+
+**Onboarding / navigation (client-side):**
+| Event | Properties | When |
+|---|---|---|
+| `cab_home_viewed` | — | Home page mount |
+| `cab_create_clicked` | — | "Create a game" button |
+| `cab_join_clicked` | — | "Join a game" button |
+| `cab_stats_clicked` | — | "See the stats" button |
+
+**Lobby (mixed client + server):**
+| Event | Properties | Side | When |
+|---|---|---|---|
+| `cab_game_created` | `roomCode, maxPlayers, roundsToWin, timer, packs[], rules[], modalRule` | server | `POST /api/games` succeeds |
+| `cab_game_joined` | `roomCode, role, isMidGame` | server | `POST /api/games/$code/join` succeeds |
+| `cab_room_code_copied` | `roomCode, format: "code"\|"link"` | client | Copy button clicked |
+| `cab_game_started` | `roomCode, playerCount, spectatorCount, durationLobbyMs` | server | Host starts game |
+
+**Gameplay (server-side, fan-out via roomCode):**
+| Event | Properties | When |
+|---|---|---|
+| `cab_round_started` | `roomCode, round, czarId, blackCardPick, mode` | round_started emitted |
+| `cab_card_played` | `roomCode, round, playerId, pickCount` | `play` event received |
+| `cab_gambled` | `roomCode, round, playerId` | `gamble` event received |
+| `cab_winner_picked` | `roomCode, round, winnerId, isRando, judgmentDurationMs` | `pick` resolves |
+| `cab_round_voted` | `roomCode, round, winnerId, voteSpread` | God Is Dead resolution |
+| `cab_round_eliminated` | `roomCode, round, winnerId, totalEliminations` | Survival resolution |
+| `cab_round_ranked` | `roomCode, round, top3: [{playerId, points}]` | Serious Business resolution |
+| `cab_player_skipped` | `roomCode, round, playerId` | Timer expired |
+| `cab_rule_triggered` | `roomCode, round, playerId, rule: RuleId` | Player redraws / discards / etc. |
+
+**Connection lifecycle (client + server):**
+| Event | Properties | Side | When |
+|---|---|---|---|
+| `cab_ws_connected` | `roomCode, reconnect: boolean` | client | WS open |
+| `cab_ws_disconnected` | `roomCode, reason, durationConnectedMs` | client | WS close |
+| `cab_reconnect_attempt` | `roomCode, attempt, backoffMs` | client | Each retry |
+| `cab_player_dropped` | `roomCode, playerId, reason` | server | Grace expired or explicit leave |
+
+**End of game:**
+| Event | Properties | When |
+|---|---|---|
+| `cab_game_ended` | `roomCode, mode: GameOverMode, winnerId, winnerIsRando, totalRounds, durationMs, finalScores[]` | `game_over` emitted |
+| `cab_play_again_clicked` | `previousRoomCode` | End screen button |
+
+### Error tracking
+
+- **Client errors:** `posthog.captureException(err)` invoked from a React error boundary in `__root.tsx`, and from a global `window.addEventListener('unhandledrejection')` handler.
+- **Server errors:** `posthogServer.captureException(err, { distinct_id, properties })` invoked in:
+  - h3 error middleware (catches all unhandled exceptions from HTTP routes)
+  - WS handler's outer try/catch
+  - `game-event-handler.ts` error path
+- Stack traces are sent in full (no source-map stripping). PostHog handles sourcemap upload via `posthog-cli` in the production Dockerfile.
+
+### Environment variables
+| Var | Purpose |
+|---|---|
+| `POSTHOG_API_KEY` | Project API key (public; safe to expose to client) |
+| `POSTHOG_HOST` | `https://us.i.posthog.com` (default) or EU equivalent |
+| `POSTHOG_PERSONAL_API_KEY` | Server-only; used for sourcemap upload during `pnpm build` |
+
+Both client and server use the same `POSTHOG_API_KEY` (it's a project key, not a user secret). The personal API key is only needed for build-time sourcemap upload.
+
+### Local dev
+PostHog client auto-opts-out on `localhost` to keep dev events out of the prod project. Set `POSTHOG_API_KEY` to a separate "dev" project key if you want local visibility.
 
 ---
 
@@ -1022,6 +1141,8 @@ src/
     code-gen.ts             — room code generation (uses crypto.randomInt)
     rate-limit.ts           — per-IP Redis sliding window
     logger.ts               — pino instance + named child loggers
+    posthog-client.ts       — posthog-js init + capture helpers
+    posthog-server.ts       — posthog-node init + server-side capture
     types.ts
   ws/
     handler.ts              — h3 WebSocket server handler
