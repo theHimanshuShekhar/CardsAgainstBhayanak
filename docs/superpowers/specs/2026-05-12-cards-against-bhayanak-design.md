@@ -527,6 +527,26 @@ Test matrix using multi-context (separate browser contexts per player):
 - [ ] Join as spectator → cannot submit cards, sees all reveals
 - [ ] Room full → auto-spectate on join
 - [ ] Host leaves → host role transfers, game continues
+- [ ] **Full 4-player 5-round game (golden-path end-to-end):**
+  - 4 browser contexts (Host + 3 players), all starting at `/`
+  - Host: navigates to `/games/create`, enters handle, sets `roundsToWin: 5`, `maxPlayers: 4`, selects 1 pack from test fixture, no house rules → clicks "Create lobby" → arrives at `/games/$code/lobby` with `playerId` persisted in localStorage
+  - 3 other contexts: navigate to `/games/join`, enter the room code (read from host's URL), enter their handles, select "Player" → arrive at `/games/$code/lobby` and appear in host's player list
+  - Lobby asserts: 4 players, 0 spectators, ready dots green, Start button enabled
+  - Host clicks "Start game" → all 4 contexts auto-navigate to `/games/$code/session`
+  - **Loop 5 rounds:** in each round —
+    1. Identify Czar (first round = host, then rotates by join order)
+    2. Czar context: asserts "Waiting for players…" hero
+    3. Three non-Czar contexts: each selects N cards from hand (N = prompt's `pick`), clicks Submit
+    4. Czar context: sees "Start reveal →" button, clicks it
+    5. All contexts: assert cards flip in sequence (`REVEAL_STAGGER` apart)
+    6. Czar context: clicks one revealed card → asserts winner badge appears on chosen submission
+    7. All contexts: scoreboard updates with +1 for winner; hands replenish to 10 for submitters
+    8. Wait `WINNER_PAUSE` ms → next round starts
+  - Assert that after at most 5 rounds, one player has 5 points
+  - All 4 contexts auto-navigate to `/games/$code/end`
+  - End screen asserts: winner callout shows correct handle, final scoreboard matches running tally tracked by the test
+  - All contexts: `localStorage.cab_session` is cleared
+  - Test runs against the deterministic test fixture pack so prompt sequence is reproducible
 
 ### Reconnect flows
 - [ ] Player refreshes mid-picking → reconnects, hand restored, can still submit
