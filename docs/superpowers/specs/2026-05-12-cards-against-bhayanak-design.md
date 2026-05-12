@@ -295,7 +295,6 @@ Always `{ type: "auth", sessionToken }`. Server validates the HMAC token and bin
 { type: "vote",            submissionId }          // God is Dead mode
 { type: "eliminate",       submissionId }          // Survival of the Fittest
 { type: "redraw" }                                 // Rebooting the Universe
-{ type: "swap_hand" }                              // Humanitarianism
 { type: "confess_discard", cardId }                // Never Have I Ever
 { type: "leave" }                                  // explicit leave
 { type: "ping" }                                   // keepalive
@@ -402,20 +401,18 @@ When a round transitions to `judging`, the server randomly permutes the submissi
 
 ### House Rules
 
-Official CAH rules from the 2014 rulebook (`https://s3.amazonaws.com/cah/CAH_Rules.pdf`):
+All rules below are from the official 2014 CAH rulebook (`https://s3.amazonaws.com/cah/CAH_Rules.pdf`):
 
-| Rule | ID | Source | Implementation |
-|---|---|---|---|
-| Rebooting the Universe | `rebooting` | Official | Player action: spend 1 point → return any number of white cards, redraw to 10. Available between rounds only. Requires `score >= 1`. |
-| Packing Heat | `packing_heat` | Official | On `pick: 2` black card → deal 1 extra white card to each player before submission phase. Hand becomes 11; submitting returns to 10. |
-| Rando Cardrissian | `rando` | Official | Auto-submitted random white card each round, attributed to imaginary player "Rando Cardrissian". If Rando wins the game overall, `game_over.randoWon = true` triggers shame screen variant. |
-| God Is Dead | `godmode` | Official | No Czar. All players submit, then all players vote. Each player gets one vote, cannot vote for own submission. Most votes wins. **Tie-breaking:** Re-vote between tied submissions. If tie persists 2×, random pick among tied. Disables Gambling and Serious Business. |
-| Survival of the Fittest | `survival` | Official | After all submissions are in, players take turns (in join order, skipping Czar) eliminating one submission each. Last submission remaining wins. UI: each player's turn shows a "remove one" prompt with all submissions face-up; clicking eliminates it. |
-| Serious Business | `serious_business` | Official | Instead of single winner per round, Czar ranks the **top 3 submissions**. 1st = 3 points, 2nd = 2 points, 3rd = 1 point. Track running tally. Final winner = highest total. Disables Gambling. UI: Czar's reveal screen shows 1/2/3 podium slots; cards dragged or click-numbered into slots. |
-| Never Have I Ever | `never_have_i_ever` | Official | Players may discard any white card from their hand at any time (between rounds) with a public confession ("I don't get this one"). Server replaces with a new card. Limited to 3 discards per game to prevent abuse. WS event: `{ type: "confess_discard", cardId }`. |
-| Happy Ending | `happy_ending` | Official | Host may end game early. When triggered, the final black card is forced to a "Make a Haiku" card (haikus need not be 5-7-5; just read dramatically per the official rule). Winner of the final round wins regardless of point totals. |
-| The Comeback | `comeback` | **Design extension** | Player(s) tied for last place play **2× normal cards**. For pick-N black cards, last-place plays 2N cards as one submission with 2N fills. Czar sees as one entry. Not in the official rulebook; included because the design prototype features it. |
-| Humanitarianism | `humanitarianism` | **Design extension** | Once per round per player: swap entire hand. Triggered via `swap_hand` event. (We added this from CAH community variants; not in the official rulebook.) |
+| Rule | ID | Implementation |
+|---|---|---|
+| Rebooting the Universe | `rebooting` | Player action: spend 1 point → return any number of white cards, redraw to 10. Available between rounds only. Requires `score >= 1`. |
+| Packing Heat | `packing_heat` | On `pick: 2` black card → deal 1 extra white card to each player before submission phase. Hand becomes 11; submitting returns to 10. |
+| Rando Cardrissian | `rando` | Auto-submitted random white card each round, attributed to imaginary player "Rando Cardrissian". If Rando wins the game overall, `game_over.randoWon = true` triggers shame screen variant. |
+| God Is Dead | `godmode` | No Czar. All players submit, then all players vote. Each player gets one vote, cannot vote for own submission. Most votes wins. **Tie-breaking:** Re-vote between tied submissions. If tie persists 2×, random pick among tied. Disables Gambling and Serious Business. |
+| Survival of the Fittest | `survival` | After all submissions are in, players take turns (in join order, skipping Czar) eliminating one submission each. Last submission remaining wins. UI: each player's turn shows a "remove one" prompt with all submissions face-up; clicking eliminates it. |
+| Serious Business | `serious_business` | Instead of single winner per round, Czar ranks the **top 3 submissions**. 1st = 3 points, 2nd = 2 points, 3rd = 1 point. Track running tally. Final winner = highest total. Disables Gambling. UI: Czar's reveal screen shows 1/2/3 podium slots; cards dragged or click-numbered into slots. |
+| Never Have I Ever | `never_have_i_ever` | Players may discard any white card from their hand at any time (between rounds) with a public confession ("I don't get this one"). Server replaces with a new card. Limited to 3 discards per game to prevent abuse. WS event: `{ type: "confess_discard", cardId }`. |
+| Happy Ending | `happy_ending` | Host may end game early. When triggered, the final black card is forced to a "Make a Haiku" card (haikus need not be 5-7-5; just read dramatically per the official rule). Winner of the final round wins regardless of point totals. |
 
 ---
 
@@ -558,8 +555,6 @@ Test matrix using multi-context (separate browser contexts per player):
 - [ ] Survival of the Fittest: takedown turns eliminate cards until one remains
 - [ ] Serious Business: Czar ranks top 3 (3/2/1 points), running tally to game end
 - [ ] Never Have I Ever: discard cards with confession (max 3 per game)
-- [ ] Humanitarianism: swap entire hand once per round
-- [ ] The Comeback: last-place player submits 2 cards (4 for pick-2 black)
 - [ ] Happy Ending: host can end mid-game with haiku final round (last round wins regardless)
 
 ### Base mechanics
