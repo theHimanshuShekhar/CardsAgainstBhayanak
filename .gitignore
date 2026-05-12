@@ -1,0 +1,15 @@
+node_modules
+.output
+.vinxi
+.turbo
+dist
+build
+*.log
+.env
+.env.local
+.env.*.local
+!.env.example
+coverage
+playwright-report
+test-results
+.DS_Store
