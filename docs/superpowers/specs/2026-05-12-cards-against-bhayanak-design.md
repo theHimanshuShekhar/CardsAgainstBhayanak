@@ -50,11 +50,28 @@ The original Claude Design HTML prototype is preserved in `docs/design-reference
 
 On any page mount:
 1. Read `localStorage.cab_session`. If missing → no active game.
-2. If present and current URL doesn't match active game → redirect to `/games/$code/session` (or `/lobby` if status is `lobby`).
+2. If present and current URL doesn't match active game → always redirect to `/games/$code/lobby`. The lobby route then inspects game status (via WS `state_snapshot`) and redirects to `/session` if status is `active` or `paused`, or `/end` if `ended`. Single navigation source-of-truth in the lobby route.
 3. Open WebSocket, send `{ type: "auth", sessionToken }`.
 4. Send `{ type: "rejoin" }`. Server responds with `state_snapshot`.
 5. Show `Reconnecting…` overlay until snapshot received.
-6. **Grace window: 30s.** Server keeps player active in `game:{code}:players` for 30s after disconnect. After that, treated as dropped (other players notified, hand returned to deck).
+6. **Grace window: 30s.** See "Disconnect timeline" below.
+
+### Disconnect timeline
+
+Three layered timeouts govern when a player is treated as permanently dropped:
+
+| Step | Trigger | Duration | What happens |
+|---|---|---|---|
+| 1 | Client sends `ping` every 15s | — | Keepalive |
+| 2 | Server silence detection | 45s with no `ping` | Server force-closes WS (handles half-open TCP) |
+| 3 | Grace window starts | `GRACE_WINDOW_MS` (30s) | Player marked `status: "grace"` in Redis. Hand preserved. Other clients see them with dimmed avatar. |
+| 4 | Grace expires | — | Player `status: "dropped"`. Hand returned to deck. `player_left` broadcast. |
+
+**Total tolerance:**
+- Clean disconnect (browser close, network drop with TCP RST): step 3 fires immediately → 30s grace
+- Half-open connection (Wi-Fi network change, dead VPN): step 2 fires first (45s) → step 3 (30s) → up to 75s
+
+Step 3 starts immediately on WS close event — no waiting for keepalive timeout when the disconnect is clean.
 
 ### Logout / leave
 
@@ -64,6 +81,34 @@ Client clears `cab_session` after `game_over` event, or on explicit Leave button
 
 - **CSRF:** Not required. `sessionToken` lives in `localStorage` and is sent via `Authorization: Bearer` header (not cookies). Same-origin policy + bearer token = no CSRF attack surface.
 - **Token replay (accepted risk):** Tokens are HMAC-bound to `playerId` for 24h. If leaked (e.g. shared screenshot, browser extension), an attacker can impersonate that player until the room expires. This is acceptable for a party game's threat model; not worth adding rotation or IP-binding which would break mobile users on flaky networks.
+- **Rate limiting:** Per-IP sliding-window limits using Redis: `10 join attempts/min/IP`, `5 game-create attempts/hour/IP`, `60 WS messages/min/connection`. Exceeding returns HTTP 429 / WS `error` with code `rate_limited`. Cloudflare's WAF provides upstream DDoS protection; app-level limits handle abuse from legitimate clients.
+
+---
+
+## HTTP API
+
+All endpoints under `/api`. JSON request and response bodies. `Authorization: Bearer <sessionToken>` header required for any endpoint operating on an existing player (except `join`).
+
+### Public endpoints
+
+| Method | Path | Body | Returns | Notes |
+|---|---|---|---|---|
+| GET | `/healthz` | — | `200 { db: "ok", redis: "ok", activeGames: N, uptime: T }` or `503` | Used by Docker healthcheck. Returns 503 if DB or Redis is unreachable. |
+| GET | `/api/packs` | — | `200 { packs: Pack[] }` | List of available card packs from DB. Cached 5 min. |
+| GET | `/api/stats` | — | `200 { ...StatsResponse }` | Aggregated stats for `/stats` page. Cached 5 min. |
+
+### Game lifecycle endpoints
+
+| Method | Path | Body | Returns | Notes |
+|---|---|---|---|---|
+| POST | `/api/games` | `{ username, config: GameConfig }` | `201 { roomCode, playerId, sessionToken }` | Creates a game, inserts host player. Rate-limited per IP. |
+| POST | `/api/games/$code/join` | `{ username, role: "player"\|"spectator" }` | `200 { playerId, sessionToken, status: PlayerStatus, gameStatus: SessionStatus }` | Joins an existing game. `gameStatus` tells client whether to wait in lobby or join queued. Returns 409 if username taken in session, 410 if game ended, 423 if room full and player role requested. |
+| POST | `/api/games/$code/start` | — (auth required) | `204 No Content` | Host-only. Server responds immediately, then emits `game_started` over WS. Returns 403 if not host, 409 if `<3 active players` or already started. |
+| POST | `/api/games/$code/leave` | — (auth required) | `204 No Content` | Explicit leave outside WS. Removes player from game. |
+
+### Error response shape
+
+All errors: `{ error: string, code: ErrorCode, details?: any }` with appropriate HTTP status. `code` matches the WS `ErrorCode` enum.
 
 ---
 
@@ -179,9 +224,11 @@ Design has breakpoints at `1100px`, `860px`, `720px`, `420px`. All preserved ver
 - Handle input (username, 2–20 chars)
 - Steppers: Max players (3–10), Rounds to win (3–20)
 - Segmented: Round timer (30s / 60s / 90s / Off)
-- Card packs grid (Core locked, others toggleable) — loaded from DB
-- House rules grid (all toggleable)
-- Sticky right panel: live summary + "Create lobby" button (disabled until handle ≥2 chars)
+- Card packs grid (Core locked, others toggleable) — loaded from DB via `GET /api/packs`. The default `Core` pack ID is resolved at runtime by name match (`name LIKE 'CAH Base Set%'`).
+- House rules:
+  - **Modal rules** (sub-section, radio-group — pick at most one): God Is Dead, Survival of the Fittest, Serious Business. Selecting one greys out the others; "None" option deselects all.
+  - **Orthogonal rules** (sub-section, checkboxes — any combination): Rebooting the Universe, Packing Heat, Rando Cardrissian, Never Have I Ever, Happy Ending.
+- Sticky right panel: live summary + "Create lobby" button (disabled until handle ≥2 chars; also disabled if any conflict — though UI prevents these)
 
 ### 3. Join Game (`/games/join`)
 - Room code input (uppercase, monospace, 6 chars)
@@ -196,7 +243,7 @@ Two states:
 - **"Copy code"** — copies just the formatted code (e.g. `B7K-9MV`)
 - **"Copy link"** — copies `https://<host>/games/join?code=B7K-9MV` (recipient lands on join screen with code pre-filled)
 
-Player list with HOST/YOU/READY badges, empty seats (dashed), spectator row, game summary panel (packs, rules, settings), host sees "Start game" (disabled until ≥3 players), non-host sees "Waiting for host…" spinner.
+Player list with HOST/YOU badges and a small green presence dot per player (no ready/not-ready distinction — all joined players are automatically ready). Empty seats (dashed), spectator row, game summary panel (packs, rules, settings), host sees "Start game" (disabled until ≥3 players), non-host sees "Waiting for host…" spinner.
 
 **Mid-game waiting:** Same layout but shows "Game in progress — you'll join after this round." Live scoreboard visible (read-only). On `round_end` event containing this player's ID in `activatedPlayers[]`, the client navigates to `/games/$code/session`.
 
@@ -214,7 +261,7 @@ Player list with HOST/YOU/READY badges, empty seats (dashed), spectator row, gam
 **Phase timing is server-controlled.** The server schedules transitions (`reveal_start`, `card_revealed`, `round_end`, `round_started`) and emits events at the right time. Clients only animate based on received events — they do not run their own phase timers. This prevents drift across clients.
 
 **Layout:**
-- Sticky topbar: ROUND XX pill, timer pill, Leave button
+- Sticky topbar: ROUND XX pill, timer pill, **host-only ⋯ menu** (when `happy_ending` rule active — opens dropdown with "End game early — make a haiku"), Leave button
 - Scoreboard row (current Czar highlighted in white chip)
 - Stage: prompt card left (xl size), submissions grid right
 - Hand dock: sticky bottom, **10 cards** fanned per official CAH rules (design's 7-card fan widened to fit 10 — increase overlap or scroll horizontally on narrow screens), selected cards lift
@@ -245,7 +292,7 @@ Player list with HOST/YOU/READY badges, empty seats (dashed), spectator row, gam
 
 ### `GameContext` (pre-game draft — survives Create → Lobby navigation)
 
-Holds a `GameDraft` (see Type Definitions). Defaults: `maxPlayers: 6`, `roundsToWin: 7`, `timer: "60s"`, `packs: ["core-set"]`, `rules: []`.
+Holds a `GameDraft` (see Type Definitions). Defaults: `maxPlayers: 6`, `roundsToWin: 7`, `timer: "60s"`, `packs: []` (initially empty — Create screen loads available packs via `GET /api/packs` on mount and auto-selects the Core pack by name match), `rules: []`.
 
 ### Session persistence (`localStorage`)
 
@@ -284,6 +331,7 @@ type GamePlayer = {
   score: number
   isHost: boolean
   isRando: boolean          // synthetic Rando Cardrissian player
+  discardsUsed: number      // for Never Have I Ever (capped at 3 per game)
   joinedAt: string          // ISO timestamp
 }
 
@@ -329,23 +377,66 @@ type SessionState = {
   round: number
   prompt: BlackCard
   czarId: string | null     // null during God Is Dead
-  hand: Hand                // server only sends this to the hand's owner
+  hand?: Hand               // omitted for spectators; only sent to the hand's owner
   submissions: Submission[] // server pre-shuffles between players
   scores: PlayerScore[]
   revealIndex: number
   winnerId: string | null
   eliminationTurnPlayerId?: string  // Survival of the Fittest current turn
   voteTally?: Record<string, number> // God Is Dead live votes
+  ranking?: Submission[]    // Serious Business top-3 (rank+points filled)
 }
+
+// ── Session-level status ──────────────────────────────────────
+type SessionStatus = "lobby" | "active" | "paused" | "ended" | "abandoned"
+
+// ── House rule IDs ────────────────────────────────────────────
+type ModalRuleId =          // mutually exclusive — at most one
+  | "godmode"               // God Is Dead
+  | "survival"              // Survival of the Fittest
+  | "serious_business"      // Serious Business
+
+type OrthogonalRuleId =     // stackable in any combination
+  | "rebooting"
+  | "packing_heat"
+  | "rando"
+  | "never_have_i_ever"
+  | "happy_ending"
+
+type RuleId = ModalRuleId | OrthogonalRuleId
 
 // ── Config (persisted in game_sessions.config JSONB) ──────────
 type GameConfig = {
   maxPlayers: number          // 3–10
   roundsToWin: number         // 3–20
   timer: "30s" | "60s" | "90s" | "Off"
-  packs: string[]             // pack IDs
-  rules: string[]             // house rule IDs (rebooting, packing_heat, rando, godmode, survival, serious_business, never_have_i_ever, happy_ending)
+  packs: string[]             // pack IDs (resolved at game-create time from DB)
+  rules: RuleId[]             // ≤1 modal rule + any orthogonal rules
 }
+
+// ── Game-over outcome ─────────────────────────────────────────
+type GameOverMode =
+  | "normal"             // first player reached roundsToWin
+  | "happy_ending"       // host triggered early end via "Make a Haiku"
+  | "rando_won"          // synthetic Rando player has highest score
+  | "deck_exhausted"     // ran out of black cards before any player won
+  | "abandoned"          // all players dropped past grace; sweeper marked ended
+
+// ── Error codes (used by WS error and HTTP 4xx responses) ─────
+type ErrorCode =
+  | "not_authorized"     // auth failed or missing
+  | "invalid_token"      // sessionToken HMAC mismatch
+  | "player_dropped"     // grace window expired
+  | "spectator_action"   // spectator tried to send a game action
+  | "invalid_state"      // event sent in wrong phase
+  | "rate_limited"       // too many requests
+  | "room_full"          // tried to join as player when player slots full
+  | "room_not_found"     // room code doesn't exist or expired
+  | "duplicate_username" // handle taken in this session
+  | "conflicting_rules"  // game start with >1 modal rule
+  | "host_only"          // non-host tried host-only action
+  | "score_too_low"      // tried to Reboot the Universe with score < 1
+  | "internal_error"
 
 // ── Pre-game draft (client-side only) ─────────────────────────
 type GameDraft = GameConfig & {
@@ -400,26 +491,29 @@ All client messages are scoped to the socket's authenticated `playerId` + `roomC
 ### Server → Client events
 ```
 { type: "auth_ok" }
-{ type: "auth_error",     reason }
-{ type: "state_snapshot", state: SessionState }     // sent on rejoin
-{ type: "player_joined",  player }
-{ type: "player_left",    playerId }
-{ type: "game_started",   firstRound }
-{ type: "round_started",  round, prompt, czarId, hand? }
-{ type: "player_played",  playerId }                // face-down ack to others
-{ type: "player_gambled", playerId }                // notify others of a wager
+{ type: "auth_error",       code: ErrorCode, message }
+{ type: "state_snapshot",   state: SessionState }       // sent on rejoin
+{ type: "player_joined",    player: GamePlayer }
+{ type: "player_left",      playerId }
+{ type: "game_started",     firstRound }
+{ type: "round_started",    round, prompt: BlackCard, czarId: string|null, hand?: Hand }
+{ type: "player_played",    playerId }                  // face-down ack to others
+{ type: "player_gambled",   playerId }                  // notify others of a wager
+{ type: "player_skipped",   playerId, round }           // timer expired before submission
 { type: "reveal_start" }
-{ type: "card_revealed",  submissionIndex, fills[] }
-{ type: "round_won",      winnerId, submissionId, scores[], handsRefilled[] }
-{ type: "round_ranked",   ranking[], scoresDelta[] }  // Serious Business
-{ type: "elimination_turn", playerId }              // Survival: whose turn to eliminate
-{ type: "card_eliminated",  submissionId, byPlayerId } // Survival
-{ type: "vote_tally",     votes: {submissionId: count} } // God Is Dead
-{ type: "round_end",      activatedPlayers[] }      // mid-game joiners now active
-{ type: "game_over",      finalScores[], winnerId, randoWon: boolean, mode: "normal"|"happy_ending" }
-{ type: "error",          message }
+{ type: "card_revealed",    submissionIndex, fills: Card[] }
+{ type: "round_won",        winnerId, submissionId, scores: PlayerScore[] }      // normal & God-Is-Dead resolution
+{ type: "round_ranked",     ranking: Submission[], scoresDelta: Record<playerId, number> } // Serious Business
+{ type: "elimination_turn", playerId }                  // Survival: whose turn to eliminate
+{ type: "card_eliminated",  submissionId, byPlayerId }  // Survival
+{ type: "vote_tally",       votes: Record<submissionId, number> } // God Is Dead live
+{ type: "round_end",        activatedPlayers: string[], handsRefilled: Record<playerId, Hand> } // every mode ends with this
+{ type: "game_over",        finalScores: PlayerScore[], winnerId, mode: GameOverMode }
+{ type: "error",            code: ErrorCode, message }
 { type: "pong" }
 ```
+
+`round_end` is the single source of truth for round termination across all modes. It always carries `handsRefilled` (each submitter's new full hand) so clients update their hand UI uniformly. Mode-specific events (`round_won`, `round_ranked`) precede `round_end` to describe the outcome; `round_end` finalizes scores and refills.
 
 ### Submission ordering
 
@@ -454,7 +548,7 @@ When the WebSocket drops unexpectedly, client retries with exponential backoff: 
 |---|---|
 | Regular player picking | Card pool returns their cards (if any submitted) on permanent drop; round continues with remaining players |
 | Regular player judging | No action — they don't have an active role this round |
-| **Czar** during `picking` / `waiting` | If permanent drop, round is voided. Cards returned to hands. Next player becomes Czar. Round restarts with same prompt or new (config: `voidedRoundPolicy: "restart"\|"skip"`, default `restart`) |
+| **Czar** during `picking` / `waiting` | If permanent drop, round is voided: cards returned to hands, next player by join order becomes Czar, round restarts with a fresh black card. (No skip behavior — always restart for fairness.) |
 | **Czar** during `judging` / `reveal` | If permanent drop, server auto-picks a random submission as winner after grace window expires |
 | **Czar** during `eliminating` (Survival) | Same as above — server auto-eliminates random remaining submissions until one wins |
 | **Czar** during `ranking` (Serious Business) | Same — server auto-ranks remaining unranked submissions randomly |
@@ -474,8 +568,11 @@ Client sends `ping` every 15s; server responds `pong`. After 45s of silence, ser
 2. Each round: rotate Czar, deal new black card from shuffled deck
 3. Non-czar players submit `pick` white cards (1, 2, or 3 per black card) — **submission order matters for multi-pick cards** (the Czar reads them in the order submitted)
 4. Czar shuffles answers and reads each combination dramatically (re-reading the prompt before each, per official rules)
-5. Czar picks winner → winner gets black card as Awesome Point
-6. **Hand replenishment:** Immediately after winner picked, before `transition` phase begins, all submitters' hands replenish to 10 (server emits `round_won` with each player's new hand)
+5. Round resolution (mode-dependent):
+   - **Normal / God Is Dead:** Czar picks (or vote-majority resolves) → winner gets the black card as 1 Awesome Point. Server emits `round_won`.
+   - **Survival of the Fittest:** Players eliminate cards until 1 remains → that submitter wins 1 point. Server emits `round_won`.
+   - **Serious Business:** Czar ranks top 3 → +3/+2/+1 points to the respective players. Server emits `round_ranked`.
+6. **Round termination & hand replenishment (uniform across modes):** Server emits `round_end` containing `handsRefilled: Record<playerId, Hand>` — every submitter's hand topped back up to 10 from `deck:white`. Discards (winners + losers) moved to `discard:white`. Black card moved to `discard:black`. `round_end` also carries `activatedPlayers[]` if any mid-game joiners are now active.
 7. First to `roundsToWin` Awesome Points wins → `game_over`
 
 ### Gambling (base mechanic, always on)
@@ -486,13 +583,25 @@ Before submitting their primary card(s) for the round, any non-Czar player with 
 - Each of the player's submissions is treated independently in the Czar's view (they don't know they belong to the same player until reveal).
 - **If any of the player's submissions wins:** they keep their wagered point and gain 1 from winning (net +1, same as normal).
 - **If neither wins:** the wagered point transfers to the round winner.
-- Gambling is disabled in `God Is Dead` mode (no Czar to read), in `Serious Business` mode (point math gets weird), and on round 1 (no points to wager).
+- Gambling is disabled in `God Is Dead` mode (no Czar to read), `Survival of the Fittest` mode (wagered cards can be eliminated, broken point math), `Serious Business` mode (point math conflicts with rank-based scoring), and on round 1 (no points to wager).
 
 ### Czar selection
 
 Players are ordered by `game_players.joined_at` (insertion order). Czar rotates through this array by index, modulo the number of *active* (non-spectator, non-queued) players. New mid-game joiners are appended to the end and join the rotation from the next-next round (they sit out as a regular player for one round before potentially becoming Czar).
 
-**Round 1 Czar is chosen randomly** from active players (server-side `crypto.randomInt`). Fair to the host. Tests seed the RNG via a `CAB_RNG_SEED` env var so the test's expected Czar sequence is deterministic.
+**Round 1 Czar is chosen randomly** from active players via `src/lib/rng.ts`. Fair to the host. Tests seed the RNG via `CAB_RNG_SEED` env var so the expected Czar sequence is deterministic.
+
+### Randomness (seedable PRNG)
+
+All non-cryptographic randomness goes through `src/lib/rng.ts`, which wraps the [`seedrandom`](https://www.npmjs.com/package/seedrandom) library. Exposes:
+```ts
+export function randomInt(min: number, max: number): number   // inclusive min, exclusive max
+export function shuffle<T>(array: T[]): T[]                    // Fisher-Yates, returns new array
+export function pick<T>(array: T[]): T                         // single random element
+```
+- In production, the PRNG is seeded once at boot from `crypto.randomBytes(16)`. No determinism.
+- In tests, `CAB_RNG_SEED` env var is the seed → fully reproducible outcomes (first Czar, deck shuffle, Rando card picks, modal-rule random choices).
+- Crypto-strength randomness (room codes, sessionToken HMAC nonces) uses `crypto` directly — never goes through this wrapper.
 
 ### Card pool
 
@@ -588,25 +697,43 @@ On server start in `src/lib/seed.ts`. Runs asynchronously — does not block ser
 
 ```
 packs          — id, name, slug (unique), card_count, created_at
-black_cards    — id, pack_id (fk), text, pick (CHECK pick IN (1,2,3)), unique(pack_id, text)
+black_cards    — id, pack_id (fk), text, pick (CHECK pick IN (1,2,3)), unique(pack_id, text, pick)
 white_cards    — id, pack_id (fk), text,                                unique(pack_id, text)
 
-game_sessions  — id, code (CHAR(6), unique), status, config JSONB, host_player_id (nullable FK), created_at, ended_at, winner_player_id (nullable FK)
+game_sessions  — id, code (CHAR(6), unique — stored without dash, e.g. 'B7K9MV'), status, config JSONB,
+                 host_player_id (nullable FK), created_at, last_activity_at, ended_at, winner_player_id (nullable FK)
                  status ENUM: 'lobby' | 'active' | 'paused' | 'ended' | 'abandoned'
 
-game_players   — id, session_id (fk), username, role, score, status, is_host, is_rando, joined_at
+game_players   — id, session_id (fk), username, role, score, status, is_host, is_rando, discards_used INT DEFAULT 0, joined_at
                  status ENUM: 'active' | 'queued' | 'spectator' | 'grace' | 'dropped'
-                 unique(session_id, is_rando) where is_rando = true   -- at most one Rando per game
+                 unique(session_id, username)                          -- handles unique per room
+                 partial unique(session_id) WHERE is_rando = true     -- at most one Rando per game
 
 game_rounds    — id, session_id (fk), round_num, black_card_id, czar_player_id (nullable for God Is Dead),
-                 winner_player_id (nullable FK), winning_submission_fills JSONB,
+                 winner_player_id (nullable FK; for Serious Business = top-ranked player),
+                 winning_submission_fills JSONB,
                  ranking JSONB (nullable, only set in Serious Business mode: [{playerId, fills, rank, points}]),
                  vote_tally JSONB (nullable, only set in God Is Dead: {submissionId: count}),
                  played_at
                  unique(session_id, round_num)
 
+INDEX idx_sessions_last_activity ON game_sessions (last_activity_at) WHERE status IN ('active', 'paused')  -- sweeper job query
 INDEX gin_winning_fills ON game_rounds USING gin (winning_submission_fills)  -- speeds up top-cards stats query
 ```
+
+### `last_activity_at` and stale-game sweeper
+
+`last_activity_at` is updated on every WS message and HTTP API call for the session. A background job (`src/lib/sweeper.ts`) runs every 30 min:
+- Find sessions with `status IN ('active', 'paused')` AND `last_activity_at < now() - INTERVAL '6 hours'` AND zero present players in Redis
+- Mark these as `status='abandoned'`, set `ended_at = now()`
+- Prevents orphan rows from games that died without a clean `game_over`
+
+### Room code storage and display
+
+- DB stores raw 6 chars: e.g. `B7K9MV` (no dash, no padding)
+- URL paths use raw form: `/games/B7K9MV/lobby`
+- Display layer inserts dash for human reading: rendered as `B7K-9MV`
+- Input fields accept either form: `B7K-9MV`, `b7k9mv`, `b7k 9mv` all normalize to `B7K9MV` server-side
 
 ### Host FK chicken-and-egg resolution
 
@@ -636,15 +763,25 @@ Query-time aggregations with `Cache-Control: public, max-age=300`:
 ## Redis State Shape (per room)
 
 ```
-game:{code}             hash: status, currentRound, totalRounds, czarIndex, hostId, config JSON
-game:{code}:players     hash: playerId → GamePlayer JSON
-game:{code}:round       hash: blackCardId, czarId, submissions JSON, winnerId
-game:{code}:deck:black  list of card IDs (shuffled)
-game:{code}:deck:white  list of card IDs (shuffled)
-game:{code}:discard:white  list (for reshuffle when deck low)
-game:{code}:hand:{id}   set of white card IDs
-game:{code}:grace:{id}  string with PX expiry = GRACE_WINDOW_MS; set on disconnect
-game:{code}:channel     pub/sub channel
+game:{code}                hash: status, currentRound, totalRounds, czarIndex, hostId, config JSON, lastActivityAt
+game:{code}:players        hash: playerId → GamePlayer JSON (includes discardsUsed)
+game:{code}:round          hash with mode-aware fields:
+                             blackCardId         (always)
+                             czarId              (null in God Is Dead)
+                             submissions         (always, JSON: playerId → Submission)
+                             winnerId            (filled at round_won)
+                             ranking             (only in Serious Business: JSON)
+                             voteTally           (only in God Is Dead: JSON)
+                             eliminationTurnPlayerId (only in Survival: current eliminator)
+                             eliminations        (only in Survival: array of {submissionId, byPlayerId})
+                             roundTimerExpiresAt (epoch ms, if timer enabled)
+game:{code}:deck:black     list of card IDs (shuffled)
+game:{code}:deck:white     list of card IDs (shuffled)
+game:{code}:discard:white  list (for reshuffle when deck:white runs low)
+game:{code}:discard:black  list (informational; no reshuffle)
+game:{code}:hand:{id}      set of white card IDs (for player {id})
+game:{code}:grace:{id}     string with PX expiry = GRACE_WINDOW_MS; set on disconnect
+game:{code}:channel        pub/sub channel
 ```
 All keys: 24h TTL on idle. Refreshed on any state mutation.
 
@@ -658,9 +795,9 @@ Valkey configured with AOF (`appendonly yes`) so a container restart recovers st
 
 - 6 alphanumeric chars, uppercase, excluding ambiguous: `O`, `0`, `I`, `1`, `L` → alphabet = `ABCDEFGHJKMNPQRSTUVWXYZ23456789` (31 chars)
 - Total space: `31^6 ≈ 887M` — plenty.
-- Generation: `crypto.randomBytes(6).map(b => ALPHABET[b % 31])`
+- Generation: for each of 6 positions, `crypto.randomInt(0, 31)` to pick from the alphabet. `crypto.randomInt` uses rejection sampling internally → unbiased uniform distribution. Modulo-on-byte approaches have ~3% bias and are avoided.
 - Collision check: `SET game:{code} ... NX EX 86400`. If `NX` fails, regenerate. Retry up to 5 times.
-- Display format: `XXX-XXX` (dash inserted client-side only).
+- Display format: `XXX-XXX` (dash inserted client-side only). Input accepts dashed/undashed/lowercase forms; normalized server-side.
 
 ---
 
@@ -674,26 +811,27 @@ Test matrix using multi-context (separate browser contexts per player):
 - [ ] Join as spectator → cannot submit cards, sees all reveals
 - [ ] Room full → auto-spectate on join
 - [ ] Host leaves → host role transfers, game continues
-- [ ] **Full 4-player 5-round game (golden-path end-to-end):**
-  - 4 browser contexts (Host + 3 players), all starting at `/`
-  - Host: navigates to `/games/create`, enters handle, sets `roundsToWin: 5`, `maxPlayers: 4`, selects 1 pack from test fixture, no house rules → clicks "Create lobby" → arrives at `/games/$code/lobby` with `playerId` persisted in localStorage
-  - 3 other contexts: navigate to `/games/join`, enter the room code (read from host's URL), enter their handles, select "Player" → arrive at `/games/$code/lobby` and appear in host's player list
-  - Lobby asserts: 4 players, 0 spectators, ready dots green, Start button enabled
-  - Host clicks "Start game" → all 4 contexts auto-navigate to `/games/$code/session`
-  - **Loop 5 rounds:** in each round —
-    1. Identify Czar (first round = host, then rotates by join order)
+- [ ] **Full 6-player 5-win game (golden-path end-to-end):**
+  - 6 browser contexts (Host + 5 players), all starting at `/`
+  - Host: navigates to `/games/create`, enters handle, sets `roundsToWin: 5`, `maxPlayers: 6`, leaves packs/rules at defaults (Core only) → clicks "Create lobby" → arrives at `/games/$code/lobby` with `playerId` persisted in localStorage
+  - 5 other contexts: navigate to `/games/join`, enter the room code (read from host's URL), enter their handles, select "Player" → arrive at `/games/$code/lobby` and appear in host's player list
+  - Lobby asserts: 6 players, 0 spectators, presence dots green, Start button enabled
+  - Host clicks "Start game" → all 6 contexts auto-navigate to `/games/$code/session`
+  - **Loop until `game_over` event** (variable number of rounds; with seeded RNG, the outcome is deterministic):
+    1. Identify Czar from `round_started` event payload (first round czar = seeded random; subsequent rounds rotate by join order)
     2. Czar context: asserts "Waiting for players…" hero
-    3. Three non-Czar contexts: each selects N cards from hand (N = prompt's `pick`), clicks Submit
+    3. 5 non-Czar contexts: each selects N cards from hand (N = prompt's `pick`), clicks Submit
     4. Czar context: sees "Start reveal →" button, clicks it
     5. All contexts: assert cards flip in sequence (`REVEAL_STAGGER` apart)
-    6. Czar context: clicks one revealed card → asserts winner badge appears on chosen submission
-    7. All contexts: scoreboard updates with +1 for winner; hands replenish to 10 for submitters
+    6. Czar context: clicks the submission marked as winning by the test plan (test plan precomputed from seed) → asserts winner badge appears
+    7. All contexts: scoreboard updates; hands replenish to 10 for submitters via `round_end` event
     8. Wait `WINNER_PAUSE` ms → next round starts
-  - Assert that after at most 5 rounds, one player has 5 points
-  - All 4 contexts auto-navigate to `/games/$code/end`
-  - End screen asserts: winner callout shows correct handle, final scoreboard matches running tally tracked by the test
-  - All contexts: `localStorage.cab_session` is cleared
-  - Test runs against the deterministic test fixture pack so prompt sequence is reproducible
+    9. Break loop when any context observes `game_over` event
+  - Assert: total round count ≤ 20 (sanity bound), winner has exactly 5 points
+  - All 6 contexts auto-navigate to `/games/$code/end`
+  - End screen asserts: winner callout shows correct handle, final scoreboard matches the running tally tracked by the test
+  - **`localStorage.cab_session` persists during end screen**; clicking "Go home" clears it.
+  - Test uses the seeded RNG (`CAB_RNG_SEED=test-seed-2026`) so the entire game (Czar order, prompts, Rando picks if enabled) is deterministic.
 
 ### Reconnect flows
 - [ ] Player refreshes mid-picking → reconnects, hand restored, can still submit
@@ -774,14 +912,57 @@ services:
 - `run` stage: `node:22-alpine`, copies `.output/`, runs `node .output/server/index.mjs`, `USER node`, `EXPOSE 3000`
 
 ### Environment variables
-`DATABASE_URL`, `REDIS_URL`, `SESSION_SECRET`, `PORT` (default 3000), `TUNNEL_TOKEN`, `NODE_ENV`
+| Var | Purpose |
+|---|---|
+| `DATABASE_URL` | Postgres connection string |
+| `REDIS_URL` | Redis/Valkey connection string |
+| `SESSION_SECRET` | HMAC secret for sessionToken |
+| `PORT` | App port (default 3000) |
+| `NODE_ENV` | `development` \| `production` |
+| `TUNNEL_TOKEN` | Cloudflare Tunnel token |
+| `AXIOM_TOKEN` | API token for Axiom log shipping (prod only) |
+| `AXIOM_DATASET` | Axiom dataset name (default `cab-prod`) |
+| `CAB_RNG_SEED` | Seedable PRNG seed (tests only; unset in prod = crypto-seeded) |
 
 ### Notes
 - App port not exposed to host (only to Docker network) — Cloudflare Tunnel forwards `yourdomain.com` → `http://app:3000`
 - Tunnel natively proxies WebSocket upgrades — no extra config needed
 - `docker-compose.prod.yml` override: `restart: unless-stopped`, memory limits (app: 512M, postgres: 1G, redis: 256M), `NODE_ENV=production`
-- Health checks: postgres `pg_isready`, redis `redis-cli ping`, app `GET /healthz`
+- Health checks: postgres `pg_isready`, redis `redis-cli ping`, app `GET /healthz` (returns 200 with `{ db, redis, activeGames, uptime }` or 503 if any dependency is down)
 - Volumes: `postgres_data`, `redis_data` (both backed up via host volume mount)
+
+---
+
+## Logging
+
+Structured JSON logs via [`pino`](https://github.com/pinojs/pino):
+- **Development:** pretty-printed to stdout via `pino-pretty` (human-readable)
+- **Production:** JSON stdout, shipped to [Axiom](https://axiom.co/) using the official `@axiomhq/pino` transport. Env vars: `AXIOM_TOKEN`, `AXIOM_DATASET`. Free tier (500GB ingest/mo) easily covers expected volume.
+
+Loggers (named) per module: `cab.ws`, `cab.api`, `cab.engine`, `cab.seed`, `cab.sweeper`. Log levels: `trace` (per-message WS spam, dev only), `debug` (state transitions), `info` (game lifecycle: created/started/ended), `warn` (recoverable issues like seed retries), `error` (5xx, unhandled exceptions).
+
+Every log line carries `{ roomCode?, playerId? }` when applicable for filtering.
+
+---
+
+## Quick Reference
+
+| Command | Purpose |
+|---|---|
+| `pnpm install` | Install dependencies |
+| `pnpm dev` | Start dev server with HMR (http://localhost:3000) |
+| `pnpm build` | Production build to `.output/` |
+| `pnpm start` | Run the production build locally |
+| `pnpm db:push` | Apply Drizzle schema to Postgres (no migrations) |
+| `pnpm db:studio` | Open Drizzle Studio (DB browser) |
+| `pnpm seed` | Manually trigger card pack seeding from REST AH |
+| `pnpm typecheck` | Run TypeScript type check |
+| `pnpm lint` | Run ESLint |
+| `pnpm test:e2e` | Run Playwright E2E suite (requires Postgres + Redis) |
+| `pnpm test:e2e:ui` | Playwright UI mode for debugging |
+| `docker compose up -d` | Start full stack locally |
+| `docker compose up -d postgres redis` | Just deps for local dev |
+| `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d` | Production deploy |
 
 ---
 
@@ -831,12 +1012,16 @@ src/
     useSession.ts           — reads/writes cab_session localStorage
   lib/
     timing.ts               — animation timing constants
+    rng.ts                  — seedable PRNG wrapper (seedrandom)
     game-engine.ts          — round logic, house rules, deck ops
     game-state.ts           — Redis state operations
     game-event-handler.ts   — orchestrates game start, round transitions
     seed.ts                 — card data seeding from REST AH
+    sweeper.ts              — stale-game cleanup background job
     session-token.ts        — HMAC sign/verify
-    code-gen.ts             — room code generation
+    code-gen.ts             — room code generation (uses crypto.randomInt)
+    rate-limit.ts           — per-IP Redis sliding window
+    logger.ts               — pino instance + named child loggers
     types.ts
   ws/
     handler.ts              — h3 WebSocket server handler
@@ -848,6 +1033,7 @@ src/
 tests/
   e2e/
     create-join-play.spec.ts
+    full-game.spec.ts        — 6-player 5-win golden-path test
     reconnect.spec.ts
     mid-game-join.spec.ts
     house-rules.spec.ts
@@ -855,7 +1041,8 @@ tests/
     mobile.spec.ts
     a11y.spec.ts
   fixtures/
-    test-pack.ts            — deterministic test card data
+    handles.ts               — test player handles
+    expected-outcomes.ts     — pre-computed game outcomes for seeded RNG
   playwright.config.ts
 docs/
   superpowers/specs/        — this spec
