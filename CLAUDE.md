@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> This document is a summary distilled from the canonical spec at `docs/superpowers/specs/2026-05-12-cards-against-bhayanak-design.md`. When this file and the spec disagree, **the spec wins.** When you need detail beyond what's here, read the spec section by section title.
+> This document is a summary distilled from the canonical spec at `SPEC.md`. When this file and the spec disagree, **the spec wins.** When you need detail beyond what's here, read the spec section by section title.
 
 ---
 
@@ -16,7 +16,7 @@ A real-time multiplayer Cards Against Humanity clone, **Cards Against Bhayanak**
 
 | Location | Use for |
 |---|---|
-| `docs/superpowers/specs/2026-05-12-cards-against-bhayanak-design.md` | Authoritative spec — read before coding |
+| `SPEC.md` | Authoritative spec — read before coding |
 | `docs/design-reference/project/Cards Against Bhayanak.html` | HTML prototype entry point |
 | `docs/design-reference/project/{styles,scenes,stats}.css` | Design token + component CSS to port to `src/styles.css` |
 | `docs/design-reference/project/screens.jsx` | React component logic to port |
