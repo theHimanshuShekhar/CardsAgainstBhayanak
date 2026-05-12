@@ -35,11 +35,11 @@ The original Claude Design HTML prototype is preserved in `docs/design-reference
 
 ### Join flow (HTTP first, then WebSocket)
 
-1. **HTTP `POST /api/games/$code/join`** — body `{ username, role: "player"|"spectator" }`. Server:
-   - Validates room exists, has capacity
-   - Generates `playerId` (cuid or postgres-generated)
-   - Inserts row in `game_players` (status: `active` | `queued` | `spectator`)
-   - Returns `{ playerId, sessionToken, status, gamePhase }`
+1. **HTTP `POST /api/games/$code/join`** — body `{ username, role: "player"|"spectator", anonId }`. Server:
+   - Validates room exists, has capacity, handle is unique in the session
+   - Generates `playerId` via `cuid2` (`@paralleldrive/cuid2`) — Drizzle column default
+   - Inserts row in `game_players` (status: `active` | `queued` | `spectator`; stores `posthog_anon_id = anonId`)
+   - Returns `{ playerId, sessionToken, status: PlayerStatus, gameStatus: SessionStatus }`
 2. **Client writes `localStorage.cab_session`** = `{ roomCode, playerId, sessionToken, username, role }`
 3. **WebSocket connects** to `/api/games/$code/ws` and immediately sends `{ type: "auth", sessionToken }` to register the socket against the existing player
 4. **Server validates `sessionToken`**, binds socket → player
@@ -75,7 +75,7 @@ Step 3 starts immediately on WS close event — no waiting for keepalive timeout
 
 ### Logout / leave
 
-Client clears `cab_session` after `game_over` event, or on explicit Leave button. Server removes player from Redis on `leave` message.
+Client clears `cab_session` on **explicit Leave button**, on **"Go home" from the end screen**, or on **`auth_error`**. The session **persists through `game_over` and the end screen** so the "Play again" button can reuse the handle and `anonId`. Server removes player from Redis on `leave` message.
 
 ### Security notes
 
@@ -96,13 +96,14 @@ All endpoints under `/api`. JSON request and response bodies. `Authorization: Be
 | GET | `/healthz` | — | `200 { db: "ok", redis: "ok", activeGames: N, uptime: T }` or `503` | Used by Docker healthcheck. Returns 503 if DB or Redis is unreachable. |
 | GET | `/api/packs` | — | `200 { packs: Pack[] }` | List of available card packs from DB. Cached 5 min. |
 | GET | `/api/stats` | — | `200 { ...StatsResponse }` | Aggregated stats for `/stats` page. Cached 5 min. |
+| GET | `/api/config` | — | `200 { posthogKey, posthogHost }` | Client bootstraps PostHog by fetching its key here. Avoids exposing the key via Vite build env. Cached 1h. |
 
 ### Game lifecycle endpoints
 
 | Method | Path | Body | Returns | Notes |
 |---|---|---|---|---|
-| POST | `/api/games` | `{ username, config: GameConfig }` | `201 { roomCode, playerId, sessionToken }` | Creates a game, inserts host player. Rate-limited per IP. |
-| POST | `/api/games/$code/join` | `{ username, role: "player"\|"spectator" }` | `200 { playerId, sessionToken, status: PlayerStatus, gameStatus: SessionStatus }` | Joins an existing game. `gameStatus` tells client whether to wait in lobby or join queued. Returns 409 if username taken in session, 410 if game ended, 423 if room full and player role requested. |
+| POST | `/api/games` | `{ username, anonId, config: GameConfig }` | `201 { roomCode, playerId, sessionToken }` | Creates a game, inserts host player. Rate-limited per IP. `anonId` (client's PostHog distinct_id) is persisted on the player row for server-side event attribution. |
+| POST | `/api/games/$code/join` | `{ username, anonId, role: "player"\|"spectator" }` | `200 { playerId, sessionToken, status: PlayerStatus, gameStatus: SessionStatus }` | Joins an existing game. `gameStatus` tells client whether to wait in lobby or join queued. Returns 409 if username taken in session, 410 if game ended, 423 if room full and player role requested. |
 | POST | `/api/games/$code/start` | — (auth required) | `204 No Content` | Host-only. Server responds immediately, then emits `game_started` over WS. Returns 403 if not host, 409 if `<3 active players` or already started. |
 | POST | `/api/games/$code/leave` | — (auth required) | `204 No Content` | Explicit leave outside WS. Removes player from game. |
 
@@ -345,17 +346,17 @@ type PlayerScore = {
 
 // ── Cards ─────────────────────────────────────────────────────
 type Card = {
-  id: string                // server-side card UUID/cuid
-  text: string              // pre-normalised: blanks are __________
+  id: string                // server-side card cuid2
+  text: string              // plain text for white cards; black cards have blanks pre-normalised as __________
 }
 
 type BlackCard = Card & { pick: 1 | 2 | 3 }
 
-type Hand = Card[]          // exactly 10 cards (11 during Packing Heat on pick:2)
+type Hand = Card[]          // exactly 10 white cards (11 during Packing Heat on pick:2)
 
 // ── Submissions ───────────────────────────────────────────────
 type Submission = {
-  submissionId: string      // server-generated, opaque until reveal
+  submissionId: string      // server-generated opaque string. The submissionId→playerId mapping is hidden from clients until reveal.
   fills: Card[]             // length matches prompt's `pick`; order = submitter's order
   playerId?: string         // omitted until reveal; revealed to all post-reveal
   rank?: 1 | 2 | 3          // only present in Serious Business mode
@@ -453,6 +454,7 @@ type CabSession = {
   sessionToken: string
   username: string
   role: Role
+  anonId: string             // PostHog distinct_id; stable per browser, set on first page mount
 }
 ```
 
@@ -535,7 +537,7 @@ If a player sends `play` twice for the same round (network glitch, double-click)
    - **Valid + player still in game** → responds with `auth_ok`, then `state_snapshot` (full current SessionState)
    - **Valid HMAC but player dropped past grace window** → responds with `auth_error: "player_dropped"`. Client clears `localStorage.cab_session` and redirects to `/` with a toast: "You were disconnected too long."
    - **Invalid HMAC / expired** → responds with `auth_error: "invalid_token"`. Client clears localStorage, redirects to `/`.
-3. Client hydrates immediately on `state_snapshot`; shows "Reconnecting…" overlay until snapshot arrives (debounced by `RECONNECT_TOAST` ms to avoid flash on fast reconnects)
+3. Client shows "Reconnecting…" overlay (debounced by `RECONNECT_TOAST` ms to avoid flash on fast reconnects) while awaiting snapshot. On `state_snapshot` arrival, client hydrates SessionState and dismisses the overlay.
 4. Server grace window: `GRACE_WINDOW_MS` before treating disconnect as permanent drop
 
 ### Client-side reconnect backoff
@@ -575,9 +577,9 @@ Client sends `ping` every 15s; server responds `pong`. After 45s of silence, ser
 6. **Round termination & hand replenishment (uniform across modes):** Server emits `round_end` containing `handsRefilled: Record<playerId, Hand>` — every submitter's hand topped back up to 10 from `deck:white`. Discards (winners + losers) moved to `discard:white`. Black card moved to `discard:black`. `round_end` also carries `activatedPlayers[]` if any mid-game joiners are now active.
 7. First to `roundsToWin` Awesome Points wins → `game_over`
 
-### Gambling (base mechanic, always on)
+### Gambling (base mechanic, available except in modal house-rule games and on round 1)
 
-Before submitting their primary card(s) for the round, any non-Czar player with `score >= 1` may **wager 1 Awesome Point** to play an additional `pick` cards (effectively a second submission for the same prompt).
+Before submitting their primary card(s) for the round, any non-Czar player with `score >= 1` may **wager 1 Awesome Point** to play an additional `pick` cards (effectively a second submission for the same prompt). Available only in normal mode rounds from round 2 onward — disabled in any modal house-rule game (God Is Dead, Survival of the Fittest, Serious Business).
 
 - WS event: `{ type: "gamble" }` — sent before `play`. Server decrements score by 1, deals `pick` extra cards to the player, allows them to submit a second submission.
 - Each of the player's submissions is treated independently in the Czar's view (they don't know they belong to the same player until reveal).
@@ -587,9 +589,15 @@ Before submitting their primary card(s) for the round, any non-Czar player with 
 
 ### Czar selection
 
-Players are ordered by `game_players.joined_at` (insertion order). Czar rotates through this array by index, modulo the number of *active* (non-spectator, non-queued) players. New mid-game joiners are appended to the end and join the rotation from the next-next round (they sit out as a regular player for one round before potentially becoming Czar).
+A stable `czarOrder` array is maintained in Redis at `game:{code}:czarOrder` (list of playerIds in turn order, set at game start from active players sorted by `joined_at`). The Czar rotation does **not** recompute from live arrays — it traverses this stable list.
 
-**Round 1 Czar is chosen randomly** from active players via `src/lib/rng.ts`. Fair to the host. Tests seed the RNG via `CAB_RNG_SEED` env var so the expected Czar sequence is deterministic.
+**Round 1 Czar is chosen randomly** via `src/lib/rng.ts` — pick an index into `czarOrder` and record it as the starting offset. Subsequent rounds increment from there: `czar[N] = czarOrder[(round1Idx + N - 1) % czarOrder.length]`.
+
+**Drops:** A player who drops (`status: "dropped"`) stays in `czarOrder` but is marked skipped. When the rotation lands on a dropped player, the engine increments past them to the next non-dropped entry. This keeps the rotation order stable for all other players.
+
+**Mid-game joiners:** Appended to the end of `czarOrder` when activated (during `round_end`). They join the rotation cleanly without disrupting existing order. They first Czar 2+ rounds after activation (one round as regular player first).
+
+Tests seed the RNG via `CAB_RNG_SEED` env var so the entire Czar sequence is deterministic.
 
 ### Randomness (seedable PRNG)
 
@@ -635,13 +643,13 @@ All rules below are from the official 2014 CAH rulebook (`https://s3.amazonaws.c
 
 | Rule | ID | Implementation |
 |---|---|---|
-| Rebooting the Universe | `rebooting` | Player action: spend 1 point → return any number of white cards, redraw to 10. Available between rounds only. Requires `score >= 1`. |
+| Rebooting the Universe | `rebooting` | Player action: spend 1 point → return any number of white cards, redraw to 10. **Allowed during `picking` and `transition` phases only.** Requires `score >= 1`. Server rejects with `error: "invalid_state"` if attempted in any other phase. |
 | Packing Heat | `packing_heat` | On `pick: 2` black card → deal 1 extra white card to each player before submission phase. Hand becomes 11; submitting returns to 10. |
-| Rando Cardrissian | `rando` | Auto-submitted random white card each round, attributed to imaginary player "Rando Cardrissian". If Rando wins the game overall, `game_over.randoWon = true` triggers shame screen variant. |
-| God Is Dead | `godmode` | No Czar. All players submit, then all players vote. Each player gets one vote, cannot vote for own submission. Most votes wins. **Tie-breaking:** Re-vote between tied submissions. If tie persists 2×, random pick among tied. Disables Gambling and Serious Business. |
+| Rando Cardrissian | `rando` | Auto-submitted random white card each round, attributed to imaginary player "Rando Cardrissian". If Rando wins the game overall, `game_over.mode = "rando_won"` triggers the shame screen variant. |
+| God Is Dead | `godmode` | No Czar. All players submit, then all players vote. Each player gets one vote, cannot vote for own submission. Most votes wins. **Tie-breaking:** Re-vote between tied submissions. If tie persists 2×, random pick among tied. Disables Gambling. |
 | Survival of the Fittest | `survival` | After all submissions are in, players take turns (in join order, skipping Czar) eliminating one submission each. Last submission remaining wins. UI: each player's turn shows a "remove one" prompt with all submissions face-up; clicking eliminates it. |
 | Serious Business | `serious_business` | Instead of single winner per round, Czar ranks the **top 3 submissions**. 1st = 3 points, 2nd = 2 points, 3rd = 1 point. Track running tally. Final winner = highest total. Disables Gambling. UI: Czar's reveal screen shows 1/2/3 podium slots; cards dragged or click-numbered into slots. |
-| Never Have I Ever | `never_have_i_ever` | Players may discard any white card from their hand at any time (between rounds) with a public confession ("I don't get this one"). Server replaces with a new card. Limited to 3 discards per game to prevent abuse. WS event: `{ type: "confess_discard", cardId }`. |
+| Never Have I Ever | `never_have_i_ever` | Players may discard any white card from their hand with a public confession ("I don't get this one"). **Allowed during `picking` and `transition` phases only.** Server replaces with a new card and broadcasts `cab_rule_triggered`. Limited to 3 discards per game per player (tracked in `discards_used`). WS event: `{ type: "confess_discard", cardId }`. |
 | Happy Ending | `happy_ending` | Host may end game early. When triggered, the final black card is forced to a "Make a Haiku" card (haikus need not be 5-7-5; just read dramatically per the official rule). Winner of the final round wins regardless of point totals. |
 
 ---
@@ -658,7 +666,7 @@ All rules below are from the official 2014 CAH rulebook (`https://s3.amazonaws.c
 | `transition` / `round_end` | New scores, winner | — |
 | `game_over` | Final scoreboard | — |
 
-Spectators can chat (if chat is implemented later) but cannot send game actions (`play`, `gamble`, `pick`, `rank`, `vote`, `eliminate`, `redraw`, `confess_discard`). Server rejects these events with `error` if sent by a spectator.
+Spectators cannot send game actions (`play`, `gamble`, `pick`, `rank`, `vote`, `eliminate`, `redraw`, `confess_discard`). Server rejects these events with `error` code `spectator_action` if sent by a spectator.
 
 ---
 
@@ -683,7 +691,7 @@ On server start in `src/lib/seed.ts`. Runs asynchronously — does not block ser
 1. `GET https://restagainsthumanity.com/api/v2/packs` — list of pack names
 2. For each pack (sequential, ~50 packs): `GET /cards?packs=<name>&includePackNames=true`
 3. Normalise black card text: replace `_` with `__________` (10 underscores) to match render conventions
-4. Upsert into `packs`, `black_cards`, `white_cards` (idempotent via `ON CONFLICT DO NOTHING` on natural keys: `packs.slug`, `(pack_id, text)` for cards)
+4. Upsert into `packs`, `black_cards`, `white_cards` (idempotent via `ON CONFLICT DO NOTHING` on natural keys: `packs.slug`; `(pack_id, text, pick)` for black_cards; `(pack_id, text)` for white_cards)
 5. Log: `Seeded N packs, M black cards, K white cards in T seconds`
 
 ### Resilience
@@ -700,11 +708,14 @@ packs          — id, name, slug (unique), card_count, created_at
 black_cards    — id, pack_id (fk), text, pick (CHECK pick IN (1,2,3)), unique(pack_id, text, pick)
 white_cards    — id, pack_id (fk), text,                                unique(pack_id, text)
 
-game_sessions  — id, code (CHAR(6), unique — stored without dash, e.g. 'B7K9MV'), status, config JSONB,
-                 host_player_id (nullable FK), created_at, last_activity_at, ended_at, winner_player_id (nullable FK)
+game_sessions  — id (cuid2), code (CHAR(6), unique — stored without dash, e.g. 'B7K9MV'), status, config JSONB,
+                 host_player_id (nullable FK), created_at, last_activity_at, ended_at,
+                 winner_player_id (nullable FK), end_mode (nullable; ENUM same as GameOverMode)
                  status ENUM: 'lobby' | 'active' | 'paused' | 'ended' | 'abandoned'
+                 end_mode ENUM: 'normal' | 'happy_ending' | 'rando_won' | 'deck_exhausted' | 'abandoned'
 
-game_players   — id, session_id (fk), username, role, score, status, is_host, is_rando, discards_used INT DEFAULT 0, joined_at
+game_players   — id (cuid2), session_id (fk), username, role, score, status, is_host, is_rando,
+                 discards_used INT DEFAULT 0, posthog_anon_id (text, nullable — PostHog distinct_id), joined_at
                  status ENUM: 'active' | 'queued' | 'spectator' | 'grace' | 'dropped'
                  unique(session_id, username)                          -- handles unique per room
                  partial unique(session_id) WHERE is_rando = true     -- at most one Rando per game
@@ -723,9 +734,9 @@ INDEX gin_winning_fills ON game_rounds USING gin (winning_submission_fills)  -- 
 
 ### `last_activity_at` and stale-game sweeper
 
-`last_activity_at` is updated on every WS message and HTTP API call for the session. A background job (`src/lib/sweeper.ts`) runs every 30 min:
+`last_activity_at` is updated on every WS message and HTTP API call for the session. A background job (`src/lib/sweeper.ts`) runs via [`node-cron`](https://github.com/node-cron/node-cron) scheduled at `*/30 * * * *` (every 30 min). Scheduled at process boot from the server entry point. Sweep query:
 - Find sessions with `status IN ('active', 'paused')` AND `last_activity_at < now() - INTERVAL '6 hours'` AND zero present players in Redis
-- Mark these as `status='abandoned'`, set `ended_at = now()`
+- Mark these as `status='abandoned'`, `end_mode='abandoned'`, set `ended_at = now()`
 - Prevents orphan rows from games that died without a clean `game_over`
 
 ### Room code storage and display
@@ -746,7 +757,7 @@ If the host leaves before any other players join, the session is marked `abandon
 
 ### Rando Cardrissian as a synthetic player
 
-When the `rando` house rule is enabled, the game-start handler inserts a `game_players` row with `username = "Rando Cardrissian"`, `is_rando = true`, `role = "player"`, `status = "active"`. Each round, the game engine generates Rando's submission by drawing random white cards from the deck (bypassing the normal hand mechanic — Rando has no persistent hand). The submission is stored against this synthetic player's ID. Rando's score tracks naturally; if Rando's row has the highest score at `game_over`, `randoWon: true` is set on the emitted event.
+When the `rando` house rule is enabled, the game-start handler inserts a `game_players` row with `username = "Rando Cardrissian"`, `is_rando = true`, `role = "player"`, `status = "active"`. Each round, the game engine generates Rando's submission by drawing random white cards from the deck (bypassing the normal hand mechanic — Rando has no persistent hand). The submission is stored against this synthetic player's ID. Rando's score tracks naturally; if Rando's row has the highest score at `game_over`, the emitted event sets `mode: "rando_won"` and the end screen renders the shame variant.
 
 ### Aggregations for Stats
 
@@ -756,7 +767,8 @@ Query-time aggregations with `Cache-Control: public, max-age=300`:
 - `avg_players_per_game` — `avg(count) from (count game_players per session where is_rando=false)`
 - `pack_adoption` — `count(distinct session_id) per pack` from `config->'packs'` JSONB (**excludes Core pack** — always-on, would always show 100%; chart only displays optional packs)
 - `top_response_cards` — JSONB unnest of `winning_submission_fills`, grouped by text, top 5 by count (GIN index makes this fast)
-- `rando_wins` — `count(*) from game_sessions s join game_players p on s.winner_player_id = p.id where p.is_rando = true`
+- `rando_wins` — `count(*) from game_sessions where end_mode = 'rando_won'`
+- `happy_ending_count` — `count(*) from game_sessions where end_mode = 'happy_ending'`
 
 ---
 
@@ -870,7 +882,7 @@ Test matrix using multi-context (separate browser contexts per player):
 - [ ] First player to N points triggers `game_over`
 - [ ] End screen shows correct winner and final scores
 - [ ] Play again creates new lobby with same settings
-- [ ] Rando wins → shame variant of end screen
+- [ ] Rando wins → `game_over.mode === "rando_won"` → end screen shows shame variant
 
 ### Mobile (viewport 375×667 + 414×896)
 - [ ] Home page renders without overflow
@@ -903,10 +915,10 @@ Test matrix using multi-context (separate browser contexts per player):
 services:
   app:      # TanStack Start (Node, port 3000) — built from local Dockerfile
   postgres: # postgres:16-alpine, named volume, healthcheck
-  redis:    # valkey/valkey:latest, AOF enabled, named volume, healthcheck
+  redis:    # valkey/valkey:8-alpine (pinned major), AOF enabled, named volume, healthcheck
 ```
 
-Cloudflare Tunnel runs **outside** the Compose stack — user manages it independently on the host. The app container exposes port 3000 to the Docker network only; `cloudflared` on the host (systemd unit or separate container) routes external traffic to `http://localhost:3000` or `http://app:3000` via the host's network.
+Cloudflare Tunnel runs **outside** the Compose stack — user manages it independently on the host. The app container exposes port 3000 to the host; `cloudflared` on the host (systemd unit or separate container) accesses the app at `http://localhost:3000`.
 
 ### Dockerfile (multi-stage)
 - `build` stage: `node:22-alpine` + pnpm, runs `pnpm install --frozen-lockfile` + `pnpm build`
@@ -928,11 +940,12 @@ Cloudflare Tunnel runs **outside** the Compose stack — user manages it indepen
 | `CAB_RNG_SEED` | Seedable PRNG seed (tests only; unset in prod = crypto-seeded) |
 
 ### Notes
-- App exposes port 3000 on the host (`ports: ["3000:3000"]` in prod compose, or `127.0.0.1:3000:3000` if Cloudflare Tunnel runs on the same host) — user's Cloudflare Tunnel setup (run separately) routes external traffic to it.
+- App port binding: default `ports: ["3000:3000"]` in compose exposes the app to the host's network interface — **firewall the port or bind to loopback only (`127.0.0.1:3000:3000`)** to avoid public exposure. With Cloudflare Tunnel running on the host, `127.0.0.1:3000:3000` is the safer choice; otherwise the app is reachable on the host's public IP.
 - Cloudflare Tunnel natively proxies WebSocket upgrades — no special config needed on the app side.
 - `docker-compose.prod.yml` override: `restart: unless-stopped`, memory limits (app: 512M, postgres: 1G, redis: 256M), `NODE_ENV=production`
 - Health checks: postgres `pg_isready`, redis `redis-cli ping`, app `GET /healthz` (returns 200 with `{ db, redis, activeGames, uptime }` or 503 if any dependency is down)
 - Volumes: `postgres_data`, `redis_data` (both backed up via host volume mount)
+- **DB schema management:** `pnpm db:push` for both dev and prod (no generated migrations). Acceptable risk for an MVP party game where data loss isn't catastrophic and the schema is rarely modified. Always review the diff plan before confirming a push.
 
 ---
 
@@ -962,36 +975,41 @@ Single PostHog Cloud project (`app.posthog.com`). Three features enabled:
 ### User identification
 
 No accounts → use an anonymous distinct ID:
-- On first page mount, generate a stable browser-scoped UUID stored in `localStorage.cab_anon_id`. PostHog `distinct_id`.
-- On joining a game, call `posthog.identify(anonId, { username, currentRoom: roomCode })` to attach the chosen handle (still anonymous — no PII).
-- Server-side events use the same `anonId` sent from client via WS auth payload (added to `CabSession`).
+- On first page mount, generate a stable browser-scoped UUID stored in `localStorage.cab_anon_id`. This becomes the PostHog `distinct_id`.
+- On joining or creating a game, the client sends `anonId` in the HTTP request body (`POST /api/games` and `POST /api/games/$code/join`). Server persists it on `game_players.posthog_anon_id` and uses it as `distinct_id` for all server-side PostHog events for that player.
+- On joining a game, the client calls `posthog.identify(anonId, { username, currentRoom: roomCode })` to attach the handle (still anonymous — note: a self-chosen handle could technically contain PII if a user types their real name).
+- `anonId` is also added to `CabSession` and survives across reconnects.
 
 ### Privacy / masking
-- **Session replay:** Use PostHog's `mask_all_inputs: true` and `mask_all_text: false`, but explicitly mask card content via `data-ph-no-capture` attribute on `.card-text` and `.card-back-mark` elements. Cards Against Humanity content is often crude — never recorded.
+- **Session replay:** Use PostHog's `maskAllInputs: true` (camelCase per JS SDK), but explicitly mask card content via `data-ph-no-capture` attribute on `.card-text` and `.card-back-mark` elements. Cards Against Humanity content is often crude — never recorded.
 - Hand cards, prompts in transit, and submission contents are all `data-ph-no-capture`.
 - Only UI shell (buttons, layout, animations) is captured for replay.
 
-### Configuration
+### Configuration & key delivery
+
+The PostHog key reaches the client via the `GET /api/config` endpoint (not bundled into Vite's client build). On app mount, the client fetches `{ posthogKey, posthogHost }` and initialises `posthog-js`. This avoids exposing the key as a `VITE_*` env var (which would bake it into the static bundle and require rebuilds on key rotation).
 
 ```ts
 // src/lib/posthog-client.ts
-posthog.init(POSTHOG_KEY, {
-  api_host: 'https://us.i.posthog.com',
-  person_profiles: 'identified_only',  // don't create profiles for anonymous pageviews
-  session_recording: {
-    maskAllInputs: true,
-    maskTextSelector: '[data-ph-no-capture], .card-text, .card-back-mark',
-    recordCanvas: false,
-  },
-  capture_pageview: true,
-  capture_pageleave: true,
-  autocapture: {
-    css_selector_allowlist: ['[data-ph]'],  // only autocapture annotated elements
-  },
-  loaded: (ph) => {
-    if (location.hostname === 'localhost') ph.opt_out_capturing()
-  },
-})
+// Called from __root.tsx after fetching GET /api/config
+export async function initPostHog() {
+  const cfg = await fetch('/api/config').then(r => r.json())
+  posthog.init(cfg.posthogKey, {
+    api_host: cfg.posthogHost,
+    person_profiles: 'identified_only',  // don't create profiles for anonymous pageviews
+    session_recording: {
+      maskAllInputs: true,
+      maskTextSelector: '[data-ph-no-capture], .card-text, .card-back-mark',
+      recordCanvas: false,
+    },
+    capture_pageview: true,
+    capture_pageleave: true,
+    autocapture: false,                  // we use explicit posthog.capture() for every event
+    loaded: (ph) => {
+      if (location.hostname === 'localhost') ph.opt_out_capturing()
+    },
+  })
+}
 ```
 
 ### Event taxonomy
@@ -999,9 +1017,11 @@ posthog.init(POSTHOG_KEY, {
 All events use snake_case names with `cab_` prefix to namespace them in PostHog.
 
 **Onboarding / navigation (client-side):**
+
+Route visits are captured automatically via PostHog's `$pageview` (with `capture_pageview: true`) — no need for `cab_*_viewed` events. Button clicks use explicit events:
+
 | Event | Properties | When |
 |---|---|---|
-| `cab_home_viewed` | — | Home page mount |
 | `cab_create_clicked` | — | "Create a game" button |
 | `cab_join_clicked` | — | "Join a game" button |
 | `cab_stats_clicked` | — | "See the stats" button |
@@ -1038,8 +1058,9 @@ All events use snake_case names with `cab_` prefix to namespace them in PostHog.
 **End of game:**
 | Event | Properties | When |
 |---|---|---|
-| `cab_game_ended` | `roomCode, mode: GameOverMode, winnerId, winnerIsRando, totalRounds, durationMs, finalScores[]` | `game_over` emitted |
-| `cab_play_again_clicked` | `previousRoomCode` | End screen button |
+| `cab_game_ended` | `roomCode, mode: GameOverMode, winnerId, totalRounds, durationMs, finalScores[]` | `game_over` emitted (note: `winnerIsRando` dropped — derivable from `mode === "rando_won"`) |
+| `cab_play_again_clicked` | `previousRoomCode` | End screen "Play again" button |
+| `cab_go_home_clicked` | `previousRoomCode` | End screen "Go home" button |
 
 ### Error tracking
 
@@ -1053,14 +1074,14 @@ All events use snake_case names with `cab_` prefix to namespace them in PostHog.
 ### Environment variables
 | Var | Purpose |
 |---|---|
-| `POSTHOG_API_KEY` | Project API key (public; safe to expose to client) |
-| `POSTHOG_HOST` | `https://us.i.posthog.com` (default) or EU equivalent |
-| `POSTHOG_PERSONAL_API_KEY` | Server-only; used for sourcemap upload during `pnpm build` |
+| `POSTHOG_API_KEY` | Project API key (server-side env). Server reads it and exposes it to the client only via `GET /api/config`. Not bundled into the Vite client build. |
+| `POSTHOG_HOST` | `https://us.i.posthog.com` (default) or EU equivalent. Same delivery model as the API key. |
+| `POSTHOG_PERSONAL_API_KEY` | Server-only; used for sourcemap upload during `pnpm build` (via `posthog-cli`). Never sent to clients. |
 
-Both client and server use the same `POSTHOG_API_KEY` (it's a project key, not a user secret). The personal API key is only needed for build-time sourcemap upload.
+A single `POSTHOG_API_KEY` env var on the server is the single source of truth. The client fetches it at runtime via `/api/config` — rotation is just an env var update + container restart, no rebuild required.
 
 ### Local dev
-PostHog client auto-opts-out on `localhost` to keep dev events out of the prod project. Set `POSTHOG_API_KEY` to a separate "dev" project key if you want local visibility.
+PostHog client auto-opts-out on `localhost` to keep dev events out of the prod project. To enable dev tracking, set `POSTHOG_API_KEY` to a separate "dev" project key and remove the localhost opt-out.
 
 ---
 
