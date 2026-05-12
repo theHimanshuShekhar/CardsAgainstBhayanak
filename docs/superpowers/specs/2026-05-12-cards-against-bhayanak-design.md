@@ -60,6 +60,11 @@ On any page mount:
 
 Client clears `cab_session` after `game_over` event, or on explicit Leave button. Server removes player from Redis on `leave` message.
 
+### Security notes
+
+- **CSRF:** Not required. `sessionToken` lives in `localStorage` and is sent via `Authorization: Bearer` header (not cookies). Same-origin policy + bearer token = no CSRF attack surface.
+- **Token replay (accepted risk):** Tokens are HMAC-bound to `playerId` for 24h. If leaked (e.g. shared screenshot, browser extension), an attacker can impersonate that player until the room expires. This is acceptable for a party game's threat model; not worth adding rotation or IP-binding which would break mobile users on flaky networks.
+
 ---
 
 ## Routes
@@ -128,7 +133,8 @@ Centralise in `src/lib/timing.ts`:
 ```ts
 export const TIMING = {
   DEAL_MS:         550,   // card dealing animation
-  FADE_IN_MS:      400,   // scene fade-in
+  FADE_IN_MS:      400,   // scene fade-in: applied via .fade-in class on scene mount
+                          // staggered for child elements at 0.02s/0.08s/0.14s/0.20s/0.26s
   REVEAL_STAGGER:  700,   // ms between sequential card reveals
   WINNER_PAUSE:   2600,   // post-winner-picked, before next round
   RECONNECT_TOAST: 250,   // debounce for "Reconnecting…" overlay
@@ -137,6 +143,10 @@ export const TIMING = {
 ```
 
 E2E tests import these to time their assertions deterministically.
+
+### Prompt Card Blank Rendering
+
+Black prompt cards encode blanks as the literal substring `__________` (10 underscores). The `PromptText` React component splits text on this marker and renders each blank as a `<u>` element styled with `border-bottom: 2px solid currentColor; padding: 0 0.35em; min-width: 1.2em; display: inline-block; white-space: nowrap;` (matches design's `.card-prompt .card-text u` rule). During reveal phase, blanks remain empty — winning fills are shown in the response card, not slotted back into the prompt.
 
 ### Accessibility
 
@@ -182,7 +192,11 @@ Design has breakpoints at `1100px`, `860px`, `720px`, `420px`. All preserved ver
 ### 4. Lobby (`/games/$code/lobby`)
 Two states:
 
-**Pre-game:** Room code card (large, copy button), player list with HOST/YOU/READY badges, empty seats (dashed), spectator row, game summary panel (packs, rules, settings), host sees "Start game" (disabled until ≥3 players), non-host sees "Waiting for host…" spinner.
+**Pre-game:** Room code card (large) with two buttons:
+- **"Copy code"** — copies just the formatted code (e.g. `B7K-9MV`)
+- **"Copy link"** — copies `https://<host>/games/join?code=B7K-9MV` (recipient lands on join screen with code pre-filled)
+
+Player list with HOST/YOU/READY badges, empty seats (dashed), spectator row, game summary panel (packs, rules, settings), host sees "Start game" (disabled until ≥3 players), non-host sees "Waiting for host…" spinner.
 
 **Mid-game waiting:** Same layout but shows "Game in progress — you'll join after this round." Live scoreboard visible (read-only). On `round_end` event containing this player's ID in `activatedPlayers[]`, the client navigates to `/games/$code/session`.
 
@@ -203,16 +217,18 @@ Two states:
 - Sticky topbar: ROUND XX pill, timer pill, Leave button
 - Scoreboard row (current Czar highlighted in white chip)
 - Stage: prompt card left (xl size), submissions grid right
-- Hand dock: sticky bottom, 7 cards fanned, selected cards lift
+- Hand dock: sticky bottom, **10 cards** fanned per official CAH rules (design's 7-card fan widened to fit 10 — increase overlap or scroll horizontally on narrow screens), selected cards lift
 
-**Multi-blank cards:** Black cards with `pick: 2` or `pick: 3` require multiple white card selections. Cards flatten into the grid with player-number badges.
+**Multi-blank cards:** Black cards with `pick: 2` or `pick: 3` require multiple white card selections. Cards flatten into the grid with player-number badges. Real CAH packs typically only include `pick: 1` and `pick: 2`; engine supports `pick: 3` for forward compatibility with user-generated content.
+
+**Game config visibility.** The packs/rules/settings panel from the Lobby is **not shown during the game session**. Once gameplay starts, the screen focuses on the prompt and hand. Game config is implicit through the gameplay (e.g., players see the rule's effect, like "redraw" buttons appearing under Rebooting the Universe).
 
 ### 6. Stats (`/stats`)
 - Headline tiles: games played, rounds judged, cards submitted, avg players, avg spectators, avg session
 - Sparkline: games per day (30d)
 - Bar chart: lobbies by player count
 - Rando Cardrissian win stats
-- Horizontal bar charts: pack adoption %, house rules adoption %
+- Horizontal bar charts: pack adoption % (**Core pack excluded — always 100%, would skew the chart**), house rules adoption %
 - Top 5 most-picked response cards leaderboard
 
 **Empty state.** Fresh deployment with zero games shows: "No games played yet. Come back after some chaos." All charts hidden until ≥1 game completes.
@@ -228,25 +244,77 @@ Two states:
 ## State Management
 
 ### `GameContext` (pre-game draft — survives Create → Lobby navigation)
-```ts
-type GameDraft = {
-  username: string
-  maxPlayers: number        // 3–10, default 6
-  roundsToWin: number       // 3–20, default 7
-  timer: "30s"|"60s"|"90s"|"Off"
-  packs: string[]           // pack IDs
-  rules: string[]           // house rule IDs
-  roomCode?: string
-  playerId?: string
-  role?: "player"|"spectator"
-}
-```
+
+Holds a `GameDraft` (see Type Definitions). Defaults: `maxPlayers: 6`, `roundsToWin: 7`, `timer: "60s"`, `packs: ["core-set"]`, `rules: []`.
 
 ### Session persistence (`localStorage`)
-Key `cab_session`: `{ roomCode, playerId, sessionToken, role, username }`. Set on join/create, cleared on game end. Read on app init to redirect back to active game.
 
-### Game session state (local to `/games/$code/session`)
+Key `cab_session`: stores a `CabSession` (see Type Definitions). Set on join/create, cleared on game end or `auth_error`. Read on app init to redirect back to active game.
+
+### Multiple game membership
+
+If a user already has a `cab_session` in localStorage and navigates to `/games/join` for a different room code, the join screen detects the conflict and shows a modal: "You're already in game `XXX-XXX`. Leave it first?" — Leave/Cancel buttons. Leave sends `{ type: "leave" }` over the existing socket, clears `cab_session`, then proceeds to the new join. This prevents accidental disconnection from an in-progress game.
+
+### Settings immutability
+
+Once `POST /api/games/$code/start` succeeds, game config (packs, rules, roundsToWin, maxPlayers) is frozen. Host cannot modify mid-game. The `game_sessions.config` JSON is the source of truth and is locked at start.
+
+---
+
+## Type Definitions
+
+All shared types live in `src/lib/types.ts`. Used by both client and server.
+
 ```ts
+// ── Player & role ─────────────────────────────────────────────
+type Role = "player" | "spectator"
+
+type PlayerStatus =
+  | "active"      // in the game, taking turns
+  | "queued"      // mid-game joiner; activates next round
+  | "spectator"   // watching only
+  | "grace"       // disconnected, within GRACE_WINDOW_MS, still recoverable
+  | "dropped"     // permanently removed (grace expired or explicit leave)
+
+type GamePlayer = {
+  id: string
+  username: string
+  role: Role
+  status: PlayerStatus
+  score: number
+  isHost: boolean
+  isRando: boolean          // synthetic Rando Cardrissian player
+  joinedAt: string          // ISO timestamp
+}
+
+type PlayerScore = {
+  playerId: string
+  username: string
+  score: number
+  isJudge: boolean          // for current round
+  isRando: boolean
+}
+
+// ── Cards ─────────────────────────────────────────────────────
+type Card = {
+  id: string                // server-side card UUID/cuid
+  text: string              // pre-normalised: blanks are __________
+}
+
+type BlackCard = Card & { pick: 1 | 2 | 3 }
+
+type Hand = Card[]          // exactly 10 cards (11 during Packing Heat on pick:2)
+
+// ── Submissions ───────────────────────────────────────────────
+type Submission = {
+  submissionId: string      // server-generated, opaque until reveal
+  fills: Card[]             // length matches prompt's `pick`; order = submitter's order
+  playerId?: string         // omitted until reveal; revealed to all post-reveal
+  rank?: 1 | 2 | 3          // only present in Serious Business mode
+  eliminated?: boolean      // only present in Survival mode
+}
+
+// ── Phase & session state ─────────────────────────────────────
 type GamePhase =
   | "picking"        // players submitting cards
   | "waiting"        // you've submitted, waiting on others
@@ -259,20 +327,47 @@ type GamePhase =
 type SessionState = {
   phase: GamePhase
   round: number
-  prompt: { text: string; pick: number }
-  czarId: string
-  hand: string[]            // white card texts for this player (server only sends to owner)
-  submissions: Submission[] // revealed progressively; server has already shuffled order
+  prompt: BlackCard
+  czarId: string | null     // null during God Is Dead
+  hand: Hand                // server only sends this to the hand's owner
+  submissions: Submission[] // server pre-shuffles between players
   scores: PlayerScore[]
   revealIndex: number
   winnerId: string | null
+  eliminationTurnPlayerId?: string  // Survival of the Fittest current turn
+  voteTally?: Record<string, number> // God Is Dead live votes
+}
+
+// ── Config (persisted in game_sessions.config JSONB) ──────────
+type GameConfig = {
+  maxPlayers: number          // 3–10
+  roundsToWin: number         // 3–20
+  timer: "30s" | "60s" | "90s" | "Off"
+  packs: string[]             // pack IDs
+  rules: string[]             // house rule IDs (rebooting, packing_heat, rando, godmode, survival, serious_business, never_have_i_ever, happy_ending)
+}
+
+// ── Pre-game draft (client-side only) ─────────────────────────
+type GameDraft = GameConfig & {
+  username: string            // host or joiner's chosen handle
+  roomCode?: string
+  playerId?: string
+  role?: Role
+}
+
+// ── localStorage shape ────────────────────────────────────────
+type CabSession = {
+  roomCode: string
+  playerId: string
+  sessionToken: string
+  username: string
+  role: Role
 }
 ```
-Populated from WebSocket events; falls back to snapshot on reconnect.
 
-### Settings immutability
+### Game session state on the client
 
-Once `POST /api/games/$code/start` succeeds, game config (packs, rules, roundsToWin, maxPlayers) is frozen. Host cannot modify mid-game. The `game_sessions.config` JSON is the source of truth and is locked at start.
+`SessionState` is populated from WebSocket events; falls back to a full snapshot on reconnect.
 
 ---
 
@@ -326,9 +421,15 @@ All client messages are scoped to the socket's authenticated `playerId` + `roomC
 { type: "pong" }
 ```
 
-### Submission shuffling
+### Submission ordering
 
-Before sending submissions to the Czar (or to anyone post-reveal), the server shuffles their order. The `submissionId` is a server-generated opaque ID — clients never see player→submission mapping until reveal. This prevents Czars from identifying who played what by submission order.
+**Within a player's submission** (multi-blank cards): order is the submitter's chosen order, preserved by the server. The Czar reads them in that order ("Card 1: _____. Card 2: _____.") because the prompt is structured that way.
+
+**Between players' submissions**: the server randomly permutes the submissions array before sending to anyone. Each gets a stable opaque `submissionId`. The mapping `submissionId → playerId` is kept server-side only until `reveal`. This prevents Czars from identifying who played what by submission order.
+
+### Submission atomicity
+
+Each player's submission writes to a single Redis hash field: `HSET game:{code}:round.submissions {playerId} {JSON}`. Single-key, single-op = atomic. Concurrent submissions from multiple players cannot race or corrupt each other. The `play` handler reads existing field first; if non-empty, treats as duplicate (no-op, returns existing ack).
 
 ### Submission deduplication
 
@@ -336,9 +437,16 @@ If a player sends `play` twice for the same round (network glitch, double-click)
 
 ### Reconnect flow
 1. Client connects, sends `auth`, then `rejoin`
-2. Server responds with `state_snapshot` — full current SessionState
-3. Client hydrates immediately; shows "Reconnecting…" overlay until snapshot arrives (debounced by `RECONNECT_TOAST` ms to avoid flash)
+2. Server validates `sessionToken`:
+   - **Valid + player still in game** → responds with `auth_ok`, then `state_snapshot` (full current SessionState)
+   - **Valid HMAC but player dropped past grace window** → responds with `auth_error: "player_dropped"`. Client clears `localStorage.cab_session` and redirects to `/` with a toast: "You were disconnected too long."
+   - **Invalid HMAC / expired** → responds with `auth_error: "invalid_token"`. Client clears localStorage, redirects to `/`.
+3. Client hydrates immediately on `state_snapshot`; shows "Reconnecting…" overlay until snapshot arrives (debounced by `RECONNECT_TOAST` ms to avoid flash on fast reconnects)
 4. Server grace window: `GRACE_WINDOW_MS` before treating disconnect as permanent drop
+
+### Client-side reconnect backoff
+
+When the WebSocket drops unexpectedly, client retries with exponential backoff: `1s, 2s, 4s, 8s, 16s, 30s, 30s, 30s…` (caps at 30s). Infinite retries — never gives up automatically; user can manually leave via UI. Successful connect (`auth_ok` received) resets the backoff to 1s.
 
 ### Disconnect handling
 
@@ -346,9 +454,12 @@ If a player sends `play` twice for the same round (network glitch, double-click)
 |---|---|
 | Regular player picking | Card pool returns their cards (if any submitted) on permanent drop; round continues with remaining players |
 | Regular player judging | No action — they don't have an active role this round |
-| **Czar** during `picking`/`waiting` | If permanent drop, round is voided. Cards returned to hands. Next player becomes Czar. Round restarts with same prompt or new (config: `voidedRoundPolicy: "restart"|"skip"`, default `restart`) |
-| **Czar** during `judging`/`reveal` | If permanent drop, server auto-picks a random submission as winner after grace window expires |
+| **Czar** during `picking` / `waiting` | If permanent drop, round is voided. Cards returned to hands. Next player becomes Czar. Round restarts with same prompt or new (config: `voidedRoundPolicy: "restart"\|"skip"`, default `restart`) |
+| **Czar** during `judging` / `reveal` | If permanent drop, server auto-picks a random submission as winner after grace window expires |
+| **Czar** during `eliminating` (Survival) | Same as above — server auto-eliminates random remaining submissions until one wins |
+| **Czar** during `ranking` (Serious Business) | Same — server auto-ranks remaining unranked submissions randomly |
 | Host (anyone) | "Host" flag transfers to next player by join order. Game continues normally. |
+| All players disconnected | Game transitions to `status: "paused"`. Persists in Redis (AOF) until any player rejoins or 24h TTL expires (becomes `abandoned`). |
 
 ### Keepalive
 
@@ -381,7 +492,7 @@ Before submitting their primary card(s) for the round, any non-Czar player with 
 
 Players are ordered by `game_players.joined_at` (insertion order). Czar rotates through this array by index, modulo the number of *active* (non-spectator, non-queued) players. New mid-game joiners are appended to the end and join the rotation from the next-next round (they sit out as a regular player for one round before potentially becoming Czar).
 
-Round 1 Czar is the host (index 0).
+**Round 1 Czar is chosen randomly** from active players (server-side `crypto.randomInt`). Fair to the host. Tests seed the RNG via a `CAB_RNG_SEED` env var so the test's expected Czar sequence is deterministic.
 
 ### Card pool
 
@@ -390,10 +501,20 @@ Round 1 Czar is the host (index 0).
 - Pool is frozen at start — adding packs mid-game has no effect.
 - Two Redis lists: `game:{code}:deck:black` and `game:{code}:deck:white`.
 
-### Deck exhaustion
+### Deck exhaustion & discards
 
-- **White cards run low:** When `LLEN game:{code}:deck:white < players * 10`, server shuffles the discard pile (all played non-current-hand white cards) back in.
+- **Discard policy:** When a round ends (winner picked), all submitted white cards — winning and losing — move from `game:{code}:round.submissions` to `game:{code}:discard:white`. Submitters' hands replenish by drawing fresh cards from `deck:white`. The black card just played also moves to a `discard:black` list (informational; black discards never reshuffle).
+- **White cards run low:** When `LLEN game:{code}:deck:white < activePlayers * 3`, server shuffles `discard:white` back into `deck:white`, clears the discard list. Deal continues seamlessly.
 - **Black cards exhausted:** Game ends naturally — server emits `game_over` with the current leader as winner. Edge note: a fresh setup loading all CAH packs has thousands of black cards; this is practically rare.
+
+### Round timer expiration
+
+When a `roundTimer` is configured (30s/60s/90s) and the timer reaches 0 while a player hasn't submitted, that player **is skipped for the round**:
+- Server marks them with an empty submission (no cards consumed from their hand)
+- Czar judges only the players who submitted in time
+- The skipped player participates normally next round
+- WS event: `{ type: "player_skipped", playerId }` — UI shows their score chip dimmed/struck through for that round
+- If only 1 or 0 players submitted before timer expiry, the round is voided (no winner, no point awarded), and the same Czar runs the round again with a new black card
 
 ### Submission order randomization
 
@@ -428,7 +549,7 @@ All rules below are from the official 2014 CAH rulebook (`https://s3.amazonaws.c
 | `transition` / `round_end` | New scores, winner | — |
 | `game_over` | Final scoreboard | — |
 
-Spectators can chat (if chat is implemented later) but cannot send game actions (`play`, `pick`, `vote`, `redraw`, `swap_hand`). Server rejects these events with `error` if sent by a spectator.
+Spectators can chat (if chat is implemented later) but cannot send game actions (`play`, `gamble`, `pick`, `rank`, `vote`, `eliminate`, `redraw`, `confess_discard`). Server rejects these events with `error` if sent by a spectator.
 
 ---
 
@@ -467,22 +588,48 @@ On server start in `src/lib/seed.ts`. Runs asynchronously — does not block ser
 
 ```
 packs          — id, name, slug (unique), card_count, created_at
-black_cards    — id, pack_id (fk), text, pick (1|2|3),  unique(pack_id, text)
-white_cards    — id, pack_id (fk), text,                unique(pack_id, text)
-game_sessions  — id, code (6-char, unique), status, config JSONB, host_player_id, created_at, ended_at, winner_player_id
-game_players   — id, session_id (fk), username, role, score, status (active|queued|spectator|disconnected), joined_at, is_host
-game_rounds    — id, session_id (fk), round_num, black_card_id, czar_player_id, winner_player_id, winning_submission_fills JSONB, played_at
+black_cards    — id, pack_id (fk), text, pick (CHECK pick IN (1,2,3)), unique(pack_id, text)
+white_cards    — id, pack_id (fk), text,                                unique(pack_id, text)
+
+game_sessions  — id, code (CHAR(6), unique), status, config JSONB, host_player_id (nullable FK), created_at, ended_at, winner_player_id (nullable FK)
+                 status ENUM: 'lobby' | 'active' | 'paused' | 'ended' | 'abandoned'
+
+game_players   — id, session_id (fk), username, role, score, status, is_host, is_rando, joined_at
+                 status ENUM: 'active' | 'queued' | 'spectator' | 'grace' | 'dropped'
+                 unique(session_id, is_rando) where is_rando = true   -- at most one Rando per game
+
+game_rounds    — id, session_id (fk), round_num, black_card_id, czar_player_id (nullable for God Is Dead),
+                 winner_player_id (nullable FK), winning_submission_fills JSONB,
+                 ranking JSONB (nullable, only set in Serious Business mode: [{playerId, fills, rank, points}]),
+                 vote_tally JSONB (nullable, only set in God Is Dead: {submissionId: count}),
+                 played_at
+                 unique(session_id, round_num)
+
+INDEX gin_winning_fills ON game_rounds USING gin (winning_submission_fills)  -- speeds up top-cards stats query
 ```
+
+### Host FK chicken-and-egg resolution
+
+`game_sessions.host_player_id` is `NULL`-able and unset at row creation. The flow:
+1. `INSERT INTO game_sessions (code, config, status='lobby') VALUES (...)` returns `sessionId`
+2. `INSERT INTO game_players (session_id, username, role, is_host=true) VALUES (sessionId, ...)` returns `playerId`
+3. `UPDATE game_sessions SET host_player_id = playerId WHERE id = sessionId`
+
+If the host leaves before any other players join, the session is marked `abandoned` and the orphan host row is acceptable.
+
+### Rando Cardrissian as a synthetic player
+
+When the `rando` house rule is enabled, the game-start handler inserts a `game_players` row with `username = "Rando Cardrissian"`, `is_rando = true`, `role = "player"`, `status = "active"`. Each round, the game engine generates Rando's submission by drawing random white cards from the deck (bypassing the normal hand mechanic — Rando has no persistent hand). The submission is stored against this synthetic player's ID. Rando's score tracks naturally; if Rando's row has the highest score at `game_over`, `randoWon: true` is set on the emitted event.
 
 ### Aggregations for Stats
 
-Materialized views or query-time aggregations:
+Query-time aggregations with `Cache-Control: public, max-age=300`:
 - `games_played_count` — `count(*) from game_sessions where status='ended'`
 - `rounds_count` — `count(*) from game_rounds`
-- `avg_players_per_game` — `avg(count(game_players)) per game_session`
-- `pack_adoption` — `count(distinct session_id) per pack` from `config.packs` JSONB
-- `top_response_cards` — `count(*) of winning_submission_fills entries`
-- `rando_wins` — `count(*) from game_sessions where winner.username='rando'`
+- `avg_players_per_game` — `avg(count) from (count game_players per session where is_rando=false)`
+- `pack_adoption` — `count(distinct session_id) per pack` from `config->'packs'` JSONB (**excludes Core pack** — always-on, would always show 100%; chart only displays optional packs)
+- `top_response_cards` — JSONB unnest of `winning_submission_fills`, grouped by text, top 5 by count (GIN index makes this fast)
+- `rando_wins` — `count(*) from game_sessions s join game_players p on s.winner_player_id = p.id where p.is_rando = true`
 
 ---
 
@@ -602,7 +749,9 @@ Test matrix using multi-context (separate browser contexts per player):
 - [ ] Color contrast meets WCAG AA (auto-pass for B&W design)
 
 ### Infrastructure
-- `playwright.config.ts`: `globalSetup` seeds test DB with **a deterministic test pack** (10 black + 30 white cards with predictable text — defined in `tests/fixtures/test-pack.ts`) so prompts and outcomes are reproducible. `globalTeardown` cleans up.
+- `playwright.config.ts`: `globalSetup` seeds the test DB with the **full CAH Base Set** (~90 black cards + ~460 white cards) via the normal seeding pipeline — same code path as production. Tests run against this real data.
+- **RNG seeding**: tests set `CAB_RNG_SEED=test-seed-2026` env var; server uses this to seed `crypto.randomInt`-replacement for first-Czar selection, deck shuffles, and Rando's card picks. Same seed → same outcomes → reproducible tests.
+- `globalTeardown` truncates test tables and flushes Redis test DB index.
 - Tests run against real WS server + real Postgres (test DB) + real Redis (test DB index)
 - Separate test DB and Redis DB index from dev (`POSTGRES_DB=cab_test`, `REDIS_DB=1`)
 - Tests import timing constants from `src/lib/timing.ts` for deterministic waits
