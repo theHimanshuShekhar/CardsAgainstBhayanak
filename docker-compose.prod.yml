@@ -44,14 +44,14 @@ services:
       DATABASE_URL: postgres://cab:${POSTGRES_PASSWORD}@postgres:5432/cab
       REDIS_URL: redis://redis:6379/0
       SESSION_SECRET: ${SESSION_SECRET}
-      PORT: 3000
+      PORT: ${PORT:-3000}
       NODE_ENV: production
       AXIOM_TOKEN: ${AXIOM_TOKEN}
       AXIOM_DATASET: ${AXIOM_DATASET}
       POSTHOG_API_KEY: ${POSTHOG_API_KEY}
       POSTHOG_HOST: ${POSTHOG_HOST}
     ports:
-      - '127.0.0.1:3000:3000'
+      - '127.0.0.1:${PORT:-3000}:${PORT:-3000}'
     healthcheck:
       test: ['CMD', 'wget', '-qO-', 'http://localhost:3000/api/healthz']
       interval: 10s
