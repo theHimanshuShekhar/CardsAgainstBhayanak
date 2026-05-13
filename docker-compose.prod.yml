@@ -50,22 +50,13 @@ services:
       AXIOM_DATASET: ${AXIOM_DATASET}
       POSTHOG_API_KEY: ${POSTHOG_API_KEY}
       POSTHOG_HOST: ${POSTHOG_HOST}
+    ports:
+      - '127.0.0.1:${PORT:-3000}:${PORT:-3000}'
     healthcheck:
       test: ['CMD', 'wget', '-qO-', 'http://localhost:${PORT:-3000}/api/healthz']
       interval: 10s
       timeout: 5s
       retries: 5
-
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    container_name: cab_cloudflared
-    restart: unless-stopped
-    command: tunnel --no-autoupdate run
-    environment:
-      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
-    depends_on:
-      app:
-        condition: service_healthy
 
 volumes:
   postgres_data:
