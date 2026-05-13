@@ -22,5 +22,11 @@
       "~/*": ["src/*"]
     }
   },
-  "include": ["src/**/*", "tests/**/*", "app.config.ts", "drizzle.config.ts", "playwright.config.ts"]
+  "include": [
+    "src/**/*",
+    "tests/**/*",
+    "vite.config.ts",
+    "drizzle.config.ts",
+    "playwright.config.ts"
+  ]
 }

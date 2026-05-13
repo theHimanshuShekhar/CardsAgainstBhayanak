@@ -1,0 +1,10 @@
+services:
+  app:
+    restart: unless-stopped
+    mem_limit: 512m
+  postgres:
+    restart: unless-stopped
+    mem_limit: 1g
+  redis:
+    restart: unless-stopped
+    mem_limit: 256m

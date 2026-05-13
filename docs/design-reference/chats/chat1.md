@@ -34,6 +34,7 @@ _[tool: update_todos]_
 Great, clear scope. I'll build this as a single interactive prototype where you can click through all four screens. Let me lay out my approach:
 
 **Visual direction I'll commit to** (calling it out so I stay consistent):
+
 - Original brand: "Cards Against Bhayanak" — warm dark theme (deep ink, not pure black), hot coral-red accent, cream paper cards with rounded corners — visually distinct from CAH's stark monochrome
 - Type: **Bricolage Grotesque** (heavy display) + **Geist** (UI body) + **Geist Mono** (room codes, meta) + **Newsreader** italic (the prompt card flavor)
 - Cards: my own treatment — cream "response" cards with a subtle paper texture and dotted top edge; deep-plum "prompt" cards with serif italic blanks. Not the iconic CAH black/white rectangles.
@@ -85,12 +86,14 @@ _[tool: snip]_
 Built **Cards Against Bhayanak** as an interactive prototype — monochrome black/white aesthetic, original branding (not the CAH logo or trademarked elements).
 
 **The four screens flow naturally:**
+
 1. **Home** — bold display headline, brand mark, hero card stack, marquee strip, Create / Join CTAs
 2. **Create Game** — handle input, stepper controls for max players & rounds-to-win, segmented round timer, 6 card packs (Core locked-in + Office Hours, Bhayanak Desi, Extremely Online, Spicy 18+, Festive), 5 house rules (Rebooting the Universe, Happy Ending, Haiku Mode, etc.), live sticky summary panel
 3. **Lobby** — large room code card (B7K-9MV) with copy-to-clipboard, player list with HOST/YOU badges + ready dots, empty seats, packs/rules summary, host-only Start button (gated until ≥3 players — a new player auto-joins after a few seconds)
 4. **Game session** — scoreboard pills (current judge highlighted in white), prompt card on the left, submissions grid on the right, fanned hand at the bottom. Full round state machine: **picking → waiting → judging → reveal (flip one-by-one) → winner picked → next round**.
 
 **Demo controls** (Tweaks panel, bottom-right):
+
 - Jump to any screen
 - Toggle your role between **Player** and **Judge** (judge view shows the submissions face-down for you to click and reveal; player view shows your hand to pick from)
 - Reset flow
@@ -98,6 +101,7 @@ Built **Cards Against Bhayanak** as an interactive prototype — monochrome blac
 **What's in the build**: `Cards Against Bhayanak.html` (entry), `styles.css` (tokens + components), `scenes.css` (per-screen layout), `screens.jsx`, `app.jsx`, `content.js` (placeholder prompts/responses — tame-but-witty filler since you didn't specify a tone).
 
 **Caveats / next steps for the TanStack port:**
+
 - The prototype simulates other players/submissions with timers; in your real app this becomes a WebSocket layer (game state, hand sync, judge picks)
 - All placeholder card text is original and safe — swap in your real deck before launch
 - Layout is responsive down to ~720px; the game session is desktop-leaning since that's where party games actually get played
@@ -188,6 +192,7 @@ Spectator support is wired in:
 **Lobby** — new **Spectators · N watching** strip below the player list with avatar chips, plus a contextual hint ("Seats are full — new joiners auto-spectate") when applicable. Spectators see a different lobby variant: heading reads "You're in. The host hasn't started yet," and the right column shows a "You're a spectator" info card instead of the host's Start button.
 
 **Demo controls** (Tweaks panel):
+
 - New **Lobby (spectator)** screen option
 - **Room full (force spectator)** toggle — flip it on, then go to Join → you'll see the locked spectator banner; go to Lobby → seats render full and a "FULL" pill replaces the ready count.
 
@@ -214,6 +219,7 @@ _[tool: fork_verifier_agent]_
 Mobile responsiveness is in. Key changes:
 
 **Game session at mobile:**
+
 - Scoreboard becomes a horizontally-scrolling pill strip (touch-snap)
 - Prompt card and submissions stack vertically (prompt on top)
 - Submissions grid drops to 2 columns
@@ -221,6 +227,7 @@ Mobile responsiveness is in. Key changes:
 - Cards scale down (prompt: 22px, hand: 14px)
 
 **Lobby / Create / Home at mobile:**
+
 - Lobby header stacks: title on top, code card below at full width
 - Room code stays prominent (44px on phones, 38px on tiny screens)
 - Card packs and join-as picker drop to single column
@@ -299,26 +306,31 @@ _[tool: done]_
 Reworked the game session so submissions stay hidden until everyone has played:
 
 **Picking phase** (player view):
+
 - No submissions grid. Stage is centered on the prompt card alone with a clear status line ("Pick a card from your hand.")
 - Below the prompt: face-down pips showing each player's avatar letter, all dim/dashed — and a counter "0 of 4 submitted"
 - Hand dock at the bottom with the Submit button
 
 **Picking phase** (judge view):
+
 - Same centered prompt, no submissions visible
 - Status: "You're the judge. Waiting for everyone to play…" with animated dots
 - **Hand is hidden entirely** — judges sit out, no need for it
 
 **Waiting phase** (after you submit):
+
 - Same single-prompt layout, hand hidden
 - Status: "Card submitted. Waiting on others…"
 - Pips all light up; counter shows "4 of 4 submitted"
 
 **Judging phase**:
+
 - Now the two-column layout returns with face-down cards on the right
 - Hand stays hidden
 - Judge gets a sticky bottom bar: "All cards in. Time to read them and pick a winner." + Start reveal button
 
 **Reveal phase**:
+
 - Cards flip one by one, winner highlights, hand stays hidden
 - Loops to next round, returns to picking with a fresh prompt + cleared state
 
@@ -326,7 +338,7 @@ The DEMO ROLE toggle (Player/Judge) is now anchored above the stage so it's reac
 
 ## User
 
-remove the B logo from header and remove the tagline original party game.  in small screens the title Cards Against Bhayanak should just become CAB. How to play and sign in are not required. if possible the header is not required at all
+remove the B logo from header and remove the tagline original party game. in small screens the title Cards Against Bhayanak should just become CAB. How to play and sign in are not required. if possible the header is not required at all
 
 ## Assistant
 
@@ -399,12 +411,14 @@ _[tool: done]_
 Card polish shipped. Tightened the typography and resized the playing cards for cleaner hierarchy:
 
 **New card scale (5:7-ish playing-card proportions):**
+
 - **Small** — 144×200, 13px / 1.24 (card backs, dense slots)
 - **Medium** — 204×286, 17px / 1.22 (hand cards, submissions)
 - **Large** — 288×400, 24px / 1.18 (home hero stack)
 - **Extra-large** — 360×500, 32px / 1.12 (center-stage prompt)
 
 **Typography:**
+
 - All card text now uses `text-wrap: pretty` so lines balance instead of leaving orphans
 - Negative letter-spacing scales with size (−0.018em → −0.03em) so display weights feel set, not stretched
 - Card foot (the small `PROMPT · BHAYANAK` label) dropped to 8.5px / 0.16em tracking with reduced opacity — quieter brand presence
@@ -681,7 +695,7 @@ Multi-blank prompts now work. When the prompt has 2 or 3 blanks:
 - **Submissions during reveal** render as a small stacked fan of N cards with a slight rotation per card, so multi-fill answers read as a single "play"
 - Tap a selected card again to deselect; if you try to pick a 4th when only 3 are needed, the oldest pick rotates out
 
-Round 4 in the demo deck uses a 2-blank prompt ("I never truly understood __ until I tried __") so you can see it in motion after a couple of rounds.Ready for your next change.
+Round 4 in the demo deck uses a 2-blank prompt ("I never truly understood ** until I tried **") so you can see it in motion after a couple of rounds.Ready for your next change.
 
 ## User
 
@@ -857,7 +871,7 @@ which round in demo is for multi blank scenario?
 
 _[tool: snip]_
 
-Round **4** ("I never truly understood __ until I tried __") and round **8** ("How to __ Without __") — both are 2-blank prompts in the demo deck.
+Round **4** ("I never truly understood ** until I tried **") and round **8** ("How to ** Without **") — both are 2-blank prompts in the demo deck.
 
 ## User
 
@@ -878,8 +892,8 @@ _[tool: snip]_
 Reordered:
 
 - **Round 1** — single blank ("What's the one thing that ruins every team offsite?")
-- **Round 2** — two blanks ("I never truly understood __ until I tried __")
-- **Round 3** — three blanks (new prompt: "My ideal Sunday: wake up to __, spend the afternoon with __, and end it all with __")
+- **Round 2** — two blanks ("I never truly understood ** until I tried **")
+- **Round 3** — three blanks (new prompt: "My ideal Sunday: wake up to **, spend the afternoon with **, and end it all with \_\_")
 
 ## User
 
@@ -926,6 +940,7 @@ _[tool: snip]_
 Stats page is live. Get to it via "See the stats" on home, or the demo nav dropdown ("5 · Stats").
 
 **What's on it:**
+
 - **6 headline tiles** — games played, rounds judged, cards submitted, avg players/game, avg spectators, avg session length
 - **Sparkline** — games started over the last 30 days, with "today" callout
 - **Bar chart** — lobby distribution by player count (the 5–6 sweet spot is visible)
@@ -944,4 +959,3 @@ looks good
 _[tool: snip]_
 
 👍
-

@@ -14,14 +14,14 @@ A real-time multiplayer Cards Against Humanity clone, **Cards Against Bhayanak**
 
 ## Reference materials
 
-| Location | Use for |
-|---|---|
-| `SPEC.md` | Authoritative spec — read before coding |
-| `docs/design-reference/project/Cards Against Bhayanak.html` | HTML prototype entry point |
-| `docs/design-reference/project/{styles,scenes,stats}.css` | Design token + component CSS to port to `src/styles.css` |
-| `docs/design-reference/project/screens.jsx` | React component logic to port |
-| `docs/design-reference/project/content.js` | Placeholder card content (replaced at runtime by REST AH seed) |
-| `docs/design-reference/chats/chat1.md` | Original design conversation |
+| Location                                                    | Use for                                                        |
+| ----------------------------------------------------------- | -------------------------------------------------------------- |
+| `SPEC.md`                                                   | Authoritative spec — read before coding                        |
+| `docs/design-reference/project/Cards Against Bhayanak.html` | HTML prototype entry point                                     |
+| `docs/design-reference/project/{styles,scenes,stats}.css`   | Design token + component CSS to port to `src/styles.css`       |
+| `docs/design-reference/project/screens.jsx`                 | React component logic to port                                  |
+| `docs/design-reference/project/content.js`                  | Placeholder card content (replaced at runtime by REST AH seed) |
+| `docs/design-reference/chats/chat1.md`                      | Original design conversation                                   |
 
 **Do NOT implement** `tweaks-panel.jsx` or `app.jsx`'s `TweaksPanel` block — design-tool meta-UI, not part of the real app.
 
@@ -46,15 +46,15 @@ Don't substitute equivalents (no Next.js, no TanStack Query unless the spec call
 
 ## Routes
 
-| Path | Screen |
-|---|---|
-| `/` | Home |
-| `/stats` | Public stats |
-| `/games/create` | Create game |
-| `/games/join` | Join game |
-| `/games/$code/lobby` | Lobby (pre-game + mid-game waiting) |
-| `/games/$code/session` | Game session |
-| `/games/$code/end` | End screen |
+| Path                   | Screen                              |
+| ---------------------- | ----------------------------------- |
+| `/`                    | Home                                |
+| `/stats`               | Public stats                        |
+| `/games/create`        | Create game                         |
+| `/games/join`          | Join game                           |
+| `/games/$code/lobby`   | Lobby (pre-game + mid-game waiting) |
+| `/games/$code/session` | Game session                        |
+| `/games/$code/end`     | End screen                          |
 
 **API routes** under `src/routes/api/`:
 
@@ -106,53 +106,74 @@ Cleared on: explicit Leave button, "Go home" from end screen, or `auth_error`. *
 All types in `src/lib/types.ts`. Used by both client and server.
 
 ```ts
-type Role = "player" | "spectator"
+type Role = 'player' | 'spectator'
 
-type PlayerStatus = "active" | "queued" | "spectator" | "grace" | "dropped"
+type PlayerStatus = 'active' | 'queued' | 'spectator' | 'grace' | 'dropped'
 
-type SessionStatus = "lobby" | "active" | "paused" | "ended" | "abandoned"
+type SessionStatus = 'lobby' | 'active' | 'paused' | 'ended' | 'abandoned'
 
 type GamePhase =
-  | "picking" | "waiting" | "judging"
-  | "eliminating"        // Survival of the Fittest
-  | "ranking"            // Serious Business
-  | "reveal" | "transition"
+  | 'picking'
+  | 'waiting'
+  | 'judging'
+  | 'eliminating' // Survival of the Fittest
+  | 'ranking' // Serious Business
+  | 'reveal'
+  | 'transition'
 
-type ModalRuleId = "godmode" | "survival" | "serious_business"      // ≤ 1 active
-type OrthogonalRuleId = "rebooting" | "packing_heat" | "rando" | "never_have_i_ever" | "happy_ending"
+type ModalRuleId = 'godmode' | 'survival' | 'serious_business' // ≤ 1 active
+type OrthogonalRuleId =
+  | 'rebooting'
+  | 'packing_heat'
+  | 'rando'
+  | 'never_have_i_ever'
+  | 'happy_ending'
 type RuleId = ModalRuleId | OrthogonalRuleId
 
-type GameOverMode = "normal" | "happy_ending" | "rando_won" | "deck_exhausted" | "abandoned"
+type GameOverMode = 'normal' | 'happy_ending' | 'rando_won' | 'deck_exhausted' | 'abandoned'
 
 type ErrorCode =
-  | "not_authorized" | "invalid_token" | "player_dropped"
-  | "spectator_action" | "invalid_state" | "rate_limited"
-  | "room_full" | "room_not_found" | "duplicate_username"
-  | "conflicting_rules" | "host_only" | "score_too_low" | "internal_error"
+  | 'not_authorized'
+  | 'invalid_token'
+  | 'player_dropped'
+  | 'spectator_action'
+  | 'invalid_state'
+  | 'rate_limited'
+  | 'room_full'
+  | 'room_not_found'
+  | 'duplicate_username'
+  | 'conflicting_rules'
+  | 'host_only'
+  | 'score_too_low'
+  | 'internal_error'
 
-type Card = { id: string; text: string }                   // black: blanks = "__________"
+type Card = { id: string; text: string } // black: blanks = "__________"
 type BlackCard = Card & { pick: 1 | 2 | 3 }
-type Hand = Card[]                                          // 10 cards (11 with Packing Heat on pick:2)
+type Hand = Card[] // 10 cards (11 with Packing Heat on pick:2)
 
 type Submission = {
-  submissionId: string                                      // server opaque; mapping → playerId hidden until reveal
-  fills: Card[]                                             // order = submitter's order
-  playerId?: string                                         // only post-reveal
-  rank?: 1 | 2 | 3                                          // Serious Business only
-  eliminated?: boolean                                      // Survival only
+  submissionId: string // server opaque; mapping → playerId hidden until reveal
+  fills: Card[] // order = submitter's order
+  playerId?: string // only post-reveal
+  rank?: 1 | 2 | 3 // Serious Business only
+  eliminated?: boolean // Survival only
 }
 
 type GameConfig = {
-  maxPlayers: number                                        // 3–10
-  roundsToWin: number                                       // 3–20
-  timer: "30s" | "60s" | "90s" | "Off"
+  maxPlayers: number // 3–10
+  roundsToWin: number // 3–20
+  timer: '30s' | '60s' | '90s' | 'Off'
   packs: string[]
   rules: RuleId[]
 }
 
 type CabSession = {
-  roomCode: string; playerId: string; sessionToken: string
-  username: string; role: Role; anonId: string
+  roomCode: string
+  playerId: string
+  sessionToken: string
+  username: string
+  role: Role
+  anonId: string
 }
 ```
 
@@ -205,6 +226,7 @@ error(code, message) | pong
 ## Game rules engine
 
 ### Core loop
+
 1. Deal 10 white cards per active player at game start.
 2. Each round: rotate Czar, deal black card from shuffled deck.
 3. Non-Czar players submit `pick` white cards. **Order within a player's submission is preserved**; order between players is server-shuffled.
@@ -231,16 +253,16 @@ Player skipped for that round (empty submission). Server emits `player_skipped`.
 
 ### House rules (all official 2014 CAH)
 
-| Rule | ID | Notes |
-|---|---|---|
-| Rebooting the Universe | `rebooting` | Spend 1pt to redraw; allowed only during `picking` + `transition` |
-| Packing Heat | `packing_heat` | Pick-2 black → +1 white card pre-submission |
-| Rando Cardrissian | `rando` | Synthetic player (DB row with `is_rando=true`) auto-submits each round |
-| God Is Dead | `godmode` | All players vote; tie re-vote ×2 then random; disables Gambling |
-| Survival of the Fittest | `survival` | Players take turns eliminating one card until one remains |
-| Serious Business | `serious_business` | Czar ranks top 3 (3/2/1 points); `winner_player_id` = top-ranked |
-| Never Have I Ever | `never_have_i_ever` | Discard with confession; max 3 per player per game; only in `picking` + `transition` |
-| Happy Ending | `happy_ending` | Host ends early via topbar ⋯ menu; forced "Make a Haiku" final round |
+| Rule                    | ID                  | Notes                                                                                |
+| ----------------------- | ------------------- | ------------------------------------------------------------------------------------ |
+| Rebooting the Universe  | `rebooting`         | Spend 1pt to redraw; allowed only during `picking` + `transition`                    |
+| Packing Heat            | `packing_heat`      | Pick-2 black → +1 white card pre-submission                                          |
+| Rando Cardrissian       | `rando`             | Synthetic player (DB row with `is_rando=true`) auto-submits each round               |
+| God Is Dead             | `godmode`           | All players vote; tie re-vote ×2 then random; disables Gambling                      |
+| Survival of the Fittest | `survival`          | Players take turns eliminating one card until one remains                            |
+| Serious Business        | `serious_business`  | Czar ranks top 3 (3/2/1 points); `winner_player_id` = top-ranked                     |
+| Never Have I Ever       | `never_have_i_ever` | Discard with confession; max 3 per player per game; only in `picking` + `transition` |
+| Happy Ending            | `happy_ending`      | Host ends early via topbar ⋯ menu; forced "Make a Haiku" final round                 |
 
 Modal rules (`godmode`, `survival`, `serious_business`) are mutually exclusive — UI enforces with radio group. Orthogonal rules stack freely.
 
@@ -357,9 +379,9 @@ Product analytics + session replay + error tracking. SDKs: `posthog-js` (client)
 All non-cryptographic randomness routes through `src/lib/rng.ts` (wraps `seedrandom`):
 
 ```ts
-randomInt(min, max)    // inclusive min, exclusive max
-shuffle<T>(array)      // Fisher-Yates, returns new array
-pick<T>(array)         // single random element
+randomInt(min, max) // inclusive min, exclusive max
+shuffle<T>(array) // Fisher-Yates, returns new array
+pick<T>(array) // single random element
 ```
 
 - Production: seeded at boot from `crypto.randomBytes(16)` (non-deterministic)
@@ -372,17 +394,17 @@ Room code generation: `crypto.randomInt(0, 31)` per char, alphabet `ABCDEFGHJKMN
 
 ## Environment variables
 
-| Var | Purpose |
-|---|---|
-| `DATABASE_URL` | Postgres |
-| `REDIS_URL` | Redis/Valkey |
-| `SESSION_SECRET` | HMAC secret for sessionToken |
-| `PORT` | Default 3000 |
-| `NODE_ENV` | `development` \| `production` |
-| `AXIOM_TOKEN` + `AXIOM_DATASET` | Log shipping (prod only) |
+| Var                                | Purpose                                          |
+| ---------------------------------- | ------------------------------------------------ |
+| `DATABASE_URL`                     | Postgres                                         |
+| `REDIS_URL`                        | Redis/Valkey                                     |
+| `SESSION_SECRET`                   | HMAC secret for sessionToken                     |
+| `PORT`                             | Default 3000                                     |
+| `NODE_ENV`                         | `development` \| `production`                    |
+| `AXIOM_TOKEN` + `AXIOM_DATASET`    | Log shipping (prod only)                         |
 | `POSTHOG_API_KEY` + `POSTHOG_HOST` | Server reads; relays to client via `/api/config` |
-| `POSTHOG_PERSONAL_API_KEY` | Build-time sourcemap upload only |
-| `CAB_RNG_SEED` | Tests only |
+| `POSTHOG_PERSONAL_API_KEY`         | Build-time sourcemap upload only                 |
+| `CAB_RNG_SEED`                     | Tests only                                       |
 
 ---
 
@@ -405,19 +427,19 @@ The spec § Project File Structure is authoritative. Key directories:
 
 ## Commands (target — will exist once `package.json` is created)
 
-| Command | Purpose |
-|---|---|
-| `pnpm dev` | Dev server with HMR at http://localhost:3000 |
-| `pnpm build` | Production build to `.output/` |
-| `pnpm db:push` | Apply Drizzle schema (dev or prod) |
-| `pnpm db:studio` | Drizzle Studio |
-| `pnpm seed` | Trigger card pack seeding manually |
-| `pnpm typecheck` | TypeScript check |
-| `pnpm lint` | ESLint |
-| `pnpm test:e2e` | Playwright (requires Postgres + Redis up) |
-| `pnpm test:e2e:ui` | Playwright UI mode |
-| `docker compose up -d postgres redis` | Just deps for local dev |
-| `docker compose up -d` | Full stack |
+| Command                               | Purpose                                      |
+| ------------------------------------- | -------------------------------------------- |
+| `pnpm dev`                            | Dev server with HMR at http://localhost:3000 |
+| `pnpm build`                          | Production build to `.output/`               |
+| `pnpm db:push`                        | Apply Drizzle schema (dev or prod)           |
+| `pnpm db:studio`                      | Drizzle Studio                               |
+| `pnpm seed`                           | Trigger card pack seeding manually           |
+| `pnpm typecheck`                      | TypeScript check                             |
+| `pnpm lint`                           | ESLint                                       |
+| `pnpm test:e2e`                       | Playwright (requires Postgres + Redis up)    |
+| `pnpm test:e2e:ui`                    | Playwright UI mode                           |
+| `docker compose up -d postgres redis` | Just deps for local dev                      |
+| `docker compose up -d`                | Full stack                                   |
 
 ---
 
