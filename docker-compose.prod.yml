@@ -51,7 +51,7 @@ services:
       POSTHOG_API_KEY: ${POSTHOG_API_KEY}
       POSTHOG_HOST: ${POSTHOG_HOST}
     ports:
-      - '127.0.0.1:${PORT:-3000}:${PORT:-3000}'
+      - '${PORT:-3000}:${PORT:-3000}'
     healthcheck:
       test: ['CMD', 'wget', '-qO-', 'http://localhost:${PORT:-3000}/api/healthz']
       interval: 10s
