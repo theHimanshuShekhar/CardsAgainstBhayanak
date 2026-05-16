@@ -27,6 +27,15 @@ test('God Is Dead: no self/double vote, round resolves (protocol)', async () => 
   expect(r.reachedRound2, 'loop advances after vote resolution').toBe(true)
 })
 
+test('Rando Cardrissian auto-submits each round (protocol)', async () => {
+  test.setTimeout(60_000)
+  // 3 humans (1 czar, 2 submitters) + Rando ⇒ 3 revealed submissions.
+  const r = await playRound(BASE, { rules: ['rando'], players: 3 })
+  expect(r.cardRevealed, 'two human submissions + Rando').toBe(3)
+  expect(r.roundWon).toBe(true)
+  expect(r.reachedRound2).toBe(true)
+})
+
 // UI-driven coverage. Blocked until the create-screen packs/rules UI
 // (S2-6/S2-16), lobby start + snapshot (S2-5), and end screen (S2-8)
 // land — without them the create flow submits empty packs and the game

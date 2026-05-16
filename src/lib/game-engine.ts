@@ -62,7 +62,21 @@ export async function startGame(code: string): Promise<void> {
         isRando: true,
       })
       .returning()
-    if (rando) activePlayers.push(rando)
+    if (rando) {
+      activePlayers.push(rando)
+      // Mirror into Redis — engine reads players from there, not the DB.
+      await state.addPlayer(code, {
+        id: rando.id,
+        username: rando.username,
+        role: 'player',
+        status: 'active',
+        score: 0,
+        isHost: false,
+        isRando: true,
+        discardsUsed: 0,
+        joinedAt: rando.joinedAt.toISOString(),
+      })
+    }
   }
 
   const playerIds = activePlayers.map((p) => p.id)
@@ -141,6 +155,10 @@ export async function startRound(
     czarId,
     blackCardPick: black.pick,
   })
+
+  if (config.rules.includes('rando')) {
+    await autoSubmitRando(code, black.pick)
+  }
 
   if (config.timer !== 'Off') {
     const ms = TIMER_MS[config.timer]
@@ -324,6 +342,26 @@ export async function submitCards(
     pickCount: cardIds.length,
   })
   await checkRoundReady(code)
+}
+
+// Rando Cardrissian: a synthetic player that auto-plays each round by
+// drawing straight from the white deck (it has no hand). Submitted at
+// round start so it's just another anonymous submission to judge/vote.
+export async function autoSubmitRando(code: string, pick: number): Promise<void> {
+  const players = await state.getAllPlayers(code)
+  const rando = players.find((p) => p.isRando && p.status === 'active')
+  if (!rando) return
+  const drawn = await state.drawCards(code, 'white', pick)
+  if (drawn.length === 0) return
+  const rows = await db.select().from(whiteCards).where(inArray(whiteCards.id, drawn))
+  const fills: Card[] = drawn.map((id) => {
+    const c = rows.find((x) => x.id === id)
+    return c ? { id: c.id, text: c.text } : { id, text: '' }
+  })
+  const submission: Submission = { submissionId: createId(), fills, playerId: rando.id }
+  await state.setSubmission(code, rando.id, submission)
+  await state.publishEvent(code, { type: 'player_played', playerId: rando.id })
+  captureServerEvent(code, 'cab_rule_triggered', { roomCode: code, rule: 'rando' })
 }
 
 export async function pickWinner(
