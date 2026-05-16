@@ -10,6 +10,88 @@ Severity: `S0` = ships-broken (cannot play a game), `S1` = production-blocker, `
 
 ---
 
+## Progress & Re-scope (updated 2026-05-17)
+
+> This section supersedes the original estimates below. The original audit
+> only ran `pnpm typecheck` / `pnpm lint` — **never `pnpm build` or a
+> runtime** — so it systematically understated infrastructure and
+> integration scope. Items are deeper than their one-paragraph sketches.
+
+### Methodology correction
+
+- The original "static checks pass" framing hid that **`pnpm build` was
+  fully broken** and **production had never run**. Always verify with
+  `pnpm build` + a real run (Docker Postgres/Redis), not just typecheck/lint.
+- The codebase was scaffolded against the **Vinxi-era** TanStack Start API
+  (`@tanstack/start-api-routes` `createAPIFileRoute`); the project is
+  actually TanStack Start v1.167 (Vite + **srvx**, not Nitro/Vinxi). Expect
+  more framework-paradigm mismatches.
+- Each fix tends to be **cross-cutting** (engine + WS handler + client +
+  protocol/types), not localized. Verification needs a Docker rebuild cycle
+  (no test harness yet — see S2-10).
+
+### Verified DONE (branch `fix/audit-priority-fixes`)
+
+| Issue | Commit | Verification |
+| ----- | ------ | ------------ |
+| S1-4 Redis init at create | `1e00bc3` | `POST /api/games` → 200 in Docker |
+| S1-2 / S1-3 seed + boot guard | `5963b72` | 71 packs seeded at boot |
+| S1-1 prod server + native WS | `327d821`, `33e14e3` | healthz 200, WS upgrade + round-trip; was *prod never built* |
+| S0-1 reveal/judging loop | `ed05486` | 3-player round progresses picking→reveal→pick→round_won→round_end→round 2 |
+
+### Newly discovered issues (not in original audit)
+
+- **N-1 (S2):** `start.ts` publishes `game_started` + `round_started`
+  *and* `engine.startRound` also publishes `round_started` → **duplicate
+  `round_started` for round 1**. Fix: let the engine be the sole emitter;
+  `start.ts` should only emit `game_started`.
+- **N-2 (S2):** `config.packs` must contain **pack IDs**, not names —
+  `buildDecks` does `inArray(blackCards.packId, packs)`. The create UI
+  (S2-6/S2-16) must submit pack IDs; empty/invalid → `deck_exhausted` on
+  start. Ties to the S3 "empty-pack 503" item.
+- **N-3 (S3):** `SubmissionsGrid` computes `isWinner = s.submissionId ===
+  winnerId` — compares an index-string submissionId to a *playerId*.
+  Winner highlight is wrong; should compare to the won `submissionId`.
+- **N-4 (S3, accepted):** `server.prod.ts` runs TS via `tsx` in prod
+  (works, verified). A follow-up could bundle the entry to drop the `tsx`
+  runtime dependency. Acceptable for MVP.
+
+### Revised scope for remaining items
+
+| Item | Original sketch | Revised reality | Est. surface |
+| ---- | --------------- | --------------- | ------------ |
+| S0-10/S0-9 czar rotation | "tiny" | Mostly accurate — small, but verify seeded-RNG determinism end-to-end | `game-engine.ts` |
+| S0-4 Rando | add `autoSubmitRando` | Engine + must integrate with `checkRoundReady` (Rando counted, not awaited) + win path | engine |
+| S0-5 Packing Heat | call `applyPackingHeat` | Engine + **per-player hand delivery** (no `hand` in `round_started` today; needs a `hand_dealt` path) — cross-cutting to client | engine + types + client |
+| S0-6 Happy Ending | host "end now" | New WS event + types + engine flag + **synthetic Haiku black card seeded** + topbar UI | engine + types + handler + seed + client |
+| S0-2 Survival first turn | emit `elimination_turn` | Largely handled by S0-1's `checkRoundReady` survival branch; needs validation + turn-persistence test | engine (verify) |
+| S0-3 God Is Dead | dedupe votes | Redis vote-set + self-vote guard; interacts with S0-1 voting branch | engine |
+| S2-1 disconnect-during-game | extend grace callback | Large: czar/host/all-dropped paths, new `host_changed` event, phase persistence | handler + engine + types + client |
+| S2-3/S2-4 spectator/auth | guard + tagged union | Moderate, mostly handler/auth | handler + auth |
+| S2-6/S2-16 create UI | packs + rules grid | Whole UI build + packs-ID contract (N-2) + Core lock | client + context |
+| S2-5 lobby snapshot | add handler | Needs server `getLobbySnapshot` (lobby status returns null today) + client | handler + client |
+| S2-9/S2-8 stats + end | SQL + screen | Several SQL aggregations + end-screen state plumbing | api + client |
+| S2-10 E2E infra | globalSetup/teardown | **High value** — replaces slow manual Docker verification; should likely come *before* the remaining S2 UI work | tests |
+| S2-12/S2-13 PostHog | distinctId helper | Mechanical, low risk | engine/api |
+| S2-18 + S3 socket/polish | cleanup | Mostly small, independent | client + misc |
+
+### Recalibrated priority order
+
+1. **S0-10/S0-9** czar rotation (small; unblocks deterministic multi-round).
+2. **S0-3** God Is Dead correctness + **S0-2** Survival validation (build on S0-1's branches).
+3. **S0-4 Rando**, then **S0-5 Packing Heat**, then **S0-6 Happy Ending**
+   (ascending cross-cutting cost; each verified in Docker).
+4. **N-1** duplicate `round_started` (tiny, do alongside S0 work).
+5. **S2-10 E2E harness** — promote earlier: turns slow Docker rebuild
+   verification into fast automated checks for everything after.
+6. **S2-1** disconnect handling (large).
+7. **S2-3/S2-4** spectator + auth.
+8. **S2-6/S2-16** create UI (+ N-2 pack-ID contract), then **S2-5** lobby.
+9. **S2-9/S2-8** stats + end screen.
+10. **S2-12/S2-13** PostHog, **S2-18 + S3** polish (+ N-3, N-4).
+
+---
+
 ## S0 — Game cannot progress
 
 ### S0-1. No `reveal_start` / `card_revealed` events emitted
