@@ -69,7 +69,10 @@ export async function startGame(code: string): Promise<void> {
   await state.setCzarOrder(code, playerIds)
   await dealStartingHands(code, playerIds)
 
+  // Round-1 Czar is a random offset into czarOrder; persist it so the
+  // rotation is stable and seeded-RNG runs are deterministic.
   const firstCzarIdx = chooseFirstCzar(activePlayers.length)
+  await redis.hset(KEYS.game(code), 'czarStartOffset', String(firstCzarIdx))
   await db.update(gameSessions).set({ status: 'active' }).where(eq(gameSessions.id, session.id))
 
   engineLogger.info({ code, firstCzarIdx, players: activePlayers.length }, 'game started')
@@ -106,7 +109,11 @@ export async function startRound(
       const p = allPlayers.find((x) => x.id === pid)
       return p && p.status === 'active' && !p.isRando
     })
-    czarId = activeOrder[(round - 1) % activeOrder.length] ?? null
+    const offset = Number(await redis.hget(KEYS.game(code), 'czarStartOffset')) || 0
+    czarId =
+      activeOrder.length > 0
+        ? (activeOrder[(offset + round - 1) % activeOrder.length] ?? null)
+        : null
   }
 
   await state.clearSkippedPlayers(code)
@@ -395,6 +402,7 @@ export async function endRound(code: string, submitterIds: string[]): Promise<vo
   for (const p of players) {
     if (p.status === 'queued') {
       await state.updatePlayer(code, p.id, { status: 'active' })
+      await state.appendCzarOrder(code, p.id)
       activated.push(p.id)
       const dealt = await state.drawCards(code, 'white', 10)
       await state.setHand(code, p.id, dealt)

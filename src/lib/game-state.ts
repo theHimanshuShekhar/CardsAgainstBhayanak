@@ -57,6 +57,13 @@ export async function getCzarOrder(code: string): Promise<string[]> {
   return await redis.lrange(KEYS.czarOrder(code), 0, -1)
 }
 
+// Mid-game joiners are appended at activation so the stable rotation
+// keeps its existing offsets (never recompute from live arrays).
+export async function appendCzarOrder(code: string, playerId: string): Promise<void> {
+  await redis.rpush(KEYS.czarOrder(code), playerId)
+  await redis.expire(KEYS.czarOrder(code), ROOM_TTL_SECONDS)
+}
+
 export async function pushDeck(
   code: string,
   kind: 'black' | 'white',
