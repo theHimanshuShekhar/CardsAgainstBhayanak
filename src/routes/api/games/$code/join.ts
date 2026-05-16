@@ -2,6 +2,7 @@ import { createAPIFileRoute } from '@tanstack/start-api-routes'
 import { db } from '~/db'
 import { gameSessions, gamePlayers } from '~/db/schema'
 import { redis, KEYS } from '~/lib/redis'
+import * as state from '~/lib/game-state'
 import { signSessionToken } from '~/lib/session-token'
 import { checkRateLimit } from '~/lib/rate-limit'
 import { JoinGameSchema, errorResponse, getClientIp } from '~/lib/api-helpers'
@@ -83,6 +84,20 @@ export const APIRoute = createAPIFileRoute('/api/games/$code/join')({
       .returning()
 
     if (!player) return errorResponse(500, 'internal_error', 'Failed to create player')
+
+    const gamePlayer = {
+      id: player.id,
+      username: player.username,
+      role,
+      status,
+      score: 0,
+      isHost: false,
+      isRando: false,
+      discardsUsed: 0,
+      joinedAt: player.joinedAt.toISOString(),
+    } as const
+    await state.addPlayer(code, gamePlayer)
+    await state.publishEvent(code, { type: 'player_joined', player: gamePlayer })
 
     const token = await signSessionToken({ playerId: player.id, roomCode: code })
 

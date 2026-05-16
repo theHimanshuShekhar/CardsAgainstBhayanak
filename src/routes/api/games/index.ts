@@ -2,6 +2,7 @@ import { createAPIFileRoute } from '@tanstack/start-api-routes'
 import { db } from '~/db'
 import { gameSessions, gamePlayers } from '~/db/schema'
 import { redis, KEYS, ROOM_TTL_SECONDS } from '~/lib/redis'
+import * as state from '~/lib/game-state'
 import { generateRoomCode } from '~/lib/code-gen'
 import { signSessionToken } from '~/lib/session-token'
 import { checkRateLimit } from '~/lib/rate-limit'
@@ -13,8 +14,13 @@ import { eq } from 'drizzle-orm'
 async function allocateRoomCode(): Promise<string> {
   for (let attempt = 0; attempt < 5; attempt++) {
     const code = generateRoomCode()
-    const ok = await redis.set(KEYS.game(code), '1', 'EX', ROOM_TTL_SECONDS, 'NX')
-    if (ok === 'OK') return code
+    // Claim atomically with a hash field so the key is a hash (not a string),
+    // letting createGameState's HSET succeed instead of crashing WRONGTYPE.
+    const claimed = await redis.hsetnx(KEYS.game(code), '_claimed', '1')
+    if (claimed === 1) {
+      await redis.expire(KEYS.game(code), ROOM_TTL_SECONDS)
+      return code
+    }
   }
   throw new Error('Failed to allocate room code after 5 attempts')
 }
@@ -63,6 +69,19 @@ export const APIRoute = createAPIFileRoute('/api/games')({
       .update(gameSessions)
       .set({ hostPlayerId: host.id })
       .where(eq(gameSessions.id, session.id))
+
+    await state.createGameState(code, host.id, parsed.data.config)
+    await state.addPlayer(code, {
+      id: host.id,
+      username: host.username,
+      role: 'player',
+      status: 'active',
+      score: 0,
+      isHost: true,
+      isRando: false,
+      discardsUsed: 0,
+      joinedAt: host.joinedAt.toISOString(),
+    })
 
     const token = await signSessionToken({ playerId: host.id, roomCode: code })
 

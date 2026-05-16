@@ -26,7 +26,18 @@ export const GameConfigSchema = z.object({
   roundsToWin: z.number().int().min(3).max(20),
   timer: z.enum(['30s', '60s', '90s', 'Off']),
   packs: z.array(z.string()).min(1),
-  rules: z.array(z.string()),
+  rules: z.array(
+    z.enum([
+      'godmode',
+      'survival',
+      'serious_business',
+      'rebooting',
+      'packing_heat',
+      'rando',
+      'never_have_i_ever',
+      'happy_ending',
+    ]),
+  ),
 })
 
 export const CreateGameSchema = z.object({
