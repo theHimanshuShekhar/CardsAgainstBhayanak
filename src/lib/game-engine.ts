@@ -206,6 +206,9 @@ export async function expireRoundTimer(
 const subOrderKey = (code: string) => `${KEYS.round(code)}:order`
 const resolvingKey = (code: string) => `${KEYS.round(code)}:resolving`
 const revealedKey = (code: string) => `${KEYS.round(code)}:revealed`
+const voteTallyKeyFor = (code: string) => `${KEYS.round(code)}:votetally`
+const tieKeyFor = (code: string) => `${KEYS.round(code)}:tiebreak`
+const votersKeyFor = (code: string) => `${KEYS.round(code)}:voters`
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms))
@@ -391,7 +394,14 @@ export async function endRound(code: string, submitterIds: string[]): Promise<vo
   }
 
   await state.clearSubmissions(code)
-  await redis.del(subOrderKey(code), resolvingKey(code), revealedKey(code))
+  await redis.del(
+    subOrderKey(code),
+    resolvingKey(code),
+    revealedKey(code),
+    voteTallyKeyFor(code),
+    tieKeyFor(code),
+    votersKeyFor(code),
+  )
 
   const players = await state.getAllPlayers(code)
   // Clear gamble flag for all players who gambled this round
@@ -480,13 +490,20 @@ function countGambleTransfers(
   return bonus
 }
 
-export async function castVote(
-  code: string,
-  _voterId: string,
-  submissionId: string,
-): Promise<void> {
-  const voteTallyKey = `${KEYS.round(code)}:votetally`
-  const tieKey = `${KEYS.round(code)}:tiebreak`
+export async function castVote(code: string, voterId: string, submissionId: string): Promise<void> {
+  const voteTallyKey = voteTallyKeyFor(code)
+  const tieKey = tieKeyFor(code)
+  const votersKey = votersKeyFor(code)
+
+  // Can't vote for your own submission (God Is Dead house rule).
+  const votedKey = await resolveSubmissionKey(code, submissionId)
+  if (!votedKey) return
+  if (resolvePlayerId(votedKey) === voterId) return
+
+  // One vote per player per round.
+  const fresh = await redis.sadd(votersKey, voterId)
+  await redis.expire(votersKey, ROOM_TTL_SECONDS)
+  if (fresh === 0) return
 
   await redis.hincrby(voteTallyKey, submissionId, 1)
   await redis.expire(voteTallyKey, ROOM_TTL_SECONDS)
@@ -514,7 +531,7 @@ export async function castVote(
     const attempts = await redis.incr(tieKey)
     await redis.expire(tieKey, ROOM_TTL_SECONDS)
     if (attempts <= 2) {
-      await redis.del(voteTallyKey)
+      await redis.del(voteTallyKey, votersKey)
       await state.publishEvent(code, { type: 'vote_tally', votes: {} })
       return
     }
@@ -563,6 +580,10 @@ export async function eliminateSubmission(
   byPlayerId: string,
   submissionId: string,
 ): Promise<void> {
+  // Only the player whose turn it is may eliminate (Survival).
+  const turnPlayerId = await redis.hget(KEYS.round(code), 'eliminationTurnPlayerId')
+  if (turnPlayerId && byPlayerId !== turnPlayerId) return
+
   const submissions = await state.getSubmissions(code)
   const order = await getSubOrder(code)
   const pid = await resolveSubmissionKey(code, submissionId)
@@ -607,12 +628,27 @@ export async function eliminateSubmission(
     })
     await endRound(code, Object.keys(submissions))
   } else {
+    // Same turn set as checkRoundReady's Survival branch: active, not
+    // rando, not the Czar.
+    const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
+    const [roundRow] = session
+      ? await db
+          .select()
+          .from(gameRounds)
+          .where(eq(gameRounds.sessionId, session.id))
+          .orderBy(desc(gameRounds.roundNum))
+          .limit(1)
+      : []
+    const czarId = roundRow?.czarPlayerId ?? null
     const activePlayers = (await state.getAllPlayers(code)).filter(
-      (p) => p.status === 'active' && !p.isRando,
+      (p) => p.status === 'active' && !p.isRando && p.id !== czarId,
     )
     const currentIdx = activePlayers.findIndex((p) => p.id === byPlayerId)
     const nextPlayer = activePlayers[(currentIdx + 1) % activePlayers.length]
     if (nextPlayer) {
+      // Persist the turn so it survives reconnects, not just broadcast.
+      await redis.hset(KEYS.round(code), 'eliminationTurnPlayerId', nextPlayer.id)
+      await redis.expire(KEYS.round(code), ROOM_TTL_SECONDS)
       await state.publishEvent(code, { type: 'elimination_turn', playerId: nextPlayer.id })
     }
   }

@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test'
 import { HANDLES } from '../fixtures/handles'
 import { createGame, joinGame } from '../helpers'
-import { playRound } from '../protocol'
+import { playRound, playGodmode } from '../protocol'
 
 const BASE = process.env['CAB_E2E_BASE'] ?? 'http://localhost:3000'
 
@@ -16,6 +16,15 @@ test('normal mode: full round progresses (protocol)', async () => {
   expect(r.roundWon, 'czar pick resolves to round_won').toBe(true)
   expect(r.roundEnd, 'round_end fires').toBe(true)
   expect(r.reachedRound2, 'loop advances to round 2').toBe(true)
+})
+
+test('God Is Dead: no self/double vote, round resolves (protocol)', async () => {
+  test.setTimeout(60_000)
+  const r = await playGodmode(BASE, { players: 3 })
+  expect(r.selfVoteIgnored, 'self-vote + dupes must not resolve the round').toBe(true)
+  expect(r.doubleVoteIgnored).toBe(true)
+  expect(r.roundWon, 'resolves once all unique voters vote').toBe(true)
+  expect(r.reachedRound2, 'loop advances after vote resolution').toBe(true)
 })
 
 // UI-driven coverage. Blocked until the create-screen packs/rules UI

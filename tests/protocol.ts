@@ -65,6 +65,114 @@ export type GameResult = {
   reachedRound2: boolean
 }
 
+export type GodmodeResult = {
+  selfVoteIgnored: boolean
+  doubleVoteIgnored: boolean
+  roundWon: boolean
+  reachedRound2: boolean
+}
+
+// God Is Dead: no Czar, everyone votes. Verifies S0-3 (no self-vote, no
+// double-vote) and the S0-1 godmode branch end-to-end.
+export async function playGodmode(
+  base: string,
+  opts: { players?: number } = {},
+): Promise<GodmodeResult> {
+  const n = opts.players ?? 3
+  const packsJson = (await (await fetch(base + '/api/packs')).json()) as {
+    packs: { id: string; name: string }[]
+  }
+  const pack = packsJson.packs.find((p) => /base/i.test(p.name)) ?? packsJson.packs[0]
+  if (!pack) throw new Error('no packs')
+
+  const c = await post(base, '/api/games', {
+    username: 'host',
+    anonId: 'a-host',
+    config: { maxPlayers: 10, roundsToWin: 5, timer: 'Off', packs: [pack.id], rules: ['godmode'] },
+  })
+  const code = c.json.roomCode as string
+  const tokens: Record<string, string> = { host: c.json.sessionToken }
+  for (let i = 2; i <= n; i++) {
+    const j = await post(base, `/api/games/${code}/join`, {
+      username: `p${i}`,
+      anonId: `a-p${i}`,
+      role: 'player',
+    })
+    tokens[`p${i}`] = j.json.sessionToken
+  }
+  const peers: Record<string, Peer> = {}
+  for (const name of Object.keys(tokens))
+    peers[name] = await connect(base, code, tokens[name]!, name)
+
+  await post(base, `/api/games/${code}/start`, {}, tokens.host)
+  await sleep(800)
+  for (const p of Object.values(peers)) send(p, { type: 'rejoin' })
+  await sleep(1200)
+
+  // Everyone submits (godmode has no Czar). Remember each peer's cards.
+  const playedBy: Record<string, string[]> = {}
+  for (const [name, p] of Object.entries(peers)) {
+    const hand = p.snapshot?.hand ?? []
+    const pick = p.snapshot?.prompt?.pick ?? 1
+    const ids = hand.slice(0, pick).map((x: any) => x.id)
+    playedBy[name] = ids
+    send(p, { type: 'play', cardIds: ids })
+  }
+
+  const any = Object.values(peers)[0]!
+  await waitFor(any, 'reveal_start')
+  await sleep(700 * (n + 1) + 800)
+
+  // Each peer finds its own submission index by matching revealed fills.
+  const reveals = any.events.filter((e) => e.type === 'card_revealed')
+  const ownIdx: Record<string, number> = {}
+  for (const [name, ids] of Object.entries(playedBy)) {
+    const r = reveals.find((e) => e.fills.map((f: any) => f.id).join(',') === ids.join(','))
+    ownIdx[name] = r ? r.submissionIndex : -1
+  }
+  const names = Object.keys(peers) // [A, B, C]
+  const total = reveals.length
+  const [A, B, C] = names as [string, string, string]
+  // Concentrate votes on C's submission so there's a clear winner (no
+  // tie / re-vote). A and B don't own it, so their votes are valid.
+  const winnerIdx = ownIdx[C]!
+  const targetSub = String(winnerIdx)
+
+  // S0-3a: A voting for its own submission must be ignored.
+  if (ownIdx[A]! >= 0) send(peers[A]!, { type: 'vote', submissionId: String(ownIdx[A]) })
+  // S0-3b: A voting twice for the (valid) winner must count once.
+  send(peers[A]!, { type: 'vote', submissionId: targetSub })
+  send(peers[A]!, { type: 'vote', submissionId: targetSub })
+  await sleep(700)
+  // Only 1 legitimate vote so far → round must NOT have resolved.
+  const wonEarly = any.events.some((e) => e.type === 'round_won')
+
+  // B also votes the winner; C votes someone else (not its own).
+  send(peers[B]!, { type: 'vote', submissionId: targetSub })
+  send(peers[C]!, { type: 'vote', submissionId: String((winnerIdx + 1) % total) })
+
+  const won = await waitFor(any, 'round_won', 10000).then(
+    () => true,
+    () => false,
+  )
+  const reachedRound2 = won
+    ? await waitFor(any, 'round_started', 10000)
+        .then(() => any.events.some((e) => e.type === 'round_started' && e.round === 2))
+        .catch(() => false)
+    : false
+
+  for (const p of Object.values(peers)) p.ws.close()
+
+  return {
+    // Round must NOT have resolved off one player's self-vote + 2 dupes
+    // (only 1 legitimate vote should have counted).
+    selfVoteIgnored: !wonEarly,
+    doubleVoteIgnored: !wonEarly,
+    roundWon: won,
+    reachedRound2,
+  }
+}
+
 // Drives one full normal-mode round and asserts the loop advances.
 export async function playRound(
   base: string,
