@@ -13,9 +13,18 @@ import { Route as StatsRouteImport } from './routes/stats'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as GamesJoinRouteImport } from './routes/games/join'
 import { Route as GamesCreateRouteImport } from './routes/games/create'
+import { Route as ApiStatsRouteImport } from './routes/api/stats'
+import { Route as ApiPacksRouteImport } from './routes/api/packs'
+import { Route as ApiHealthzRouteImport } from './routes/api/healthz'
+import { Route as ApiConfigRouteImport } from './routes/api/config'
+import { Route as ApiGamesIndexRouteImport } from './routes/api/games/index'
 import { Route as GamesCodeSessionRouteImport } from './routes/games/$code/session'
 import { Route as GamesCodeLobbyRouteImport } from './routes/games/$code/lobby'
 import { Route as GamesCodeEndRouteImport } from './routes/games/$code/end'
+import { Route as ApiGamesCodeWsRouteImport } from './routes/api/games/$code/ws'
+import { Route as ApiGamesCodeStartRouteImport } from './routes/api/games/$code/start'
+import { Route as ApiGamesCodeLeaveRouteImport } from './routes/api/games/$code/leave'
+import { Route as ApiGamesCodeJoinRouteImport } from './routes/api/games/$code/join'
 
 const StatsRoute = StatsRouteImport.update({
   id: '/stats',
@@ -37,6 +46,31 @@ const GamesCreateRoute = GamesCreateRouteImport.update({
   path: '/games/create',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiStatsRoute = ApiStatsRouteImport.update({
+  id: '/api/stats',
+  path: '/api/stats',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiPacksRoute = ApiPacksRouteImport.update({
+  id: '/api/packs',
+  path: '/api/packs',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiHealthzRoute = ApiHealthzRouteImport.update({
+  id: '/api/healthz',
+  path: '/api/healthz',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiConfigRoute = ApiConfigRouteImport.update({
+  id: '/api/config',
+  path: '/api/config',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiGamesIndexRoute = ApiGamesIndexRouteImport.update({
+  id: '/api/games/',
+  path: '/api/games/',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const GamesCodeSessionRoute = GamesCodeSessionRouteImport.update({
   id: '/games/$code/session',
   path: '/games/$code/session',
@@ -52,73 +86,156 @@ const GamesCodeEndRoute = GamesCodeEndRouteImport.update({
   path: '/games/$code/end',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiGamesCodeWsRoute = ApiGamesCodeWsRouteImport.update({
+  id: '/api/games/$code/ws',
+  path: '/api/games/$code/ws',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiGamesCodeStartRoute = ApiGamesCodeStartRouteImport.update({
+  id: '/api/games/$code/start',
+  path: '/api/games/$code/start',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiGamesCodeLeaveRoute = ApiGamesCodeLeaveRouteImport.update({
+  id: '/api/games/$code/leave',
+  path: '/api/games/$code/leave',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiGamesCodeJoinRoute = ApiGamesCodeJoinRouteImport.update({
+  id: '/api/games/$code/join',
+  path: '/api/games/$code/join',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/stats': typeof StatsRoute
+  '/api/config': typeof ApiConfigRoute
+  '/api/healthz': typeof ApiHealthzRoute
+  '/api/packs': typeof ApiPacksRoute
+  '/api/stats': typeof ApiStatsRoute
   '/games/create': typeof GamesCreateRoute
   '/games/join': typeof GamesJoinRoute
   '/games/$code/end': typeof GamesCodeEndRoute
   '/games/$code/lobby': typeof GamesCodeLobbyRoute
   '/games/$code/session': typeof GamesCodeSessionRoute
+  '/api/games/': typeof ApiGamesIndexRoute
+  '/api/games/$code/join': typeof ApiGamesCodeJoinRoute
+  '/api/games/$code/leave': typeof ApiGamesCodeLeaveRoute
+  '/api/games/$code/start': typeof ApiGamesCodeStartRoute
+  '/api/games/$code/ws': typeof ApiGamesCodeWsRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/stats': typeof StatsRoute
+  '/api/config': typeof ApiConfigRoute
+  '/api/healthz': typeof ApiHealthzRoute
+  '/api/packs': typeof ApiPacksRoute
+  '/api/stats': typeof ApiStatsRoute
   '/games/create': typeof GamesCreateRoute
   '/games/join': typeof GamesJoinRoute
   '/games/$code/end': typeof GamesCodeEndRoute
   '/games/$code/lobby': typeof GamesCodeLobbyRoute
   '/games/$code/session': typeof GamesCodeSessionRoute
+  '/api/games': typeof ApiGamesIndexRoute
+  '/api/games/$code/join': typeof ApiGamesCodeJoinRoute
+  '/api/games/$code/leave': typeof ApiGamesCodeLeaveRoute
+  '/api/games/$code/start': typeof ApiGamesCodeStartRoute
+  '/api/games/$code/ws': typeof ApiGamesCodeWsRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/stats': typeof StatsRoute
+  '/api/config': typeof ApiConfigRoute
+  '/api/healthz': typeof ApiHealthzRoute
+  '/api/packs': typeof ApiPacksRoute
+  '/api/stats': typeof ApiStatsRoute
   '/games/create': typeof GamesCreateRoute
   '/games/join': typeof GamesJoinRoute
   '/games/$code/end': typeof GamesCodeEndRoute
   '/games/$code/lobby': typeof GamesCodeLobbyRoute
   '/games/$code/session': typeof GamesCodeSessionRoute
+  '/api/games/': typeof ApiGamesIndexRoute
+  '/api/games/$code/join': typeof ApiGamesCodeJoinRoute
+  '/api/games/$code/leave': typeof ApiGamesCodeLeaveRoute
+  '/api/games/$code/start': typeof ApiGamesCodeStartRoute
+  '/api/games/$code/ws': typeof ApiGamesCodeWsRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
     | '/stats'
+    | '/api/config'
+    | '/api/healthz'
+    | '/api/packs'
+    | '/api/stats'
     | '/games/create'
     | '/games/join'
     | '/games/$code/end'
     | '/games/$code/lobby'
     | '/games/$code/session'
+    | '/api/games/'
+    | '/api/games/$code/join'
+    | '/api/games/$code/leave'
+    | '/api/games/$code/start'
+    | '/api/games/$code/ws'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
     | '/stats'
+    | '/api/config'
+    | '/api/healthz'
+    | '/api/packs'
+    | '/api/stats'
     | '/games/create'
     | '/games/join'
     | '/games/$code/end'
     | '/games/$code/lobby'
     | '/games/$code/session'
+    | '/api/games'
+    | '/api/games/$code/join'
+    | '/api/games/$code/leave'
+    | '/api/games/$code/start'
+    | '/api/games/$code/ws'
   id:
     | '__root__'
     | '/'
     | '/stats'
+    | '/api/config'
+    | '/api/healthz'
+    | '/api/packs'
+    | '/api/stats'
     | '/games/create'
     | '/games/join'
     | '/games/$code/end'
     | '/games/$code/lobby'
     | '/games/$code/session'
+    | '/api/games/'
+    | '/api/games/$code/join'
+    | '/api/games/$code/leave'
+    | '/api/games/$code/start'
+    | '/api/games/$code/ws'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   StatsRoute: typeof StatsRoute
+  ApiConfigRoute: typeof ApiConfigRoute
+  ApiHealthzRoute: typeof ApiHealthzRoute
+  ApiPacksRoute: typeof ApiPacksRoute
+  ApiStatsRoute: typeof ApiStatsRoute
   GamesCreateRoute: typeof GamesCreateRoute
   GamesJoinRoute: typeof GamesJoinRoute
   GamesCodeEndRoute: typeof GamesCodeEndRoute
   GamesCodeLobbyRoute: typeof GamesCodeLobbyRoute
   GamesCodeSessionRoute: typeof GamesCodeSessionRoute
+  ApiGamesIndexRoute: typeof ApiGamesIndexRoute
+  ApiGamesCodeJoinRoute: typeof ApiGamesCodeJoinRoute
+  ApiGamesCodeLeaveRoute: typeof ApiGamesCodeLeaveRoute
+  ApiGamesCodeStartRoute: typeof ApiGamesCodeStartRoute
+  ApiGamesCodeWsRoute: typeof ApiGamesCodeWsRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -151,6 +268,41 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof GamesCreateRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/stats': {
+      id: '/api/stats'
+      path: '/api/stats'
+      fullPath: '/api/stats'
+      preLoaderRoute: typeof ApiStatsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/packs': {
+      id: '/api/packs'
+      path: '/api/packs'
+      fullPath: '/api/packs'
+      preLoaderRoute: typeof ApiPacksRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/healthz': {
+      id: '/api/healthz'
+      path: '/api/healthz'
+      fullPath: '/api/healthz'
+      preLoaderRoute: typeof ApiHealthzRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/config': {
+      id: '/api/config'
+      path: '/api/config'
+      fullPath: '/api/config'
+      preLoaderRoute: typeof ApiConfigRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/games/': {
+      id: '/api/games/'
+      path: '/api/games'
+      fullPath: '/api/games/'
+      preLoaderRoute: typeof ApiGamesIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/games/$code/session': {
       id: '/games/$code/session'
       path: '/games/$code/session'
@@ -172,17 +324,54 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof GamesCodeEndRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/games/$code/ws': {
+      id: '/api/games/$code/ws'
+      path: '/api/games/$code/ws'
+      fullPath: '/api/games/$code/ws'
+      preLoaderRoute: typeof ApiGamesCodeWsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/games/$code/start': {
+      id: '/api/games/$code/start'
+      path: '/api/games/$code/start'
+      fullPath: '/api/games/$code/start'
+      preLoaderRoute: typeof ApiGamesCodeStartRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/games/$code/leave': {
+      id: '/api/games/$code/leave'
+      path: '/api/games/$code/leave'
+      fullPath: '/api/games/$code/leave'
+      preLoaderRoute: typeof ApiGamesCodeLeaveRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/games/$code/join': {
+      id: '/api/games/$code/join'
+      path: '/api/games/$code/join'
+      fullPath: '/api/games/$code/join'
+      preLoaderRoute: typeof ApiGamesCodeJoinRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   StatsRoute: StatsRoute,
+  ApiConfigRoute: ApiConfigRoute,
+  ApiHealthzRoute: ApiHealthzRoute,
+  ApiPacksRoute: ApiPacksRoute,
+  ApiStatsRoute: ApiStatsRoute,
   GamesCreateRoute: GamesCreateRoute,
   GamesJoinRoute: GamesJoinRoute,
   GamesCodeEndRoute: GamesCodeEndRoute,
   GamesCodeLobbyRoute: GamesCodeLobbyRoute,
   GamesCodeSessionRoute: GamesCodeSessionRoute,
+  ApiGamesIndexRoute: ApiGamesIndexRoute,
+  ApiGamesCodeJoinRoute: ApiGamesCodeJoinRoute,
+  ApiGamesCodeLeaveRoute: ApiGamesCodeLeaveRoute,
+  ApiGamesCodeStartRoute: ApiGamesCodeStartRoute,
+  ApiGamesCodeWsRoute: ApiGamesCodeWsRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

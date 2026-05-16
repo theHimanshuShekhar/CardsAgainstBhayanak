@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { generateRoomCode, formatRoomCode, normalizeRoomCode, ROOM_CODE_ALPHABET } from './code-gen'
+import { formatRoomCode, normalizeRoomCode, ROOM_CODE_ALPHABET } from './code-gen'
+import { generateRoomCode } from './code-gen.server'
 
 describe('code-gen', () => {
   it('alphabet has 31 chars and excludes O, 0, I, 1, L', () => {

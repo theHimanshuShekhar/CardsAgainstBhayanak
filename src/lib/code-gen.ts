@@ -1,15 +1,7 @@
-import { randomInt as cryptoRandomInt } from 'crypto'
+// Client-safe room-code helpers. The crypto-backed generator lives in
+// code-gen.server.ts so Node's `crypto` never reaches the client bundle.
 
 export const ROOM_CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
-const ALPHABET = ROOM_CODE_ALPHABET
-
-export function generateRoomCode(): string {
-  let code = ''
-  for (let i = 0; i < 6; i++) {
-    code += ALPHABET[cryptoRandomInt(0, ALPHABET.length)]
-  }
-  return code
-}
 
 export function formatRoomCode(raw: string): string {
   return `${raw.slice(0, 3)}-${raw.slice(3)}`

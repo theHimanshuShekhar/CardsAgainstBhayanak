@@ -1,12 +1,16 @@
-import { createAPIFileRoute } from '@tanstack/start-api-routes'
+import { createFileRoute } from '@tanstack/react-router'
 
-// WebSocket upgrades are intercepted by the Vite/Node http 'upgrade' event
-// before reaching TanStack Start's HTTP handler. This route handles the rare
-// case where a plain HTTP request hits this path.
-export const APIRoute = createAPIFileRoute('/api/games/$code/ws')({
-  GET: () =>
-    new Response('WebSocket upgrade required', {
-      status: 426,
-      headers: { Upgrade: 'websocket' },
-    }),
+// WebSocket upgrades are handled by Nitro's crossws engine (see
+// src/ws/ws-route.ts). This HTTP handler only responds to the rare
+// case where a plain HTTP request hits this path without upgrading.
+export const Route = createFileRoute('/api/games/$code/ws')({
+  server: {
+    handlers: {
+      GET: () =>
+        new Response('WebSocket upgrade required', {
+          status: 426,
+          headers: { Upgrade: 'websocket' },
+        }),
+    },
+  },
 })
