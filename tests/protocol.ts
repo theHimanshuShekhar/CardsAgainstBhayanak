@@ -63,6 +63,8 @@ export type GameResult = {
   roundWon: boolean
   roundEnd: boolean
   reachedRound2: boolean
+  promptPick: number
+  submitterHandLen: number
 }
 
 export type GodmodeResult = {
@@ -229,9 +231,11 @@ export async function playRound(
   const czarId = snap.czarId
   const pick = snap.prompt.pick as number
 
+  let submitterHandLen = 0
   for (const [name, id] of Object.entries(idByName)) {
     if (id === czarId) continue
     const hand = peers[name]!.snapshot?.hand ?? []
+    submitterHandLen = hand.length
     send(peers[name]!, { type: 'play', cardIds: hand.slice(0, pick).map((c: any) => c.id) })
   }
 
@@ -256,5 +260,7 @@ export async function playRound(
     roundWon: !!won,
     roundEnd: !!end,
     reachedRound2,
+    promptPick: pick,
+    submitterHandLen,
   }
 }

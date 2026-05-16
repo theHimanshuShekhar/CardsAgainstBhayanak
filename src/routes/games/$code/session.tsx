@@ -50,6 +50,9 @@ function SessionScreen() {
         if (event.hand) setHand(event.hand)
         setPhase(event.czarId === myId ? 'waiting' : 'picking')
       }
+      if (event.type === 'hand_update' && event.playerId === myId) {
+        setHand(event.hand)
+      }
       if (event.type === 'player_played') {
         // another player submitted — add a placeholder submission for progress tracking
         setSubmissions((prev) => [...prev, { submissionId: event.playerId, fills: [] }])

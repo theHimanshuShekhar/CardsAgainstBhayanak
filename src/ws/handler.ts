@@ -157,7 +157,18 @@ async function ensureSubscriber(code: string): Promise<void> {
   await sub.subscribe(channel)
   sub.on('message', (_ch, msg) => {
     try {
-      broadcast(code, JSON.parse(msg) as ServerToClientEvent)
+      const event = JSON.parse(msg) as ServerToClientEvent
+      // hand_update is private — route only to its owner, never broadcast.
+      if (event.type === 'hand_update') {
+        const peers = roomPeers.get(code)
+        if (peers) {
+          for (const peer of peers) {
+            if (peerContext.get(peer)?.playerId === event.playerId) send(peer, event)
+          }
+        }
+        return
+      }
+      broadcast(code, event)
     } catch (err) {
       wsLogger.error({ err }, 'bad pub/sub payload')
     }

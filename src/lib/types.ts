@@ -179,6 +179,7 @@ export type ServerMessage =
   | { type: 'game_started'; firstRound: number }
   | { type: 'round_started'; round: number; prompt: BlackCard; czarId: string | null; hand?: Hand }
   | { type: 'player_played'; playerId: string }
+  | { type: 'hand_update'; playerId: string; hand: Hand }
   | { type: 'player_gambled'; playerId: string }
   | { type: 'player_skipped'; playerId: string; round: number }
   | { type: 'reveal_start' }

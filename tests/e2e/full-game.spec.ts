@@ -36,6 +36,19 @@ test('Rando Cardrissian auto-submits each round (protocol)', async () => {
   expect(r.reachedRound2).toBe(true)
 })
 
+test('Packing Heat: pick-2 prompt deals an 11th card (protocol)', async () => {
+  test.setTimeout(60_000)
+  const r = await playRound(BASE, { rules: ['packing_heat'], players: 3 })
+  // Conditional but always meaningful: pick-2 ⇒ +1 card (11), else no-op.
+  if (r.promptPick === 2) {
+    expect(r.submitterHandLen, 'pick-2 ⇒ Packing Heat adds an 11th card').toBe(11)
+  } else {
+    expect(r.submitterHandLen, 'pick-1 ⇒ Packing Heat is a no-op').toBe(10)
+  }
+  expect(r.roundWon).toBe(true)
+  expect(r.reachedRound2).toBe(true)
+})
+
 // UI-driven coverage. Blocked until the create-screen packs/rules UI
 // (S2-6/S2-16), lobby start + snapshot (S2-5), and end screen (S2-8)
 // land — without them the create flow submits empty packs and the game

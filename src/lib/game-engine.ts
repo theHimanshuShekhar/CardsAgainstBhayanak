@@ -160,6 +160,14 @@ export async function startRound(
     await autoSubmitRando(code, black.pick)
   }
 
+  if (config.rules.includes('packing_heat') && black.pick === 2) {
+    const all = await state.getAllPlayers(code)
+    const eligible = all
+      .filter((p) => p.status === 'active' && !p.isRando && p.id !== czarId)
+      .map((p) => p.id)
+    await applyPackingHeat(code, eligible)
+  }
+
   if (config.timer !== 'Off') {
     const ms = TIMER_MS[config.timer]
     const expiresAt = Date.now() + ms
@@ -787,9 +795,17 @@ export async function confessDiscard(
 export async function applyPackingHeat(code: string, playerIds: string[]): Promise<void> {
   for (const pid of playerIds) {
     const extra = await state.drawCards(code, 'white', 1)
-    if (extra.length > 0) {
-      const current = await state.getHand(code, pid)
-      await state.setHand(code, pid, [...current, ...extra])
-    }
+    if (extra.length === 0) continue
+    const current = await state.getHand(code, pid)
+    const newIds = [...current, ...extra]
+    await state.setHand(code, pid, newIds)
+    // Push the +1 hand to the owning player (round_started can't carry
+    // per-player hands; the handler routes hand_update privately).
+    const rows = await db.select().from(whiteCards).where(inArray(whiteCards.id, newIds))
+    const hand: Card[] = newIds.map((id) => {
+      const c = rows.find((x) => x.id === id)
+      return c ? { id: c.id, text: c.text } : { id, text: '' }
+    })
+    await state.publishEvent(code, { type: 'hand_update', playerId: pid, hand })
   }
 }
