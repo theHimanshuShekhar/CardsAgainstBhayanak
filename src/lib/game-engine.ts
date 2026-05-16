@@ -6,7 +6,7 @@ import { redis, KEYS, ROOM_TTL_SECONDS } from './redis'
 import * as state from './game-state'
 import { engineLogger } from './logger'
 import { captureServerEvent } from './posthog-server'
-import { TIMER_MS } from './timing'
+import { TIMER_MS, REVEAL_STAGGER } from './timing'
 import type { GameConfig, GameOverMode, Submission, Card, BlackCard } from './types'
 import { createId } from '@paralleldrive/cuid2'
 
@@ -185,8 +185,104 @@ export async function expireRoundTimer(
     await state.clearSubmissions(code)
     await state.clearSkippedPlayers(code)
     await startRound(code, round + 1, czarId)
+    return
   }
-  // With 2+ submissions the judging/voting/elimination phase proceeds normally
+  // 2+ submissions: skipped players are excluded, so the round is now ready.
+  await checkRoundReady(code)
+}
+
+// ── Reveal / judging orchestration ────────────────────────────────
+//
+// The public submissionId is the index into a server-persisted permuted
+// order. The submissionId → playerId mapping stays hidden until reveal
+// (spec § Submission ordering).
+const subOrderKey = (code: string) => `${KEYS.round(code)}:order`
+const resolvingKey = (code: string) => `${KEYS.round(code)}:resolving`
+const revealedKey = (code: string) => `${KEYS.round(code)}:revealed`
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms))
+}
+
+async function getSubOrder(code: string): Promise<string[]> {
+  const raw = await redis.get(subOrderKey(code))
+  return raw ? (JSON.parse(raw) as string[]) : []
+}
+
+// publicId is the index string the client sends back (pick/vote/eliminate/rank).
+async function resolveSubmissionKey(code: string, publicId: string): Promise<string | null> {
+  const order = await getSubOrder(code)
+  const idx = Number(publicId)
+  if (!Number.isInteger(idx) || idx < 0 || idx >= order.length) return null
+  return order[idx] ?? null
+}
+
+export function publicIdForKey(order: string[], key: string): string {
+  return String(order.indexOf(key))
+}
+
+// Detects "all expected players have submitted", then drives the
+// server-controlled reveal and hands off to the mode-specific resolver.
+export async function checkRoundReady(code: string): Promise<void> {
+  const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
+  if (!session) return
+  const config = session.config as GameConfig
+
+  const [roundRow] = await db
+    .select()
+    .from(gameRounds)
+    .where(eq(gameRounds.sessionId, session.id))
+    .orderBy(desc(gameRounds.roundNum))
+    .limit(1)
+  if (!roundRow) return
+  const czarId = roundRow.czarPlayerId ?? null
+
+  const [submissions, players, skipped] = await Promise.all([
+    state.getSubmissions(code),
+    state.getAllPlayers(code),
+    state.getSkippedPlayers(code),
+  ])
+
+  const skippedSet = new Set(skipped)
+  const expected = players.filter(
+    (p) => p.status === 'active' && p.id !== czarId && !p.isRando && !skippedSet.has(p.id),
+  )
+  const submitted = new Set(Object.keys(submissions).map(resolvePlayerId))
+  const ready =
+    expected.length > 0 && expected.every((p) => submitted.has(p.id)) && submitted.size >= 2
+  if (!ready) return
+
+  // Resolve exactly once per round (guards concurrent last submissions).
+  const first = await redis.setnx(resolvingKey(code), '1')
+  if (first === 0) return
+  await redis.expire(resolvingKey(code), ROOM_TTL_SECONDS)
+
+  // Permute storage keys once; persist so pick/vote/eliminate and the
+  // rejoin snapshot all agree on index → submission.
+  const order = shuffle(Object.keys(submissions))
+  await redis.set(subOrderKey(code), JSON.stringify(order), 'EX', ROOM_TTL_SECONDS)
+
+  await state.publishEvent(code, { type: 'reveal_start' })
+  for (let i = 0; i < order.length; i++) {
+    const sub = submissions[order[i]!]
+    if (!sub) continue
+    await sleep(REVEAL_STAGGER)
+    await redis.set(revealedKey(code), String(i + 1), 'EX', ROOM_TTL_SECONDS)
+    await state.publishEvent(code, { type: 'card_revealed', submissionIndex: i, fills: sub.fills })
+  }
+
+  if (config.rules.includes('survival')) {
+    const turnOrder = players.filter((p) => p.status === 'active' && p.id !== czarId && !p.isRando)
+    const firstP = turnOrder[0]
+    if (firstP) {
+      await redis.hset(KEYS.round(code), 'eliminationTurnPlayerId', firstP.id)
+      await redis.expire(KEYS.round(code), ROOM_TTL_SECONDS)
+      await state.publishEvent(code, { type: 'elimination_turn', playerId: firstP.id })
+    }
+  } else if (config.rules.includes('godmode')) {
+    await state.publishEvent(code, { type: 'vote_tally', votes: {} })
+  }
+  // serious_business / normal: the Czar now ranks / picks (client-driven).
 }
 
 export async function submitCards(
@@ -217,6 +313,7 @@ export async function submitCards(
     playerId,
     pickCount: cardIds.length,
   })
+  await checkRoundReady(code)
 }
 
 export async function pickWinner(
@@ -225,9 +322,8 @@ export async function pickWinner(
   submissionId: string,
 ): Promise<void> {
   const submissions = await state.getSubmissions(code)
-  const entry = Object.entries(submissions).find(([, s]) => s.submissionId === submissionId)
-  if (!entry) throw new Error('submission not found')
-  const [winnerKey] = entry
+  const winnerKey = await resolveSubmissionKey(code, submissionId)
+  if (!winnerKey || !submissions[winnerKey]) throw new Error('submission not found')
   const winnerPlayerId = resolvePlayerId(winnerKey)
 
   const winner = await state.getPlayer(code, winnerPlayerId)
@@ -288,6 +384,7 @@ export async function endRound(code: string, submitterIds: string[]): Promise<vo
   }
 
   await state.clearSubmissions(code)
+  await redis.del(subOrderKey(code), resolvingKey(code), revealedKey(code))
 
   const players = await state.getAllPlayers(code)
   // Clear gamble flag for all players who gambled this round
@@ -419,9 +516,8 @@ export async function castVote(
   const winnerSubmissionId =
     leaders.length === 1 ? leaders[0]! : leaders[Math.floor(Math.random() * leaders.length)]!
 
-  const entry = Object.entries(submissions).find(([, s]) => s.submissionId === winnerSubmissionId)
-  if (!entry) return
-  const [winnerKey] = entry
+  const winnerKey = await resolveSubmissionKey(code, winnerSubmissionId)
+  if (!winnerKey) return
   const winnerPlayerId = resolvePlayerId(winnerKey)
 
   const winner = await state.getPlayer(code, winnerPlayerId)
@@ -460,10 +556,10 @@ export async function eliminateSubmission(
   submissionId: string,
 ): Promise<void> {
   const submissions = await state.getSubmissions(code)
-  const entry = Object.entries(submissions).find(([, s]) => s.submissionId === submissionId)
-  if (!entry) return
-  const [pid] = entry
-  const updated: Submission = { ...submissions[pid]!, eliminated: true }
+  const order = await getSubOrder(code)
+  const pid = await resolveSubmissionKey(code, submissionId)
+  if (!pid || !submissions[pid]) return
+  const updated: Submission = { ...submissions[pid], eliminated: true }
   await state.setSubmission(code, pid, updated)
 
   await state.publishEvent(code, { type: 'card_eliminated', submissionId, byPlayerId })
@@ -474,7 +570,7 @@ export async function eliminateSubmission(
   if (remaining.length === 1) {
     const firstRemaining = remaining[0]
     if (!firstRemaining) return
-    const [winnerKey, winnerSub] = firstRemaining
+    const [winnerKey] = firstRemaining
     const winnerPlayerId = resolvePlayerId(winnerKey)
     const winner = await state.getPlayer(code, winnerPlayerId)
     if (!winner) return
@@ -493,7 +589,7 @@ export async function eliminateSubmission(
     await state.publishEvent(code, {
       type: 'round_won',
       winnerId: winnerPlayerId,
-      submissionId: winnerSub.submissionId,
+      submissionId: publicIdForKey(order, winnerKey),
       scores,
     })
     captureServerEvent(code, 'cab_round_eliminated', {
@@ -522,15 +618,14 @@ export async function applyRanking(code: string, czarId: string, ranking: string
 
   for (let i = 0; i < ranking.length && i < 3; i++) {
     const sid = ranking[i]!
-    const entry = Object.entries(submissions).find(([, s]) => s.submissionId === sid)
-    if (!entry) continue
-    const [key] = entry
+    const key = await resolveSubmissionKey(code, sid)
+    if (!key || !submissions[key]) continue
     const pid = resolvePlayerId(key)
     const pts = points[i] ?? 1
     scoresDelta[pid] = pts
     const player = await state.getPlayer(code, pid)
     if (player) await state.updatePlayer(code, pid, { score: player.score + pts })
-    rankedSubmissions.push({ ...submissions[key]!, rank: (i + 1) as 1 | 2 | 3 })
+    rankedSubmissions.push({ ...submissions[key], submissionId: sid, rank: (i + 1) as 1 | 2 | 3 })
   }
 
   await state.publishEvent(code, { type: 'round_ranked', ranking: rankedSubmissions, scoresDelta })

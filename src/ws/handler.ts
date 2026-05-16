@@ -55,11 +55,15 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
     isRando: p.isRando,
   }))
 
+  // The public submissionId is the index into the server-persisted
+  // permuted order so a reconnecting client agrees with everyone else.
   const rawSubs = await state.getSubmissions(code)
-  const submissions: Submission[] = Object.values(rawSubs).map((s) => ({
-    submissionId: s.submissionId,
-    fills: s.fills,
-  }))
+  const subOrder: string[] = JSON.parse((await redis.get(`${KEYS.round(code)}:order`)) ?? '[]')
+  const submissions: Submission[] =
+    subOrder.length > 0
+      ? subOrder.map((k, i) => ({ submissionId: String(i), fills: rawSubs[k]?.fills ?? [] }))
+      : Object.values(rawSubs).map((s, i) => ({ submissionId: String(i), fills: s.fills }))
+  const revealIndex = Number((await redis.get(`${KEYS.round(code)}:revealed`)) ?? 0)
 
   const handIds = await state.getHand(code, playerId)
   let hand: Hand | undefined
@@ -103,7 +107,7 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
     hand,
     submissions,
     scores,
-    revealIndex: 0,
+    revealIndex,
     winnerId: null,
     ...(voteTally ? { voteTally } : {}),
   }

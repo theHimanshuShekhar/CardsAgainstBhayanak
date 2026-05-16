@@ -57,14 +57,16 @@ function SessionScreen() {
       if (event.type === 'reveal_start') {
         setPhase('reveal')
         setRevealIndex(0)
+        // Rebuild cleanly from card_revealed; the server's permuted index
+        // is the authoritative opaque submissionId used by pick/vote.
+        setSubmissions([])
       }
       if (event.type === 'card_revealed') {
         setRevealIndex(event.submissionIndex + 1)
         setSubmissions((prev) => {
           const next = [...prev]
           next[event.submissionIndex] = {
-            submissionId:
-              next[event.submissionIndex]?.submissionId ?? String(event.submissionIndex),
+            submissionId: String(event.submissionIndex),
             fills: event.fills,
           }
           return next
