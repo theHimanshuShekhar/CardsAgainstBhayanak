@@ -38,6 +38,7 @@ Severity: `S0` = ships-broken (cannot play a game), `S1` = production-blocker, `
 | S1-2 / S1-3 seed + boot guard | `5963b72` | 71 packs seeded at boot |
 | S1-1 prod server + native WS | `327d821`, `33e14e3` | healthz 200, WS upgrade + round-trip; was *prod never built* |
 | S0-1 reveal/judging loop | `ed05486` | 3-player round progresses picking→reveal→pick→round_won→round_end→round 2 |
+| S2-10 E2E harness (infra + backbone) | `4492eb6` | `playwright test full-game -g protocol` green vs Docker; UI specs skipped pending S2-5/6/8 |
 
 ### Newly discovered issues (not in original audit)
 
@@ -55,6 +56,18 @@ Severity: `S0` = ships-broken (cannot play a game), `S1` = production-blocker, `
 - **N-4 (S3, accepted):** `server.prod.ts` runs TS via `tsx` in prod
   (works, verified). A follow-up could bundle the entry to drop the `tsx`
   runtime dependency. Acceptable for MVP.
+- **N-5 (S1, regression):** removing the dev WebSocket Vite plugin (S1-1)
+  means **`pnpm dev` no longer serves WebSockets** — only the srvx prod
+  entry does. Local dev of realtime features now requires
+  `pnpm build && pnpm start`. Fix: re-add a dev-only WS attach that does
+  not import `~`-aliased app code at Vite config-eval time (the original
+  break), or run the srvx entry in a dev mode. E2E already targets the
+  prod server so the harness is unaffected.
+- **N-6 (S3):** the compose/Dockerfile healthcheck shows the app
+  container `unhealthy` even though `/api/healthz` returns 200 (busybox
+  `wget` form / `PORT` mismatch in the healthcheck command). Cosmetic but
+  breaks `depends_on: condition: service_healthy`. Fix: use a Node-based
+  healthcheck (`node -e "fetch(...)"`) bound to the configured `PORT`.
 
 ### Revised scope for remaining items
 
