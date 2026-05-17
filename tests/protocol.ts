@@ -89,6 +89,13 @@ export type CzarDropResult = {
   czarRotated: boolean
 }
 
+export type HostDropResult = {
+  hostChanged: boolean
+  newHostId: string
+  expectedHostId: string
+  oldHostId: string
+}
+
 // Resolves once the Nth event of `type` has been observed on `p`. Needed
 // for multi-round drives where `waitFor` would match a stale prior round.
 function waitForNth(p: Peer, type: string, n: number, ms = 12000): Promise<any> {
@@ -520,5 +527,84 @@ export async function playCzarDrop(base: string): Promise<CzarDropResult> {
     voidedRound: voided?.round ?? -1,
     round2Started: !!r2,
     czarRotated: !!r2 && r2.czarId !== czarId,
+  }
+}
+
+// S2-1: the host disconnects mid-game and never returns. After the grace
+// window the host role must migrate to the longest-present active player
+// (p2 — joined right after the host) via a host_changed event.
+export async function playHostDrop(base: string): Promise<HostDropResult> {
+  const packsJson = (await (await fetch(base + '/api/packs')).json()) as {
+    packs: { id: string; name: string }[]
+  }
+  const base0 = packsJson.packs.find((p) => /base/i.test(p.name)) ?? packsJson.packs[0]
+  if (!base0) throw new Error('no packs seeded')
+
+  const cfg = {
+    maxPlayers: 10,
+    roundsToWin: 20,
+    timer: 'Off' as const,
+    packs: [base0.id],
+    rules: [] as string[],
+  }
+  const c = await post(base, '/api/games', { username: 'host', anonId: 'a-host', config: cfg })
+  if (c.status !== 201 && c.status !== 200) throw new Error(`create ${c.status}`)
+  const code = c.json.roomCode as string
+  const oldHostId = c.json.playerId as string
+
+  const joins = []
+  for (let i = 2; i <= 3; i++) {
+    joins.push(
+      await post(base, `/api/games/${code}/join`, {
+        username: `p${i}`,
+        anonId: `a-p${i}`,
+        role: 'player',
+      }),
+    )
+  }
+  const expectedHostId = joins[0]!.json.playerId as string // p2, joined first after host
+
+  const peers: Record<string, Peer> = {}
+  peers.host = await connect(base, code, c.json.sessionToken, 'host')
+  for (let i = 0; i < joins.length; i++) {
+    peers[`p${i + 2}`] = await connect(base, code, joins[i]!.json.sessionToken, `p${i + 2}`)
+  }
+
+  const s = await post(base, `/api/games/${code}/start`, {}, c.json.sessionToken)
+  if (s.status !== 204) throw new Error(`start ${s.status}`)
+  await sleep(800)
+  for (const p of Object.values(peers)) send(p, { type: 'rejoin' })
+  await sleep(1200)
+
+  // Host vanishes mid-round; grace expiry migrates the host role.
+  peers.host!.ws.close()
+  const observer = peers.p2!
+  const ka = setInterval(() => {
+    try {
+      send(observer, { type: 'ping' })
+    } catch {
+      /* socket closing */
+    }
+  }, 10_000)
+
+  const changed = await waitFor(observer, 'host_changed', 40_000).then(
+    (e) => e,
+    () => null,
+  )
+  clearInterval(ka)
+
+  for (const p of Object.values(peers)) {
+    try {
+      p.ws.close()
+    } catch {
+      /* already closed */
+    }
+  }
+
+  return {
+    hostChanged: !!changed,
+    newHostId: changed?.hostId ?? '',
+    expectedHostId,
+    oldHostId,
   }
 }

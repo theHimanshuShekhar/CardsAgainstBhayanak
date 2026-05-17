@@ -177,6 +177,7 @@ export type ServerMessage =
   | { type: 'state_snapshot'; state: SessionState }
   | { type: 'player_joined'; player: GamePlayer }
   | { type: 'player_left'; playerId: string }
+  | { type: 'host_changed'; hostId: string }
   | { type: 'game_started'; firstRound: number }
   | { type: 'round_started'; round: number; prompt: BlackCard; czarId: string | null; hand?: Hand }
   | { type: 'player_played'; playerId: string }

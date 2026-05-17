@@ -587,6 +587,38 @@ export async function voidRound(code: string, reason: string): Promise<void> {
   await startRound(code, round + 1)
 }
 
+// S2-1: the host dropped. Hand the host role to the longest-present
+// active human so host-only actions (Happy Ending, etc.) keep working.
+// Returns the new host id, or null if nobody is left to take it.
+export async function migrateHost(code: string): Promise<string | null> {
+  const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
+  if (!session) return null
+
+  const players = await state.getAllPlayers(code)
+  const next = players
+    .filter((p) => p.status === 'active' && p.role === 'player' && !p.isRando)
+    .sort((a, b) => a.joinedAt.localeCompare(b.joinedAt))[0]
+  if (!next) return null
+
+  for (const p of players) {
+    if (p.isHost && p.id !== next.id) await state.updatePlayer(code, p.id, { isHost: false })
+  }
+  await state.updatePlayer(code, next.id, { isHost: true })
+  await redis.hset(KEYS.game(code), 'hostId', next.id)
+  await redis.expire(KEYS.game(code), ROOM_TTL_SECONDS)
+
+  await db
+    .update(gameSessions)
+    .set({ hostPlayerId: next.id })
+    .where(eq(gameSessions.id, session.id))
+  await db.update(gamePlayers).set({ isHost: false }).where(eq(gamePlayers.sessionId, session.id))
+  await db.update(gamePlayers).set({ isHost: true }).where(eq(gamePlayers.id, next.id))
+
+  await state.publishEvent(code, { type: 'host_changed', hostId: next.id })
+  engineLogger.info({ code, newHostId: next.id }, 'host migrated')
+  return next.id
+}
+
 // ── House rule mechanics ──────────────────────────────────────────
 
 // Gamble submissions are stored under `${playerId}:gamble` in the submissions hash.

@@ -295,11 +295,18 @@ export const wsHooks = {
           reason: 'grace',
         })
 
-        // S2-1: if the dropped player was the Czar of a live round, it
-        // can no longer be resolved — void it and rotate to the next
-        // Czar. phase null/'transition' ⇒ no round is mid-flight.
         const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
         if (session?.status === 'active') {
+          // S2-1: if the dropped player was the host, hand the host role
+          // to the longest-present active player so host-only actions
+          // (Happy Ending, etc.) keep working.
+          if (session.hostPlayerId === playerId) {
+            await engine.migrateHost(code)
+          }
+
+          // S2-1: if the dropped player was the Czar of a live round, it
+          // can no longer be resolved — void it and rotate to the next
+          // Czar. phase null/'transition' ⇒ no round is mid-flight.
           const [roundRow] = await db
             .select()
             .from(gameRounds)

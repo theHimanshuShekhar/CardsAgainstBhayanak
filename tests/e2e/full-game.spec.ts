@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test'
 import { HANDLES } from '../fixtures/handles'
 import { createGame, joinGame } from '../helpers'
-import { playRound, playGodmode, playHappyEnding, playCzarDrop } from '../protocol'
+import { playRound, playGodmode, playHappyEnding, playCzarDrop, playHostDrop } from '../protocol'
 
 const BASE = process.env['CAB_E2E_BASE'] ?? 'http://localhost:3000'
 
@@ -66,6 +66,16 @@ test('S2-1: Czar drop mid-judging voids the round and rotates Czar (protocol)', 
   expect(r.voidedRound, 'round 1 is the one voided').toBe(1)
   expect(r.round2Started, 'a fresh round starts after the void').toBe(true)
   expect(r.czarRotated, 'the dropped Czar is not the new Czar').toBe(true)
+})
+
+test('S2-1: host drop migrates the host role (protocol)', async () => {
+  test.setTimeout(70_000)
+  const r = await playHostDrop(BASE)
+  expect(r.hostChanged, 'grace expiry emits host_changed').toBe(true)
+  expect(r.newHostId, 'host migrates to the longest-present active player (p2)').toBe(
+    r.expectedHostId,
+  )
+  expect(r.newHostId, 'new host is not the dropped host').not.toBe(r.oldHostId)
 })
 
 // UI-driven coverage. Blocked until the create-screen packs/rules UI
