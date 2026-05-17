@@ -41,11 +41,12 @@ export const Route = createFileRoute('/api/games/$code/start')({
 
         await engine.startGame(params.code)
 
+        // N-1: the engine is the sole emitter of `round_started`
+        // (inside startRound). Emit `game_started` first so clients see
+        // the correct game_started → round_started ordering.
         const round = 1
-        const { prompt, czarId } = await engine.startRound(params.code, round)
-
         await state.publishEvent(params.code, { type: 'game_started', firstRound: round })
-        await state.publishEvent(params.code, { type: 'round_started', round, prompt, czarId })
+        await engine.startRound(params.code, round)
 
         const [spectators] = await db
           .select({ cnt: count() })

@@ -65,6 +65,7 @@ export type GameResult = {
   reachedRound2: boolean
   promptPick: number
   submitterHandLen: number
+  round1StartedCount: number
 }
 
 export type GodmodeResult = {
@@ -280,6 +281,11 @@ export async function playRound(
   const won = await waitFor(observer, 'round_won')
   const end = await waitFor(observer, 'round_end')
   const reachedRound2 = observer.events.some((e) => e.type === 'round_started' && e.round === 2)
+  // N-1: round 1 must emit exactly one round_started (engine is the sole
+  // emitter; start.ts no longer double-publishes).
+  const round1StartedCount = observer.events.filter(
+    (e) => e.type === 'round_started' && e.round === 1,
+  ).length
 
   for (const p of Object.values(peers)) p.ws.close()
 
@@ -292,6 +298,7 @@ export async function playRound(
     reachedRound2,
     promptPick: pick,
     submitterHandLen,
+    round1StartedCount,
   }
 }
 

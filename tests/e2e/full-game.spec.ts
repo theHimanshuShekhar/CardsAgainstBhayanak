@@ -16,6 +16,7 @@ test('normal mode: full round progresses (protocol)', async () => {
   expect(r.roundWon, 'czar pick resolves to round_won').toBe(true)
   expect(r.roundEnd, 'round_end fires').toBe(true)
   expect(r.reachedRound2, 'loop advances to round 2').toBe(true)
+  expect(r.round1StartedCount, 'N-1: round 1 round_started emitted exactly once').toBe(1)
 })
 
 test('God Is Dead: no self/double vote, round resolves (protocol)', async () => {
