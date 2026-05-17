@@ -5,7 +5,7 @@ import { randomInt, shuffle } from './rng'
 import { redis, KEYS, ROOM_TTL_SECONDS } from './redis'
 import * as state from './game-state'
 import { engineLogger } from './logger'
-import { captureServerEvent } from './posthog-server'
+import { captureServerEvent, distinctIdFor, distinctIdForHost } from './posthog-server'
 import { TIMER_MS, REVEAL_STAGGER } from './timing'
 import type { GameConfig, GameOverMode, Submission, Card, BlackCard } from './types'
 import { createId } from '@paralleldrive/cuid2'
@@ -158,7 +158,7 @@ export async function startRound(
     prompt: { id: black.id, text: black.text, pick: black.pick },
     czarId,
   })
-  captureServerEvent(code, 'cab_round_started', {
+  captureServerEvent(await distinctIdForHost(code), 'cab_round_started', {
     roomCode: code,
     round,
     czarId,
@@ -210,7 +210,7 @@ export async function expireRoundTimer(
     if (!submittedIds.has(player.id)) {
       await state.addSkippedPlayer(code, player.id)
       await state.publishEvent(code, { type: 'player_skipped', playerId: player.id, round })
-      captureServerEvent(player.id, 'cab_player_skipped', {
+      captureServerEvent(await distinctIdFor(code, player.id), 'cab_player_skipped', {
         roomCode: code,
         playerId: player.id,
         round,
@@ -360,7 +360,7 @@ export async function submitCards(
   await state.setSubmission(code, storageKey, submission)
   await state.removeFromHand(code, playerId, cardIds)
   await state.publishEvent(code, { type: 'player_played', playerId })
-  captureServerEvent(playerId, 'cab_card_played', {
+  captureServerEvent(await distinctIdFor(code, playerId), 'cab_card_played', {
     roomCode: code,
     playerId,
     pickCount: cardIds.length,
@@ -385,7 +385,10 @@ export async function autoSubmitRando(code: string, pick: number): Promise<void>
   const submission: Submission = { submissionId: createId(), fills, playerId: rando.id }
   await state.setSubmission(code, rando.id, submission)
   await state.publishEvent(code, { type: 'player_played', playerId: rando.id })
-  captureServerEvent(code, 'cab_rule_triggered', { roomCode: code, rule: 'rando' })
+  captureServerEvent(await distinctIdForHost(code), 'cab_rule_triggered', {
+    roomCode: code,
+    rule: 'rando',
+  })
 }
 
 export async function pickWinner(
@@ -419,7 +422,7 @@ export async function pickWinner(
     submissionId,
     scores,
   })
-  captureServerEvent(czarId, 'cab_winner_picked', {
+  captureServerEvent(await distinctIdFor(code, czarId), 'cab_winner_picked', {
     roomCode: code,
     winnerId: winnerPlayerId,
     isRando: winner.isRando,
@@ -542,7 +545,7 @@ export async function endGame(code: string, mode: GameOverMode, winnerId?: strin
   // game_over carries no totalRounds/durationMs; the server is the only
   // place with authoritative values, so cab_game_ended is emitted here.
   const totalRounds = await state.getCurrentRound(code)
-  captureServerEvent(code, 'cab_game_ended', {
+  captureServerEvent(await distinctIdForHost(code), 'cab_game_ended', {
     roomCode: code,
     mode,
     winnerId: winnerId ?? '',
@@ -745,7 +748,7 @@ export async function castVote(code: string, voterId: string, submissionId: stri
     submissionId: winnerSubmissionId,
     scores,
   })
-  captureServerEvent(code, 'cab_round_voted', {
+  captureServerEvent(await distinctIdForHost(code), 'cab_round_voted', {
     roomCode: code,
     winnerId: winnerPlayerId,
     voteSpread: tally,
@@ -800,7 +803,7 @@ export async function eliminateSubmission(
       submissionId: publicIdForKey(order, winnerKey),
       scores,
     })
-    captureServerEvent(code, 'cab_round_eliminated', {
+    captureServerEvent(await distinctIdForHost(code), 'cab_round_eliminated', {
       roomCode: code,
       winnerId: winnerPlayerId,
       totalEliminations: Object.keys(submissions).length - 1,
@@ -852,7 +855,7 @@ export async function applyRanking(code: string, czarId: string, ranking: string
   }
 
   await state.publishEvent(code, { type: 'round_ranked', ranking: rankedSubmissions, scoresDelta })
-  captureServerEvent(code, 'cab_round_ranked', {
+  captureServerEvent(await distinctIdForHost(code), 'cab_round_ranked', {
     roomCode: code,
     top3: rankedSubmissions.map((s) => s.playerId).filter(Boolean),
   })
@@ -884,8 +887,13 @@ export async function gamble(code: string, playerId: string): Promise<void> {
     await state.setHand(code, playerId, [...current, ...extra])
   }
   await state.publishEvent(code, { type: 'player_gambled', playerId })
-  captureServerEvent(playerId, 'cab_gambled', { roomCode: code, playerId })
-  captureServerEvent(playerId, 'cab_rule_triggered', { roomCode: code, playerId, rule: 'gambling' })
+  const gamblerDistinctId = await distinctIdFor(code, playerId)
+  captureServerEvent(gamblerDistinctId, 'cab_gambled', { roomCode: code, playerId })
+  captureServerEvent(gamblerDistinctId, 'cab_rule_triggered', {
+    roomCode: code,
+    playerId,
+    rule: 'gambling',
+  })
 }
 
 export async function redraw(code: string, playerId: string): Promise<void> {
@@ -896,7 +904,7 @@ export async function redraw(code: string, playerId: string): Promise<void> {
   await state.discardCards(code, 'white', hand)
   const newCards = await state.drawCards(code, 'white', 10)
   await state.setHand(code, playerId, newCards)
-  captureServerEvent(playerId, 'cab_rule_triggered', {
+  captureServerEvent(await distinctIdFor(code, playerId), 'cab_rule_triggered', {
     roomCode: code,
     playerId,
     rule: 'rebooting',
@@ -918,7 +926,7 @@ export async function confessDiscard(
     await state.setHand(code, playerId, [...current, ...replacement])
   }
   await state.updatePlayer(code, playerId, { discardsUsed: player.discardsUsed + 1 })
-  captureServerEvent(playerId, 'cab_rule_triggered', {
+  captureServerEvent(await distinctIdFor(code, playerId), 'cab_rule_triggered', {
     roomCode: code,
     playerId,
     rule: 'never_have_i_ever',
@@ -974,7 +982,7 @@ export async function triggerHappyEnding(code: string, playerId: string): Promis
   await redis.hset(KEYS.game(code), 'happyEndingArmed', '1')
   await redis.expire(KEYS.game(code), ROOM_TTL_SECONDS)
   engineLogger.info({ code, playerId }, 'happy ending armed')
-  captureServerEvent(playerId, 'cab_rule_triggered', {
+  captureServerEvent(await distinctIdFor(code, playerId), 'cab_rule_triggered', {
     roomCode: code,
     playerId,
     rule: 'happy_ending',

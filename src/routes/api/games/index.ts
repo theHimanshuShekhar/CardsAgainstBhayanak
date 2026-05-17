@@ -87,6 +87,7 @@ export const Route = createFileRoute('/api/games/')({
           isHost: true,
           isRando: false,
           discardsUsed: 0,
+          posthogAnonId: parsed.data.anonId,
           joinedAt: host.joinedAt.toISOString(),
         })
 

@@ -3,7 +3,7 @@ import { eq, inArray, desc } from 'drizzle-orm'
 import { db } from '~/db'
 import { blackCards, whiteCards, gameSessions, gameRounds } from '~/db/schema'
 import { wsLogger } from '~/lib/logger'
-import { captureServerEvent } from '~/lib/posthog-server'
+import { captureServerEvent, distinctIdFor } from '~/lib/posthog-server'
 import { authenticateSocket } from './auth'
 import { redis, getSubscriber, KEYS } from '~/lib/redis'
 import * as engine from '~/lib/game-engine'
@@ -318,7 +318,7 @@ export const wsHooks = {
       case 'leave':
         await state.updatePlayer(ctx.code, ctx.playerId, { status: 'dropped' })
         await state.publishEvent(ctx.code, { type: 'player_left', playerId: ctx.playerId })
-        captureServerEvent(ctx.playerId, 'cab_player_dropped', {
+        captureServerEvent(await distinctIdFor(ctx.code, ctx.playerId), 'cab_player_dropped', {
           roomCode: ctx.code,
           playerId: ctx.playerId,
           reason: 'leave',
@@ -345,7 +345,7 @@ export const wsHooks = {
       if (player?.status === 'grace') {
         await state.updatePlayer(code, playerId, { status: 'dropped' })
         await state.publishEvent(code, { type: 'player_left', playerId })
-        captureServerEvent(playerId, 'cab_player_dropped', {
+        captureServerEvent(await distinctIdFor(code, playerId), 'cab_player_dropped', {
           roomCode: code,
           playerId,
           reason: 'grace',

@@ -96,6 +96,7 @@ export const Route = createFileRoute('/api/games/$code/join')({
           isHost: false,
           isRando: false,
           discardsUsed: 0,
+          posthogAnonId: parsed.data.anonId,
           joinedAt: player.joinedAt.toISOString(),
         } as const
         await state.addPlayer(code, gamePlayer)

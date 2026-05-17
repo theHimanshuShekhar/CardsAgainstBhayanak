@@ -64,6 +64,7 @@ export const Route = createFileRoute('/api/games/$code/start')({
             roomCode: params.code,
             playerCount: Number(row?.cnt ?? 0),
             spectatorCount: Number(spectators?.cnt ?? 0),
+            durationLobbyMs: Date.now() - session.createdAt.getTime(),
           })
         }
 

@@ -188,6 +188,11 @@ export async function setPhase(code: string, phase: GamePhase): Promise<void> {
   await redis.expire(KEYS.round(code), ROOM_TTL_SECONDS)
 }
 
+export async function getHostId(code: string): Promise<string | null> {
+  const val = await redis.hget(KEYS.game(code), 'hostId')
+  return val || null
+}
+
 export async function getPhase(code: string): Promise<GamePhase | null> {
   const val = await redis.hget(KEYS.round(code), 'phase')
   return val ? (val as GamePhase) : null

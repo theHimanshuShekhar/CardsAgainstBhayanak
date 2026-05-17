@@ -385,7 +385,7 @@ winnerId` — compares an index-string submissionId to a _playerId_.
 - **Where:** `endRound` — `activeCount = players.filter(active).length`.
 - **Fix:** `const activeCount = players.filter(p => p.status === 'active' && !p.isRando).length`. Rando has no hand; Czar gets a fresh card too (they were skipped this round but still need 10 — actually Czar's hand is untouched, only submitters draw). Refine: count is fine for "active non-rando" since reshuffle is based on _expected next-round demand_.
 
-### S2-12. PostHog distinct IDs are inconsistent
+### S2-12. PostHog distinct IDs are inconsistent (— fixed)
 
 - **Where:** Throughout `game-engine.ts`, various call sites.
 - **Fix:**
@@ -393,7 +393,7 @@ winnerId` — compares an index-string submissionId to a _playerId_.
   2. Replace every `captureServerEvent(code, ...)` with `captureServerEvent(await distinctIdFor(code, primaryActorPlayerId), ...)`.
   3. For game-level events (`cab_round_started`) with no clear actor, use the host's distinctId.
 
-### S2-13. `cab_game_started` missing `durationLobbyMs`
+### S2-13. `cab_game_started` missing `durationLobbyMs` (— fixed)
 
 - **Where:** `src/routes/api/games/$code/start.ts`.
 - **Fix:** Add `durationLobbyMs: Date.now() - session.createdAt.getTime()` to the `captureServerEvent` properties.

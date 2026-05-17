@@ -14,6 +14,7 @@ export type GamePlayer = {
   isRando: boolean
   discardsUsed: number
   hasGambled?: boolean
+  posthogAnonId?: string
   joinedAt: string
 }
 
