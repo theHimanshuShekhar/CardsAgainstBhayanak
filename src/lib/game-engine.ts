@@ -531,12 +531,25 @@ export async function endGame(code: string, mode: GameOverMode, winnerId?: strin
     isRando: p.isRando,
   }))
 
-  await db
+  const [updated] = await db
     .update(gameSessions)
     .set({ status: 'ended', endedAt: new Date(), endMode: mode, winnerPlayerId: winnerId ?? null })
     .where(eq(gameSessions.code, code))
+    .returning({ createdAt: gameSessions.createdAt })
 
   await state.publishEvent(code, { type: 'game_over', finalScores, winnerId: winnerId ?? '', mode })
+
+  // game_over carries no totalRounds/durationMs; the server is the only
+  // place with authoritative values, so cab_game_ended is emitted here.
+  const totalRounds = await state.getCurrentRound(code)
+  captureServerEvent(code, 'cab_game_ended', {
+    roomCode: code,
+    mode,
+    winnerId: winnerId ?? '',
+    totalRounds,
+    durationMs: updated ? Date.now() - updated.createdAt.getTime() : 0,
+    finalScores,
+  })
   engineLogger.info({ code, mode, winnerId }, 'game over')
 }
 

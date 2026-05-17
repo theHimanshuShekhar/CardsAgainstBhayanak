@@ -349,7 +349,7 @@ winnerId` — compares an index-string submissionId to a _playerId_.
   2. On submit, if response is `423 room_full`, show a banner "Room full — join as spectator?" and auto-flip the role picker to Spectator.
   3. If `localStorage.cab_session.roomCode` already set and differs from the input, render a modal: "You're already in game XXX-XXX. Leave it first?" with Leave / Cancel buttons. Leave sends `{type:'leave'}` over the existing WS, clears `cab_session`, proceeds.
 
-### S2-8. End screen shows no winner / scores / Rando shame variant
+### S2-8. End screen shows no winner / scores / Rando shame variant (— fixed)
 
 - **Where:** `src/routes/games/$code/end.tsx`.
 - **Fix:**

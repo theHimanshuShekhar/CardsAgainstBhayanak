@@ -85,6 +85,15 @@ function SessionScreen() {
         if (myHand) setHand(myHand)
       }
       if (event.type === 'game_over') {
+        sessionStorage.setItem(
+          'cab_last_game_over',
+          JSON.stringify({
+            finalScores: event.finalScores,
+            winnerId: event.winnerId,
+            mode: event.mode,
+            totalRounds: round,
+          }),
+        )
         void navigate({ to: '/games/$code/end', params: { code } })
       }
       if (event.type === 'auth_error') {
@@ -92,7 +101,7 @@ function SessionScreen() {
         void navigate({ to: '/' })
       }
     })
-  }, [on, code, navigate, setSession, myId])
+  }, [on, code, navigate, setSession, myId, round])
 
   const handleToggle = useCallback(
     (cardId: string) => {
