@@ -33,7 +33,10 @@ export function useGameSocket(code: string | null, sessionToken: string | null, 
             anonId,
           } satisfies ClientToServerEvent),
         )
-        ws.send(JSON.stringify({ type: 'rejoin' } satisfies ClientToServerEvent))
+        // rejoin must follow auth_ok, not be pipelined with auth: the
+        // server's auth handler is async, so a same-tick rejoin races
+        // ahead of it and is rejected as "auth first" (sent below, on
+        // the auth_ok message).
         backoffMs = 1000
         pingTimer = setInterval(
           () => ws.readyState === ws.OPEN && ws.send(JSON.stringify({ type: 'ping' })),
@@ -47,7 +50,10 @@ export function useGameSocket(code: string | null, sessionToken: string | null, 
         } catch {
           return
         }
-        if (event.type === 'auth_ok') setAuthed(true)
+        if (event.type === 'auth_ok') {
+          setAuthed(true)
+          ws.send(JSON.stringify({ type: 'rejoin' } satisfies ClientToServerEvent))
+        }
         for (const h of handlersRef.current) h(event)
       }
       ws.onclose = () => {

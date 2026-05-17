@@ -76,6 +76,14 @@ winnerId` — compares an index-string submissionId to a _playerId_.
   grid blocking S2-6). Fix: serve `/assets/*` from `dist/client/assets`
   in the prod entry (correct content-type + immutable cache, path-
   traversal guarded), delegate everything else to SSR.
+- **N-8 (S2, blocker — fixed):** `useGameSocket` pipelined `auth` and
+  `rejoin` in the same `onopen` tick. The server's auth handler is async,
+  so the `rejoin` raced ahead of it and was rejected `not_authorized`
+  ("auth first"); the client never retried, so the rejoin snapshot
+  (`state_snapshot` in-game, `lobby_snapshot` pre-game) never arrived.
+  Surfaced via S2-5 (lobby roster/config empty). Fix: send `rejoin`
+  only after the `auth_ok` message — matches the spec's "auth then
+  rejoin" and the protocol harness ordering.
 
 ### Revised scope for remaining items
 
