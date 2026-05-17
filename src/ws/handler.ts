@@ -13,7 +13,9 @@ import type {
   ClientToServerEvent,
   ServerToClientEvent,
   SessionState,
+  SessionStatus,
   GamePhase,
+  GamePlayer,
   Hand,
   Submission,
   PlayerScore,
@@ -132,6 +134,25 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
     ...(voteTally ? { voteTally } : {}),
   }
 }
+
+// S2-5: buildSnapshot only covers in-progress games (it needs a round
+// row). The lobby is pre-game, so a reconnecting/refreshing client needs
+// the roster + config + session status to render and to know whether the
+// game has since started or ended.
+async function buildLobbySnapshot(code: string): Promise<{
+  players: GamePlayer[]
+  config: GameConfig
+  gameStatus: SessionStatus
+} | null> {
+  const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
+  if (!session) return null
+  return {
+    players: await state.getAllPlayers(code),
+    config: session.config as GameConfig,
+    gameStatus: session.status as SessionStatus,
+  }
+}
+
 const peerContext = new WeakMap<Peer, PeerCtx>()
 const roomPeers = new Map<string, Set<Peer>>()
 
@@ -259,7 +280,12 @@ export const wsHooks = {
         return send(peer, { type: 'pong' })
       case 'rejoin': {
         const snapshot = await buildSnapshot(ctx.code, ctx.playerId)
-        if (snapshot) send(peer, { type: 'state_snapshot', state: snapshot })
+        if (snapshot) {
+          send(peer, { type: 'state_snapshot', state: snapshot })
+          return
+        }
+        const lobby = await buildLobbySnapshot(ctx.code)
+        if (lobby) send(peer, { type: 'lobby_snapshot', ...lobby })
         return
       }
       case 'play':

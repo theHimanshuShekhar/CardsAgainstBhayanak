@@ -111,6 +111,16 @@ export type DroppedAuthResult = {
   gotAuthOk: boolean
 }
 
+export type LobbySnapshotResult = {
+  gotLobbySnapshot: boolean
+  gameStatus: string
+  rosterSize: number
+  configRoundsToWin: number
+  configMaxPlayers: number
+  configTimer: string
+  postStartIsStateSnapshot: boolean
+}
+
 // Resolves once the Nth event of `type` has been observed on `p`. Needed
 // for multi-round drives where `waitFor` would match a stale prior round.
 function waitForNth(p: Peer, type: string, n: number, ms = 12000): Promise<any> {
@@ -802,5 +812,79 @@ export async function playDroppedAuth(base: string): Promise<DroppedAuthResult> 
   return {
     authErrorCode: result.type === 'auth_error' ? (result.code ?? '') : '',
     gotAuthOk: result.type === 'auth_ok',
+  }
+}
+
+// S2-5: a pre-game client gets the roster + config + status via
+// lobby_snapshot on rejoin, and once the game has started the same
+// rejoin yields a state_snapshot instead (the lobby's reconnect-hub
+// redirect contract).
+export async function playLobbySnapshot(base: string): Promise<LobbySnapshotResult> {
+  const packsJson = (await (await fetch(base + '/api/packs')).json()) as {
+    packs: { id: string; name: string }[]
+  }
+  const base0 = packsJson.packs.find((p) => /base/i.test(p.name)) ?? packsJson.packs[0]
+  if (!base0) throw new Error('no packs seeded')
+
+  const cfg = {
+    maxPlayers: 8,
+    roundsToWin: 5,
+    timer: '90s' as const,
+    packs: [base0.id],
+    rules: [] as string[],
+  }
+  const c = await post(base, '/api/games', { username: 'host', anonId: 'a-host', config: cfg })
+  if (c.status !== 201 && c.status !== 200) throw new Error(`create ${c.status}`)
+  const code = c.json.roomCode as string
+
+  const joins: any[] = []
+  for (let i = 2; i <= 3; i++) {
+    joins.push(
+      await post(base, `/api/games/${code}/join`, {
+        username: `p${i}`,
+        anonId: `a-p${i}`,
+        role: 'player',
+      }),
+    )
+  }
+
+  // connect() resolves on auth_ok but does not auto-rejoin (unlike the
+  // real client hook), so drive rejoin explicitly.
+  const host = await connect(base, code, c.json.sessionToken, 'host')
+  send(host, { type: 'rejoin' })
+  const lobby = await waitFor(host, 'lobby_snapshot', 8_000).then(
+    (e) => e,
+    () => null,
+  )
+
+  // Start the game, then a fresh socket's rejoin must answer with a
+  // state_snapshot — never another lobby_snapshot.
+  const s = await post(base, `/api/games/${code}/start`, {}, c.json.sessionToken)
+  if (s.status !== 204) throw new Error(`start ${s.status}`)
+  await sleep(800)
+
+  const rejoiner = await connect(base, code, joins[0].json.sessionToken as string, 'p2')
+  send(rejoiner, { type: 'rejoin' })
+  const postStart = await Promise.race([
+    waitFor(rejoiner, 'state_snapshot', 8_000).then(() => 'state_snapshot'),
+    waitFor(rejoiner, 'lobby_snapshot', 8_000).then(() => 'lobby_snapshot'),
+  ]).catch(() => 'none')
+
+  for (const p of [host, rejoiner]) {
+    try {
+      p.ws.close()
+    } catch {
+      /* already closing */
+    }
+  }
+
+  return {
+    gotLobbySnapshot: !!lobby,
+    gameStatus: lobby?.gameStatus ?? '',
+    rosterSize: lobby?.players?.length ?? 0,
+    configRoundsToWin: lobby?.config?.roundsToWin ?? 0,
+    configMaxPlayers: lobby?.config?.maxPlayers ?? 0,
+    configTimer: lobby?.config?.timer ?? '',
+    postStartIsStateSnapshot: postStart === 'state_snapshot',
   }
 }

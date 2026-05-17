@@ -10,6 +10,7 @@ import {
   playAllDrop,
   playSpectatorReject,
   playDroppedAuth,
+  playLobbySnapshot,
 } from '../protocol'
 
 const BASE = process.env['CAB_E2E_BASE'] ?? 'http://localhost:3000'
@@ -105,6 +106,21 @@ test('S2-4: re-auth as a dropped player yields player_dropped (protocol)', async
   const r = await playDroppedAuth(BASE)
   expect(r.gotAuthOk, 'a dropped player must not re-authenticate').toBe(false)
   expect(r.authErrorCode, 'auth_error carries player_dropped').toBe('player_dropped')
+})
+
+test('S2-5: lobby gets roster + config, then state_snapshot post-start (protocol)', async () => {
+  test.setTimeout(40_000)
+  const r = await playLobbySnapshot(BASE)
+  expect(r.gotLobbySnapshot, 'rejoin in lobby yields lobby_snapshot').toBe(true)
+  expect(r.gameStatus, 'pre-game status is lobby').toBe('lobby')
+  expect(r.rosterSize, 'snapshot carries the full roster (host + p2 + p3)').toBe(3)
+  expect(r.configRoundsToWin, 'config.roundsToWin round-trips').toBe(5)
+  expect(r.configMaxPlayers, 'config.maxPlayers round-trips').toBe(8)
+  expect(r.configTimer, 'config.timer round-trips').toBe('90s')
+  expect(
+    r.postStartIsStateSnapshot,
+    'after start, rejoin yields state_snapshot not lobby_snapshot',
+  ).toBe(true)
 })
 
 // UI-driven coverage. Blocked until the create-screen packs/rules UI

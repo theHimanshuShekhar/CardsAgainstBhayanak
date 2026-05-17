@@ -175,6 +175,7 @@ export type ServerMessage =
   | { type: 'auth_ok' }
   | { type: 'auth_error'; code: ErrorCode; message: string }
   | { type: 'state_snapshot'; state: SessionState }
+  | { type: 'lobby_snapshot'; players: GamePlayer[]; config: GameConfig; gameStatus: SessionStatus }
   | { type: 'player_joined'; player: GamePlayer }
   | { type: 'player_left'; playerId: string }
   | { type: 'host_changed'; hostId: string }

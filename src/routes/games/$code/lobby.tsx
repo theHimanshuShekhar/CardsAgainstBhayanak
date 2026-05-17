@@ -6,7 +6,7 @@ import { formatRoomCode } from '~/lib/code-gen'
 import { useSession } from '~/hooks/useSession'
 import { useGameSocket } from '~/hooks/useGameSocket'
 import { captureEvent } from '~/lib/posthog-client'
-import type { GamePlayer } from '~/lib/types'
+import type { GameConfig, GamePlayer } from '~/lib/types'
 
 export const Route = createFileRoute('/games/$code/lobby')({
   component: LobbyScreen,
@@ -19,6 +19,7 @@ function LobbyScreen() {
   const formatted = formatRoomCode(code)
 
   const [players, setPlayers] = useState<GamePlayer[]>([])
+  const [config, setConfig] = useState<GameConfig | null>(null)
   const [starting, setStarting] = useState(false)
   const [startError, setStartError] = useState<string | null>(null)
 
@@ -26,6 +27,29 @@ function LobbyScreen() {
 
   useEffect(() => {
     return on((event) => {
+      // S2-5: pre-game roster + config, and the reconnect-hub redirect.
+      if (event.type === 'lobby_snapshot') {
+        if (event.gameStatus === 'active' || event.gameStatus === 'paused') {
+          void navigate({ to: '/games/$code/session', params: { code } })
+          return
+        }
+        if (event.gameStatus === 'ended') {
+          void navigate({ to: '/games/$code/end', params: { code } })
+          return
+        }
+        if (event.gameStatus === 'abandoned') {
+          setSession(null)
+          void navigate({ to: '/' })
+          return
+        }
+        setPlayers(event.players)
+        setConfig(event.config)
+      }
+      // A live game answers rejoin with a full state_snapshot, never
+      // lobby_snapshot — the lobby is just the reconnect entry point.
+      if (event.type === 'state_snapshot') {
+        void navigate({ to: '/games/$code/session', params: { code } })
+      }
       if (event.type === 'player_joined') {
         setPlayers((prev) => {
           if (prev.some((p) => p.id === event.player.id)) return prev
@@ -158,15 +182,15 @@ function LobbyScreen() {
               </div>
               <div className="summary-row">
                 <span>Score to win</span>
-                <b>—</b>
+                <b>{config ? config.roundsToWin : '—'}</b>
               </div>
               <div className="summary-row">
                 <span>Max players</span>
-                <b>—</b>
+                <b>{config ? config.maxPlayers : '—'}</b>
               </div>
               <div className="summary-row">
                 <span>Timer</span>
-                <b>—</b>
+                <b>{config ? config.timer : '—'}</b>
               </div>
             </div>
             {startError && (
