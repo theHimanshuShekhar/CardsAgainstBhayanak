@@ -13,8 +13,12 @@ export function useGameSocket(code: string | null, sessionToken: string | null, 
     if (!code || !sessionToken) return
     let backoffMs = 1000
     let pingTimer: ReturnType<typeof setInterval> | null = null
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
     let connectTime = 0
     let attempt = 0
+    // S2-18: an intentional close (unmount / deps change) must stop the
+    // reconnect loop — otherwise a navigated-away socket reconnects forever.
+    let cancelled = false
     const isReconnect = () => attempt > 1
 
     function connect() {
@@ -54,6 +58,7 @@ export function useGameSocket(code: string | null, sessionToken: string | null, 
           setAuthed(true)
           ws.send(JSON.stringify({ type: 'rejoin' } satisfies ClientToServerEvent))
         }
+        if (event.type === 'auth_error') setAuthed(false)
         for (const h of handlersRef.current) h(event)
       }
       ws.onclose = () => {
@@ -64,20 +69,28 @@ export function useGameSocket(code: string | null, sessionToken: string | null, 
           roomCode: code,
           durationConnectedMs: connectTime ? Date.now() - connectTime : 0,
         })
-        captureEvent('cab_reconnect_attempt', { roomCode: code, attempt, backoffMs })
-        setTimeout(connect, backoffMs)
+        if (cancelled) return
+        // S2-19: the first close is the initial disconnect, not a retry.
+        if (attempt > 1)
+          captureEvent('cab_reconnect_attempt', { roomCode: code, attempt, backoffMs })
+        reconnectTimer = setTimeout(connect, backoffMs)
         backoffMs = Math.min(30_000, backoffMs * 2)
       }
       ws.onerror = () => ws.close()
     }
     connect()
     return () => {
+      cancelled = true
       wsRef.current?.close()
       if (pingTimer) clearInterval(pingTimer)
+      if (reconnectTimer) clearTimeout(reconnectTimer)
     }
   }, [code, sessionToken, anonId])
 
-  const send = (event: ClientToServerEvent) => wsRef.current?.send(JSON.stringify(event))
+  const send = (event: ClientToServerEvent) => {
+    if (!authed) return
+    wsRef.current?.send(JSON.stringify(event))
+  }
   const on = (handler: (e: ServerToClientEvent) => void) => {
     handlersRef.current.push(handler)
     return () => {
