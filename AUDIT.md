@@ -357,7 +357,7 @@ winnerId` — compares an index-string submissionId to a _playerId_.
   2. On end-screen mount, hydrate from that storage. Render: winner avatar + name, final scoreboard (reuse `<Scoreboard>` component), Rando shame variant if `mode === 'rando_won'`, haiku flourish if `mode === 'happy_ending'`.
   3. Fix `cab_game_ended` to include `mode, winnerId, totalRounds, durationMs, finalScores` per spec.
 
-### S2-9. Stats endpoint missing most aggregations
+### S2-9. Stats endpoint missing most aggregations (— fixed)
 
 - **Where:** `src/routes/api/stats.ts`.
 - **Fix:**
