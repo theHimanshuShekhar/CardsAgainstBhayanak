@@ -79,6 +79,7 @@ function JoinScreen() {
             <label className="field-label">Room code</label>
             <input
               className="input"
+              aria-label="Room code"
               placeholder="e.g. B7K-9MV"
               value={code}
               maxLength={7}
@@ -93,6 +94,7 @@ function JoinScreen() {
               <Avatar name={username || '?'} size="lg" you />
               <input
                 className="input grow"
+                aria-label="Your handle"
                 placeholder="e.g. priya_was_here"
                 value={username}
                 maxLength={20}

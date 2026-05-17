@@ -84,15 +84,40 @@ winnerId` — compares an index-string submissionId to a _playerId_.
   Surfaced via S2-5 (lobby roster/config empty). Fix: send `rejoin`
   only after the `auth_ok` message — matches the spec's "auth then
   rejoin" and the protocol harness ordering.
-- **N-9 (S2, test-infra):** `tests/helpers.ts` `createGame`/`joinGame`
+- **N-9 (S2, test-infra — fixed):** `tests/helpers.ts` `createGame`/`joinGame`
   fill `input[placeholder*="handle"]`, but the S2-6 create/join rebuild
   (`1ac4577`) changed the placeholders to `e.g. priya_was_here` /
   `e.g. B7K-9MV` — the selector now matches nothing. This breaks the five
   UI-driving specs that use the helpers (`reconnect`, `full-game`,
   `mid-game-join`, `multi-blank`, `house-rules`). Pre-existing drift, not
-  a regression from the S2-18/S3 work. Fix: target the handle input by a
-  stable selector (label/`name`/`data-testid`), not its placeholder copy
-  — belongs to the S2-10 test-infra track, not this polish pass.
+  a regression from the S2-18/S3 work. Fixed: added `aria-label` to the
+  handle/room-code inputs in `create.tsx`/`join.tsx` (and `role=radiogroup`
+  /`radio`+`aria-checked` to the Round-timer seg — real a11y win, not just
+  a test hook) and migrated the helpers + `house-rules`/`mobile` specs from
+  placeholder selectors to `getByLabel`.
+
+- **N-10 (S2, product bug — fixed):** `session.tsx`'s `round_won` handler
+  scheduled `setTimeout(() => setPhase('transition'), WINNER_PAUSE)` (2.6s)
+  but never cleared it. When the server advanced `round_end → round_started`
+  for the next round in under 2.6s (fast czar pick), the stale timer fired
+  mid-next-round and forced `phase='transition'`, hiding the hand dock /
+  subs-grid permanently — the game wedged on the next round. Protocol tests
+  never hit it (no UI/timer). Fixed: track the timeout in a `winnerTimer`
+  ref and `clearTimeout` it on `round_started` and on effect unmount.
+
+- **N-11 (S2, test-infra — fixed):** the hand dock fans cards with stacked
+  z-index; a selected card lifts (`translateY(-22px)`, `zIndex:99`) so its
+  box overlaps both neighbours and the Submit button. Playwright pointer
+  actionability never resolves, and `force:true` doesn't help (the browser
+  routes synthetic pointer events to the topmost element — the raised card —
+  re-toggling it instead of selecting the next card / clicking Submit).
+  Fixed: `submitCards`/`multi-blank` now `dispatchEvent('click')` on the
+  exact node (React's delegated onClick still fires, bypassing hit-testing).
+  Separately, `rate-limit.ts` gained `enforceRateLimit` (enforces only when
+  `NODE_ENV==='production'`; dev/test pass through) so the serially-run
+  suite from one shared IP doesn't trip production create/join budgets, and
+  `reconnect.spec.ts`'s grace-window test got an explicit 75s `setTimeout`
+  (the 30s default cap can't contain a 30s grace wait).
 
 ### Revised scope for remaining items
 

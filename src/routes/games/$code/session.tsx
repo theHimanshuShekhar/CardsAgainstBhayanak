@@ -1,5 +1,5 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useRef, useState, useCallback } from 'react'
 import { Topbar } from '~/components/ui/Topbar'
 import { Scoreboard } from '~/components/game/Scoreboard'
 import { HandDock } from '~/components/game/HandDock'
@@ -29,6 +29,10 @@ function SessionScreen() {
   const [submissions, setSubmissions] = useState<Submission[]>([])
   const [revealIndex, setRevealIndex] = useState(-1)
   const [winnerId, setWinnerId] = useState<string | null>(null)
+  // round_won schedules a delayed phase→transition. If the next round starts
+  // before WINNER_PAUSE elapses, that stale timer would clobber the new
+  // round's phase — hold it so round_started / unmount can cancel it.
+  const winnerTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const myId = session?.playerId ?? ''
   const isCzar = czarId === myId
@@ -38,8 +42,27 @@ function SessionScreen() {
   const { on, send } = useGameSocket(code, session?.sessionToken ?? null, session?.anonId ?? '')
 
   useEffect(() => {
-    return on((event) => {
+    const off = on((event) => {
+      if (event.type === 'state_snapshot') {
+        // Hydration path: the session WS connects after navigation, so the
+        // live game_started/round_started already fired on the lobby socket.
+        // The rejoin reply carries the authoritative round state.
+        const s = event.state
+        setRound(s.round)
+        setPrompt(s.prompt)
+        setCzarId(s.czarId)
+        setScores(s.scores)
+        setSubmissions(s.submissions)
+        setRevealIndex(s.revealIndex)
+        setWinnerId(s.winnerId)
+        if (s.hand) setHand(s.hand)
+        setPhase(s.phase === 'picking' && s.czarId === myId ? 'waiting' : s.phase)
+      }
       if (event.type === 'round_started') {
+        if (winnerTimer.current) {
+          clearTimeout(winnerTimer.current)
+          winnerTimer.current = null
+        }
         setRound(event.round)
         setPrompt(event.prompt)
         setCzarId(event.czarId)
@@ -80,7 +103,8 @@ function SessionScreen() {
         // winning submission — not event.winnerId, which is a playerId.
         setWinnerId(event.submissionId)
         setScores(event.scores)
-        setTimeout(() => setPhase('transition'), WINNER_PAUSE)
+        if (winnerTimer.current) clearTimeout(winnerTimer.current)
+        winnerTimer.current = setTimeout(() => setPhase('transition'), WINNER_PAUSE)
       }
       if (event.type === 'round_end') {
         const myHand = event.handsRefilled[myId]
@@ -103,6 +127,10 @@ function SessionScreen() {
         void navigate({ to: '/' })
       }
     })
+    return () => {
+      off()
+      if (winnerTimer.current) clearTimeout(winnerTimer.current)
+    }
   }, [on, code, navigate, setSession, myId, round])
 
   const handleToggle = useCallback(

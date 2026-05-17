@@ -181,6 +181,7 @@ function CreateScreen() {
                 <Avatar name={draft.username || '?'} size="lg" you />
                 <input
                   className="input grow"
+                  aria-label="Your handle"
                   placeholder="e.g. priya_was_here"
                   value={draft.username}
                   maxLength={20}
@@ -250,10 +251,12 @@ function CreateScreen() {
                     <div className="opt-name">Round timer</div>
                     <div className="opt-desc">How long players have to play their card.</div>
                   </div>
-                  <div className="seg">
+                  <div className="seg" role="radiogroup" aria-label="Round timer">
                     {TIMERS.map((t) => (
                       <button
                         key={t}
+                        role="radio"
+                        aria-checked={draft.timer === t}
                         className={`seg-btn ${draft.timer === t ? 'active' : ''}`}
                         onClick={() => setDraft((d) => ({ ...d, timer: t }))}
                       >

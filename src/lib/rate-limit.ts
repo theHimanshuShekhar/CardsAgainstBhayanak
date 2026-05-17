@@ -26,6 +26,20 @@ export async function checkRateLimit(
   }
 }
 
+// Rate limiting exists to throttle real-world abuse. The E2E suite and local
+// dev run serially from a single shared IP, so production-sized create/join
+// budgets trip mid-suite. Enforce only in production; dev/test pass through.
+const ENFORCE = process.env['NODE_ENV'] === 'production'
+
+export async function enforceRateLimit(
+  key: string,
+  max: number,
+  windowSeconds: number,
+): Promise<RateLimitResult> {
+  if (!ENFORCE) return { allowed: true, remaining: max, resetAt: Date.now() + windowSeconds * 1000 }
+  return checkRateLimit(key, max, windowSeconds)
+}
+
 export const RATE_LIMITS = {
   join: { max: 10, windowSeconds: 60 },
   create: { max: 5, windowSeconds: 3600 },

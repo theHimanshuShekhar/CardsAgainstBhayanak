@@ -23,7 +23,7 @@ for (const vp of MOBILE_VIEWPORTS) {
     const page = await context.newPage()
 
     await page.goto('/games/create')
-    const handle = page.locator('input[placeholder*="handle"]')
+    const handle = page.getByLabel('Your handle')
     await expect(handle).toBeVisible()
     await handle.fill('MobileUser')
 
@@ -42,8 +42,8 @@ for (const vp of MOBILE_VIEWPORTS) {
     const page = await context.newPage()
 
     await page.goto('/games/join')
-    await expect(page.locator('input[placeholder*="code"]')).toBeVisible()
-    await expect(page.locator('input[placeholder*="handle"]')).toBeVisible()
+    await expect(page.getByLabel('Room code')).toBeVisible()
+    await expect(page.getByLabel('Your handle')).toBeVisible()
 
     await context.close()
   })

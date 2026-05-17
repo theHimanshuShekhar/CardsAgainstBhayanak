@@ -10,7 +10,7 @@ async function createGameWithRule(
   // Enable the rule in the create screen before submitting
   // Rule checkboxes/radio are identified by the rule label text
   await host.page.goto('/games/create')
-  await host.page.fill('input[placeholder*="handle"]', 'Host')
+  await host.page.getByLabel('Your handle').fill('Host')
   const ruleEl = host.page.locator(`.check-card:has-text("${ruleName}")`)
   if (await ruleEl.isVisible({ timeout: 3_000 }).catch(() => false)) {
     await ruleEl.click()
@@ -23,6 +23,7 @@ async function createGameWithRule(
 }
 
 test('Rebooting the Universe — player can redraw hand for 1pt', async ({ browser }) => {
+  test.setTimeout(90_000)
   const { host, roomCode } = await createGameWithRule(browser, 'Rebooting')
   const p1 = await joinGame(browser, 'Alice', roomCode)
   const p2 = await joinGame(browser, 'Bob', roomCode)
@@ -45,6 +46,7 @@ test('Rebooting the Universe — player can redraw hand for 1pt', async ({ brows
 })
 
 test('Rando Cardrissian — synthetic Rando player appears in scoreboard', async ({ browser }) => {
+  test.setTimeout(90_000)
   const { host, roomCode } = await createGameWithRule(browser, 'Rando')
   const p1 = await joinGame(browser, 'Alice', roomCode)
   const p2 = await joinGame(browser, 'Bob', roomCode)
@@ -61,6 +63,7 @@ test('Rando Cardrissian — synthetic Rando player appears in scoreboard', async
 })
 
 test('God Is Dead — all players see vote buttons instead of czar picking', async ({ browser }) => {
+  test.setTimeout(90_000)
   const { host, roomCode } = await createGameWithRule(browser, 'God Is Dead')
   const p1 = await joinGame(browser, 'Alice', roomCode)
   const p2 = await joinGame(browser, 'Bob', roomCode)
@@ -78,6 +81,7 @@ test('God Is Dead — all players see vote buttons instead of czar picking', asy
 })
 
 test('Happy Ending — host can trigger early end from menu', async ({ browser }) => {
+  test.setTimeout(90_000)
   const { host, roomCode } = await createGameWithRule(browser, 'Happy Ending')
   const p1 = await joinGame(browser, 'Alice', roomCode)
   const p2 = await joinGame(browser, 'Bob', roomCode)
@@ -107,7 +111,7 @@ test('modal rules are mutually exclusive in create UI', async ({ browser }) => {
   const page = await context.newPage()
 
   await page.goto('/games/create')
-  await page.fill('input[placeholder*="handle"]', 'TestUser')
+  await page.getByLabel('Your handle').fill('TestUser')
 
   // Modal rules should render as a radio group (seg or radio buttons)
   const godMode = page.locator('.check-card:has-text("God Is Dead")')

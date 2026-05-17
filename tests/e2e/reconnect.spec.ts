@@ -23,6 +23,9 @@ test('player refresh mid-picking reconnects with hand', async ({ browser }) => {
 })
 
 test('player drop > grace window → removed from game', async ({ browser }) => {
+  // Explicitly waits GRACE_WINDOW_MS (30s) + 5s; the 30s default test cap
+  // cannot contain it. Matches full-game.spec's per-test timeout convention.
+  test.setTimeout(75_000)
   const { handle: host, roomCode } = await createGame(browser, 'Host2', { roundsToWin: 3 })
   const p1 = await joinGame(browser, 'Dropper', roomCode)
   const p2 = await joinGame(browser, 'Stable2', roomCode)

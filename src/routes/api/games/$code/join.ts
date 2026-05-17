@@ -4,7 +4,7 @@ import { gameSessions, gamePlayers } from '~/db/schema'
 import { redis, KEYS } from '~/lib/redis'
 import * as state from '~/lib/game-state'
 import { signSessionToken } from '~/lib/session-token'
-import { checkRateLimit } from '~/lib/rate-limit'
+import { enforceRateLimit } from '~/lib/rate-limit'
 import { JoinGameSchema, errorResponse, getClientIp } from '~/lib/api-helpers'
 import { captureServerEvent } from '~/lib/posthog-server'
 import { apiLogger } from '~/lib/logger'
@@ -16,7 +16,7 @@ export const Route = createFileRoute('/api/games/$code/join')({
     handlers: {
       POST: async ({ request, params }) => {
         const ip = getClientIp(request)
-        const rl = await checkRateLimit(`ip:${ip}:join`, 10, 60)
+        const rl = await enforceRateLimit(`ip:${ip}:join`, 10, 60)
         if (!rl.allowed) return errorResponse(429, 'rate_limited', 'Too many join attempts')
 
         const code = params.code.toUpperCase()

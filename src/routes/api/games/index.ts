@@ -5,7 +5,7 @@ import { redis, KEYS, ROOM_TTL_SECONDS } from '~/lib/redis'
 import * as state from '~/lib/game-state'
 import { generateRoomCode } from '~/lib/code-gen.server'
 import { signSessionToken } from '~/lib/session-token'
-import { checkRateLimit } from '~/lib/rate-limit'
+import { enforceRateLimit } from '~/lib/rate-limit'
 import { CreateGameSchema, errorResponse, getClientIp } from '~/lib/api-helpers'
 import { captureServerEvent } from '~/lib/posthog-server'
 import { apiLogger } from '~/lib/logger'
@@ -30,7 +30,7 @@ export const Route = createFileRoute('/api/games/')({
     handlers: {
       POST: async ({ request }) => {
         const ip = getClientIp(request)
-        const rl = await checkRateLimit(`ip:${ip}:create`, 5, 3600)
+        const rl = await enforceRateLimit(`ip:${ip}:create`, 5, 3600)
         if (!rl.allowed)
           return errorResponse(429, 'rate_limited', 'Too many game creations; try again later')
 

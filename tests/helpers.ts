@@ -22,17 +22,23 @@ export async function createGame(
   }, username)
 
   await page.goto('/games/create')
-  await page.fill('input[placeholder*="handle"]', username)
+  await page.getByLabel('Your handle').fill(username)
 
   if (opts.roundsToWin !== undefined) {
-    // Adjust via stepper buttons — default is 8, click − to reduce
-    const current = 8
-    const diff = opts.roundsToWin - current
-    const btn =
-      diff > 0
-        ? page.locator('.stepper-btn:last-child').nth(1)
-        : page.locator('.stepper-btn:first-child').nth(1)
-    for (let i = 0; i < Math.abs(diff); i++) await btn.click()
+    // Read the live value and converge — the create UI's default has drifted
+    // before (S2 rebuild changed it 8→7); a hardcoded delta over-clicks into
+    // the disabled stepper bound and hangs.
+    const stepper = page.locator('.opt-row', { hasText: 'Rounds to win' }).locator('.stepper')
+    const valEl = stepper.locator('.stepper-val')
+    for (let guard = 0; guard < 25; guard++) {
+      const cur = parseInt((await valEl.textContent())?.trim() ?? '', 10)
+      if (cur === opts.roundsToWin) break
+      const btn =
+        cur > opts.roundsToWin
+          ? stepper.locator('.stepper-btn').first()
+          : stepper.locator('.stepper-btn').last()
+      await btn.click()
+    }
   }
 
   await page.click('button:has-text("Create lobby")')
@@ -59,8 +65,8 @@ export async function joinGame(
   }, username)
 
   await page.goto('/games/join')
-  await page.fill('input[placeholder*="code"]', roomCode)
-  await page.fill('input[placeholder*="handle"]', username)
+  await page.getByLabel('Room code').fill(roomCode)
+  await page.getByLabel('Your handle').fill(username)
 
   if (role === 'spectator') {
     await page.click('button:has-text("Spectator")')
@@ -86,28 +92,74 @@ export async function waitForPhase(players: PlayerHandle[], phase: string): Prom
   await Promise.race(players.map((h) => h.page.waitForSelector(selector, { timeout: 30_000 })))
 }
 
-// Returns the handle whose page shows the "judge-bar" or no hand dock (i.e. they're the Czar)
+// Returns the Czar handle. Polls until the round is fully rendered — the
+// Czar's page shows no hand dock while every other player's does — so a
+// mid-transition snapshot can't mistake a not-yet-rendered non-Czar for
+// the Czar.
 export async function getCzar(players: PlayerHandle[]): Promise<PlayerHandle> {
+  for (let attempt = 0; attempt < 40; attempt++) {
+    const docks = await Promise.all(
+      players.map((h) =>
+        h.page
+          .locator('.hand-dock')
+          .isVisible()
+          .catch(() => false),
+      ),
+    )
+    const without = players.filter((_, i) => !docks[i])
+    if (without.length === 1 && docks.filter(Boolean).length === players.length - 1)
+      return without[0]!
+    await players[0]!.page.waitForTimeout(300)
+  }
+  // Fallback: judge-bar holder, else first dock-less player.
   for (const h of players) {
     const hasJudgeBar = await h.page
       .locator('.judge-bar')
       .isVisible()
       .catch(() => false)
-    const hasHandDock = await h.page
-      .locator('.hand-dock')
-      .isVisible()
-      .catch(() => false)
-    if (hasJudgeBar || !hasHandDock) return h
+    if (hasJudgeBar) return h
   }
   return players[0]!
 }
 
-// Submit N cards for a non-czar player (clicks first N available hand cards)
+// Reads the pick count for the current black card from a non-Czar's hand
+// dock label ("Your hand · pick one" → 1, "pick 2 in order" → 2).
+export async function handPickCount(handle: PlayerHandle): Promise<number> {
+  const eyebrow = handle.page.locator('.hand-dock .eyebrow')
+  await eyebrow.waitFor({ state: 'visible', timeout: 15_000 })
+  const txt = (await eyebrow.textContent()) ?? ''
+  const m = /pick (\d+)/i.exec(txt)
+  return m ? Number(m[1]) : 1
+}
+
+// Plays one round to completion at the given pick count: each non-Czar
+// submits `pick` cards, the Czar reveals (server-driven) and picks the
+// first submission. Leaves the game at the next round's picking phase.
+export async function playRound(players: PlayerHandle[], pick: number): Promise<void> {
+  const czar = await getCzar(players)
+  for (const p of players.filter((pl) => pl !== czar)) await submitCards(p, pick)
+  await waitForPhase(players, 'judging')
+  await pickWinner(czar, 0)
+}
+
+// Submit N cards for a non-czar player (selects first N hand cards, submits).
+// The hand dock fans the cards with a stacked z-index and a selected card
+// lifts (translateY -22px) to zIndex 99, so its box overlaps both its
+// neighbours and the Submit button. A real or forced pointer click is routed
+// by the browser to the topmost element at that point (the raised card), so
+// force:true would re-toggle the already-selected card instead of selecting
+// the next one / clicking Submit. dispatchEvent fires the click directly on
+// the target node; React's delegated onClick still handles it, bypassing
+// hit-testing entirely — the only reliable way to drive this fanned UI.
 export async function submitCards(handle: PlayerHandle, count: number): Promise<void> {
   for (let i = 0; i < count; i++) {
-    await handle.page.locator('.hand-card-wrap').nth(i).click()
+    const card = handle.page.locator('.hand-card-wrap').nth(i).locator('.card-response')
+    await card.waitFor({ state: 'visible' })
+    await card.dispatchEvent('click')
   }
-  await handle.page.click('button:has-text("Submit")')
+  const submit = handle.page.locator('.hand-dock-hd button')
+  await submit.waitFor({ state: 'visible' })
+  await submit.dispatchEvent('click')
 }
 
 // Czar clicks "Start reveal" button
