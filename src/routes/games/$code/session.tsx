@@ -76,7 +76,9 @@ function SessionScreen() {
         })
       }
       if (event.type === 'round_won') {
-        setWinnerId(event.winnerId)
+        // N-3: SubmissionsGrid highlights by submissionId, so track the
+        // winning submission — not event.winnerId, which is a playerId.
+        setWinnerId(event.submissionId)
         setScores(event.scores)
         setTimeout(() => setPhase('transition'), WINNER_PAUSE)
       }
