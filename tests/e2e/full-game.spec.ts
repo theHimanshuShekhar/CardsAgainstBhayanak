@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test'
 import { HANDLES } from '../fixtures/handles'
 import { createGame, joinGame } from '../helpers'
-import { playRound, playGodmode } from '../protocol'
+import { playRound, playGodmode, playHappyEnding } from '../protocol'
 
 const BASE = process.env['CAB_E2E_BASE'] ?? 'http://localhost:3000'
 
@@ -47,6 +47,15 @@ test('Packing Heat: pick-2 prompt deals an 11th card (protocol)', async () => {
   }
   expect(r.roundWon).toBe(true)
   expect(r.reachedRound2).toBe(true)
+})
+
+test('Happy Ending: host forces a Haiku final round (protocol)', async () => {
+  test.setTimeout(90_000)
+  const r = await playHappyEnding(BASE)
+  expect(r.round2Prompt, 'round 2 is the synthetic Haiku prompt').toBe('Make a Haiku.')
+  expect(r.round2Pick, 'Haiku prompt is pick-3').toBe(3)
+  expect(r.gameOver, 'game ends after the Haiku round').toBe(true)
+  expect(r.mode, 'game_over carries happy_ending mode').toBe('happy_ending')
 })
 
 // UI-driven coverage. Blocked until the create-screen packs/rules UI

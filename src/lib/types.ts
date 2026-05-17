@@ -165,6 +165,7 @@ export type ClientMessage =
   | { type: 'eliminate'; submissionId: string }
   | { type: 'redraw' }
   | { type: 'confess_discard'; cardId: string }
+  | { type: 'happy_ending' }
   | { type: 'leave' }
   | { type: 'ping' }
 

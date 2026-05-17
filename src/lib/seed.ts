@@ -95,6 +95,28 @@ export async function seedPacks(): Promise<void> {
       .where(sql`${packs.id} = ${existing.id}`)
   }
 
+  // Baked-in synthetic card for the Happy Ending house rule's forced
+  // final round (not part of the REST AH packs).
+  const [haikuPack] = await db
+    .insert(packs)
+    .values({ name: 'Haiku Final', slug: 'haiku-final', cardCount: 1 })
+    .onConflictDoNothing({ target: packs.slug })
+    .returning()
+  const hp =
+    haikuPack ??
+    (
+      await db
+        .select()
+        .from(packs)
+        .where(sql`${packs.slug} = 'haiku-final'`)
+    ).at(0)
+  if (hp) {
+    await db
+      .insert(blackCards)
+      .values({ packId: hp.id, text: 'Make a Haiku.', pick: 3 })
+      .onConflictDoNothing()
+  }
+
   seedLogger.info(
     { packs: packNames.length, black: totalBlack, white: totalWhite, ms: Date.now() - start },
     'seed complete',

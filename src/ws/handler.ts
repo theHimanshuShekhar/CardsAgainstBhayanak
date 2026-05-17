@@ -256,6 +256,9 @@ export const wsHooks = {
       case 'confess_discard':
         await engine.confessDiscard(ctx.code, ctx.playerId, parsed.cardId)
         return
+      case 'happy_ending':
+        await engine.triggerHappyEnding(ctx.code, ctx.playerId)
+        return
       case 'leave':
         await state.updatePlayer(ctx.code, ctx.playerId, { status: 'dropped' })
         await state.publishEvent(ctx.code, { type: 'player_left', playerId: ctx.playerId })

@@ -1,5 +1,5 @@
 import { db } from '~/db'
-import { blackCards, whiteCards, gameSessions, gamePlayers, gameRounds } from '~/db/schema'
+import { blackCards, whiteCards, gameSessions, gamePlayers, gameRounds, packs } from '~/db/schema'
 import { inArray, eq, sql, desc } from 'drizzle-orm'
 import { randomInt, shuffle } from './rng'
 import { redis, KEYS, ROOM_TTL_SECONDS } from './redis'
@@ -112,6 +112,14 @@ export async function startRound(
     .from(blackCards)
     .where(eq(blackCards.id, blackIds[0] ?? ''))
   if (!black) throw new Error('black card missing')
+
+  // Happy Ending: the host armed an early end last round — the Haiku card
+  // was queued at the deck head, so this round (which just drew it) is the
+  // forced final. Promote armed → final; endRound ends the game.
+  if (await redis.hget(KEYS.game(code), 'happyEndingArmed')) {
+    await redis.hset(KEYS.game(code), 'happyEndingFinal', '1')
+    await redis.hdel(KEYS.game(code), 'happyEndingArmed')
+  }
 
   let czarId: string | null = null
   if (forceCzarId !== undefined) {
@@ -484,6 +492,16 @@ export async function endRound(code: string, submitterIds: string[]): Promise<vo
   if (!session) return
   const config = session.config as GameConfig
   const refreshed = await state.getAllPlayers(code)
+
+  // Happy Ending: this was the forced "Make a Haiku" final round —
+  // end now regardless of score; the current leader wins.
+  if (await redis.hget(KEYS.game(code), 'happyEndingFinal')) {
+    await redis.hdel(KEYS.game(code), 'happyEndingFinal', 'happyEndingArmed')
+    const leader = [...refreshed].sort((a, b) => b.score - a.score)[0]
+    await endGame(code, 'happy_ending', leader?.id)
+    return
+  }
+
   const winnerPlayer = refreshed.find((p) => p.score >= config.roundsToWin)
   if (winnerPlayer) {
     await endGame(code, winnerPlayer.isRando ? 'rando_won' : 'normal', winnerPlayer.id)
@@ -808,4 +826,42 @@ export async function applyPackingHeat(code: string, playerIds: string[]): Promi
     })
     await state.publishEvent(code, { type: 'hand_update', playerId: pid, hand })
   }
+}
+
+// Happy Ending: host ends the game early. Queues the synthetic "Make a
+// Haiku" black card as the next prompt and arms the forced final round.
+// The current round finishes normally; the next round is the Haiku round,
+// after which endRound ends the game (current leader wins) regardless of
+// score.
+export async function triggerHappyEnding(code: string, playerId: string): Promise<void> {
+  const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
+  if (!session) return
+  if (session.status !== 'active') return
+  if (session.hostPlayerId !== playerId) return
+  const config = session.config as GameConfig
+  if (!config.rules.includes('happy_ending')) return
+  // Idempotent: ignore repeat triggers once armed.
+  if (await redis.hget(KEYS.game(code), 'happyEndingArmed')) return
+
+  const [haiku] = await db
+    .select({ id: blackCards.id })
+    .from(blackCards)
+    .innerJoin(packs, eq(blackCards.packId, packs.id))
+    .where(eq(packs.slug, 'haiku-final'))
+    .limit(1)
+  if (!haiku) {
+    engineLogger.error({ code }, 'happy ending: Haiku card not seeded')
+    return
+  }
+
+  // Queue the Haiku card as the very next black draw (deck is LPOP-drawn).
+  await redis.lpush(KEYS.deckBlack(code), haiku.id)
+  await redis.hset(KEYS.game(code), 'happyEndingArmed', '1')
+  await redis.expire(KEYS.game(code), ROOM_TTL_SECONDS)
+  engineLogger.info({ code, playerId }, 'happy ending armed')
+  captureServerEvent(playerId, 'cab_rule_triggered', {
+    roomCode: code,
+    playerId,
+    rule: 'happy_ending',
+  })
 }

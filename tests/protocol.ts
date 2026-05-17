@@ -74,6 +74,36 @@ export type GodmodeResult = {
   reachedRound2: boolean
 }
 
+export type HappyEndingResult = {
+  round2Prompt: string
+  round2Pick: number
+  gameOver: boolean
+  mode: string
+}
+
+// Resolves once the Nth event of `type` has been observed on `p`. Needed
+// for multi-round drives where `waitFor` would match a stale prior round.
+function waitForNth(p: Peer, type: string, n: number, ms = 12000): Promise<any> {
+  return new Promise((res, rej) => {
+    const hits = () => p.events.filter((e) => e.type === type)
+    const done = () => {
+      const h = hits()
+      return h.length >= n ? h[n - 1] : null
+    }
+    const f0 = done()
+    if (f0) return res(f0)
+    const t = setTimeout(() => rej(new Error(`${p.name} waitForNth ${type}#${n} timeout`)), ms)
+    const iv = setInterval(() => {
+      const f = done()
+      if (f) {
+        clearInterval(iv)
+        clearTimeout(t)
+        res(f)
+      }
+    }, 100)
+  })
+}
+
 // God Is Dead: no Czar, everyone votes. Verifies S0-3 (no self-vote, no
 // double-vote) and the S0-1 godmode branch end-to-end.
 export async function playGodmode(
@@ -262,5 +292,115 @@ export async function playRound(
     reachedRound2,
     promptPick: pick,
     submitterHandLen,
+  }
+}
+
+// Happy Ending (S0-6): host arms the early end during round 1; round 2 is
+// the forced synthetic "Make a Haiku" (pick:3) round, after which the game
+// ends with mode 'happy_ending' regardless of score.
+export async function playHappyEnding(base: string): Promise<HappyEndingResult> {
+  const packsJson = (await (await fetch(base + '/api/packs')).json()) as {
+    packs: { id: string; name: string }[]
+  }
+  const base0 = packsJson.packs.find((p) => /base/i.test(p.name)) ?? packsJson.packs[0]
+  if (!base0) throw new Error('no packs seeded')
+
+  const cfg = {
+    maxPlayers: 10,
+    roundsToWin: 20, // high enough that score never ends the 2-round game
+    timer: 'Off' as const,
+    packs: [base0.id],
+    rules: ['happy_ending'],
+  }
+  const c = await post(base, '/api/games', { username: 'host', anonId: 'a-host', config: cfg })
+  if (c.status !== 201 && c.status !== 200) throw new Error(`create ${c.status}`)
+  const code = c.json.roomCode as string
+
+  const joins = []
+  for (let i = 2; i <= 3; i++) {
+    joins.push(
+      await post(base, `/api/games/${code}/join`, {
+        username: `p${i}`,
+        anonId: `a-p${i}`,
+        role: 'player',
+      }),
+    )
+  }
+
+  const peers: Record<string, Peer> = {}
+  peers.host = await connect(base, code, c.json.sessionToken, 'host')
+  const idByName: Record<string, string> = { host: c.json.playerId }
+  for (let i = 0; i < joins.length; i++) {
+    const name = `p${i + 2}`
+    peers[name] = await connect(base, code, joins[i]!.json.sessionToken, name)
+    idByName[name] = joins[i]!.json.playerId
+  }
+
+  const s = await post(base, `/api/games/${code}/start`, {}, c.json.sessionToken)
+  if (s.status !== 204) throw new Error(`start ${s.status}`)
+  await sleep(800)
+  for (const p of Object.values(peers)) send(p, { type: 'rejoin' })
+  await sleep(1200)
+
+  // Host arms Happy Ending during round 1.
+  send(peers.host!, { type: 'happy_ending' })
+  await sleep(400)
+
+  // Drives one normal pick-mode round (round `roundNum`), refreshing each
+  // peer's hand/prompt via rejoin so it works for round 2's new deal.
+  const playPickRound = async (roundNum: number) => {
+    const rsEvt = (() => {
+      for (const p of Object.values(peers)) {
+        const e = p.events.find((x) => x.type === 'round_started' && x.round === roundNum)
+        if (e) return e
+      }
+      return null
+    })()
+    const czarId: string | null = rsEvt?.czarId ?? null
+
+    for (const p of Object.values(peers)) {
+      p.snapshot = null
+      send(p, { type: 'rejoin' })
+    }
+    await sleep(900)
+    const anySnap = Object.values(peers).find((p) => p.snapshot)?.snapshot
+    const pick = (anySnap?.prompt?.pick ?? 1) as number
+    const promptText = (anySnap?.prompt?.text ?? '') as string
+
+    for (const [name, id] of Object.entries(idByName)) {
+      if (id === czarId) continue
+      const hand = peers[name]!.snapshot?.hand ?? []
+      send(peers[name]!, { type: 'play', cardIds: hand.slice(0, pick).map((x: any) => x.id) })
+    }
+
+    const czarName = Object.entries(idByName).find(([, id]) => id === czarId)![0]
+    const czar = peers[czarName]!
+    await waitForNth(czar, 'reveal_start', roundNum)
+    await sleep(700 * 4 + 800)
+    send(czar, { type: 'pick', submissionId: '0' })
+    return { pick, promptText }
+  }
+
+  // Round 1: normal prompt.
+  await playPickRound(1)
+  const any = Object.values(peers)[0]!
+  await waitForNth(any, 'round_end', 1)
+
+  // Round 2: the forced Haiku final.
+  await waitForNth(any, 'round_started', 2)
+  const r2 = await playPickRound(2)
+
+  const over = await waitFor(any, 'game_over', 15000).then(
+    (e) => e,
+    () => null,
+  )
+
+  for (const p of Object.values(peers)) p.ws.close()
+
+  return {
+    round2Prompt: r2.promptText,
+    round2Pick: r2.pick,
+    gameOver: !!over,
+    mode: over?.mode ?? '',
   }
 }
