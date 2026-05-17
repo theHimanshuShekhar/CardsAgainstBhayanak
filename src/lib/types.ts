@@ -190,6 +190,7 @@ export type ServerMessage =
   | { type: 'elimination_turn'; playerId: string }
   | { type: 'card_eliminated'; submissionId: string; byPlayerId: string }
   | { type: 'vote_tally'; votes: Record<string, number> }
+  | { type: 'round_voided'; round: number; reason: string }
   | { type: 'round_end'; activatedPlayers: string[]; handsRefilled: Record<string, Hand> }
   | { type: 'game_over'; finalScores: PlayerScore[]; winnerId: string; mode: GameOverMode }
   | { type: 'error'; code: ErrorCode; message: string }

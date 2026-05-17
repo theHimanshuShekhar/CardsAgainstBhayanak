@@ -82,6 +82,13 @@ export type HappyEndingResult = {
   mode: string
 }
 
+export type CzarDropResult = {
+  roundVoided: boolean
+  voidedRound: number
+  round2Started: boolean
+  czarRotated: boolean
+}
+
 // Resolves once the Nth event of `type` has been observed on `p`. Needed
 // for multi-round drives where `waitFor` would match a stale prior round.
 function waitForNth(p: Peer, type: string, n: number, ms = 12000): Promise<any> {
@@ -409,5 +416,109 @@ export async function playHappyEnding(base: string): Promise<HappyEndingResult> 
     round2Pick: r2.pick,
     gameOver: !!over,
     mode: over?.mode ?? '',
+  }
+}
+
+// S2-1: the Czar disconnects mid-judging and never returns. After the
+// grace window the round must be voided (cards returned, black discarded)
+// and a fresh round started with a *different* Czar.
+export async function playCzarDrop(base: string): Promise<CzarDropResult> {
+  const packsJson = (await (await fetch(base + '/api/packs')).json()) as {
+    packs: { id: string; name: string }[]
+  }
+  const base0 = packsJson.packs.find((p) => /base/i.test(p.name)) ?? packsJson.packs[0]
+  if (!base0) throw new Error('no packs seeded')
+
+  const cfg = {
+    maxPlayers: 10,
+    roundsToWin: 20,
+    timer: 'Off' as const,
+    packs: [base0.id],
+    rules: [] as string[],
+  }
+  const c = await post(base, '/api/games', { username: 'host', anonId: 'a-host', config: cfg })
+  if (c.status !== 201 && c.status !== 200) throw new Error(`create ${c.status}`)
+  const code = c.json.roomCode as string
+
+  const joins = []
+  for (let i = 2; i <= 3; i++) {
+    joins.push(
+      await post(base, `/api/games/${code}/join`, {
+        username: `p${i}`,
+        anonId: `a-p${i}`,
+        role: 'player',
+      }),
+    )
+  }
+
+  const peers: Record<string, Peer> = {}
+  peers.host = await connect(base, code, c.json.sessionToken, 'host')
+  const idByName: Record<string, string> = { host: c.json.playerId }
+  for (let i = 0; i < joins.length; i++) {
+    const name = `p${i + 2}`
+    peers[name] = await connect(base, code, joins[i]!.json.sessionToken, name)
+    idByName[name] = joins[i]!.json.playerId
+  }
+
+  const s = await post(base, `/api/games/${code}/start`, {}, c.json.sessionToken)
+  if (s.status !== 204) throw new Error(`start ${s.status}`)
+  await sleep(800)
+  for (const p of Object.values(peers)) send(p, { type: 'rejoin' })
+  await sleep(1200)
+
+  const snap = Object.values(peers).find((p) => p.snapshot)?.snapshot
+  if (!snap) throw new Error('no snapshot after start')
+  const czarId = snap.czarId as string
+  const pick = snap.prompt.pick as number
+
+  // Non-Czar players submit → the round reaches reveal/judging.
+  for (const [name, id] of Object.entries(idByName)) {
+    if (id === czarId) continue
+    const hand = peers[name]!.snapshot?.hand ?? []
+    send(peers[name]!, { type: 'play', cardIds: hand.slice(0, pick).map((x: any) => x.id) })
+  }
+
+  const czarName = Object.entries(idByName).find(([, id]) => id === czarId)![0]
+  const czar = peers[czarName]!
+  const observer = Object.values(peers).find((p) => idByName[p.name] !== czarId)!
+  await waitFor(czar, 'reveal_start')
+  await sleep(700 * 4 + 500)
+
+  // Czar vanishes mid-judging (never picks); grace expiry voids the round.
+  czar.ws.close()
+  // Keep the observer's socket past the 30s grace + keepalive window.
+  const ka = setInterval(() => {
+    try {
+      send(observer, { type: 'ping' })
+    } catch {
+      /* socket closing */
+    }
+  }, 10_000)
+
+  const voided = await waitFor(observer, 'round_voided', 40_000).then(
+    (e) => e,
+    () => null,
+  )
+  const r2 = voided
+    ? await waitFor(observer, 'round_started', 10_000).then(
+        () => observer.events.find((e) => e.type === 'round_started' && e.round === 2),
+        () => null,
+      )
+    : null
+  clearInterval(ka)
+
+  for (const p of Object.values(peers)) {
+    try {
+      p.ws.close()
+    } catch {
+      /* already closed */
+    }
+  }
+
+  return {
+    roundVoided: !!voided,
+    voidedRound: voided?.round ?? -1,
+    round2Started: !!r2,
+    czarRotated: !!r2 && r2.czarId !== czarId,
   }
 }

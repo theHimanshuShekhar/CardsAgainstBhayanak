@@ -540,6 +540,53 @@ export async function endGame(code: string, mode: GameOverMode, winnerId?: strin
   engineLogger.info({ code, mode, winnerId }, 'game over')
 }
 
+// S2-1: the current Czar dropped mid-round and can no longer resolve it.
+// Discard the round entirely — return every submitted white card to its
+// submitter's hand, discard the black card (no reshuffle, per spec), wipe
+// round-scoped state — then replay. The dropped Czar is already
+// status=dropped, so startRound's normal rotation skips them: the next
+// active player becomes Czar.
+export async function voidRound(code: string, reason: string): Promise<void> {
+  const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
+  if (!session || session.status !== 'active') return
+
+  const [roundRow] = await db
+    .select()
+    .from(gameRounds)
+    .where(eq(gameRounds.sessionId, session.id))
+    .orderBy(desc(gameRounds.roundNum))
+    .limit(1)
+  if (!roundRow) return
+  const round = roundRow.roundNum
+
+  const submissions = await state.getSubmissions(code)
+  for (const [key, sub] of Object.entries(submissions)) {
+    const pid = resolvePlayerId(key)
+    const p = await state.getPlayer(code, pid)
+    if (!p || p.isRando) continue // Rando has no hand; its cards just vanish
+    const current = await state.getHand(code, pid)
+    await state.setHand(code, pid, [...current, ...sub.fills.map((f) => f.id)])
+  }
+
+  await state.discardCards(code, 'black', [roundRow.blackCardId])
+  await state.clearSubmissions(code)
+  await state.clearSkippedPlayers(code)
+  await redis.hdel(KEYS.round(code), 'eliminationTurnPlayerId')
+  await redis.del(
+    subOrderKey(code),
+    resolvingKey(code),
+    revealedKey(code),
+    voteTallyKeyFor(code),
+    tieKeyFor(code),
+    votersKeyFor(code),
+  )
+
+  await state.publishEvent(code, { type: 'round_voided', round, reason })
+  engineLogger.info({ code, round, reason }, 'round voided')
+
+  await startRound(code, round + 1)
+}
+
 // ── House rule mechanics ──────────────────────────────────────────
 
 // Gamble submissions are stored under `${playerId}:gamble` in the submissions hash.

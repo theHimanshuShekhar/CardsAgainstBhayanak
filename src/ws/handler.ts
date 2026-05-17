@@ -294,6 +294,23 @@ export const wsHooks = {
           playerId,
           reason: 'grace',
         })
+
+        // S2-1: if the dropped player was the Czar of a live round, it
+        // can no longer be resolved — void it and rotate to the next
+        // Czar. phase null/'transition' ⇒ no round is mid-flight.
+        const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
+        if (session?.status === 'active') {
+          const [roundRow] = await db
+            .select()
+            .from(gameRounds)
+            .where(eq(gameRounds.sessionId, session.id))
+            .orderBy(desc(gameRounds.roundNum))
+            .limit(1)
+          const phase = await state.getPhase(code)
+          if (roundRow?.czarPlayerId === playerId && phase && phase !== 'transition') {
+            await engine.voidRound(code, 'czar_dropped')
+          }
+        }
       }
     }, TIMING.GRACE_WINDOW_MS + 100)
 

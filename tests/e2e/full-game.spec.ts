@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test'
 import { HANDLES } from '../fixtures/handles'
 import { createGame, joinGame } from '../helpers'
-import { playRound, playGodmode, playHappyEnding } from '../protocol'
+import { playRound, playGodmode, playHappyEnding, playCzarDrop } from '../protocol'
 
 const BASE = process.env['CAB_E2E_BASE'] ?? 'http://localhost:3000'
 
@@ -57,6 +57,15 @@ test('Happy Ending: host forces a Haiku final round (protocol)', async () => {
   expect(r.round2Pick, 'Haiku prompt is pick-3').toBe(3)
   expect(r.gameOver, 'game ends after the Haiku round').toBe(true)
   expect(r.mode, 'game_over carries happy_ending mode').toBe('happy_ending')
+})
+
+test('S2-1: Czar drop mid-judging voids the round and rotates Czar (protocol)', async () => {
+  test.setTimeout(70_000)
+  const r = await playCzarDrop(BASE)
+  expect(r.roundVoided, 'grace expiry voids the abandoned round').toBe(true)
+  expect(r.voidedRound, 'round 1 is the one voided').toBe(1)
+  expect(r.round2Started, 'a fresh round starts after the void').toBe(true)
+  expect(r.czarRotated, 'the dropped Czar is not the new Czar').toBe(true)
 })
 
 // UI-driven coverage. Blocked until the create-screen packs/rules UI
