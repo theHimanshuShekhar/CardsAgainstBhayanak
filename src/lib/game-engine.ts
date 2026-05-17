@@ -140,6 +140,7 @@ export async function startRound(
 
   await state.clearSkippedPlayers(code)
   await state.setCurrentRound(code, round)
+  await state.setPhase(code, 'picking')
 
   await db
     .insert(gameRounds)
@@ -306,6 +307,7 @@ export async function checkRoundReady(code: string): Promise<void> {
   const order = shuffle(Object.keys(submissions))
   await redis.set(subOrderKey(code), JSON.stringify(order), 'EX', ROOM_TTL_SECONDS)
 
+  await state.setPhase(code, 'reveal')
   await state.publishEvent(code, { type: 'reveal_start' })
   for (let i = 0; i < order.length; i++) {
     const sub = submissions[order[i]!]
@@ -316,6 +318,7 @@ export async function checkRoundReady(code: string): Promise<void> {
   }
 
   if (config.rules.includes('survival')) {
+    await state.setPhase(code, 'eliminating')
     const turnOrder = players.filter((p) => p.status === 'active' && p.id !== czarId && !p.isRando)
     const firstP = turnOrder[0]
     if (firstP) {
@@ -324,7 +327,12 @@ export async function checkRoundReady(code: string): Promise<void> {
       await state.publishEvent(code, { type: 'elimination_turn', playerId: firstP.id })
     }
   } else if (config.rules.includes('godmode')) {
+    await state.setPhase(code, 'waiting')
     await state.publishEvent(code, { type: 'vote_tally', votes: {} })
+  } else if (config.rules.includes('serious_business')) {
+    await state.setPhase(code, 'ranking')
+  } else {
+    await state.setPhase(code, 'judging')
   }
   // serious_business / normal: the Czar now ranks / picks (client-driven).
 }
@@ -486,6 +494,7 @@ export async function endRound(code: string, submitterIds: string[]): Promise<vo
     handsRefilled[pid] = ids.map((id) => cardMap.get(id) ?? { id, text: '' })
   }
 
+  await state.setPhase(code, 'transition')
   await state.publishEvent(code, { type: 'round_end', activatedPlayers: activated, handsRefilled })
 
   const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))

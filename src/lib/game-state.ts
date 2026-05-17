@@ -1,5 +1,5 @@
 import { redis, KEYS, ROOM_TTL_SECONDS } from './redis'
-import type { GameConfig, GamePlayer, Submission } from './types'
+import type { GameConfig, GamePlayer, GamePhase, Submission } from './types'
 
 export async function createGameState(
   code: string,
@@ -178,6 +178,19 @@ export async function getCurrentRound(code: string): Promise<number> {
 export async function setRoundTimerExpiresAt(code: string, expiresAt: number): Promise<void> {
   await redis.hset(KEYS.round(code), 'roundTimerExpiresAt', String(expiresAt))
   await redis.expire(KEYS.round(code), ROOM_TTL_SECONDS)
+}
+
+// S2-1: persist the authoritative phase so a disconnect handler can tell
+// whether a round is mid-flight (and which czar owns it) without having
+// to re-derive it the way buildSnapshot does.
+export async function setPhase(code: string, phase: GamePhase): Promise<void> {
+  await redis.hset(KEYS.round(code), 'phase', phase)
+  await redis.expire(KEYS.round(code), ROOM_TTL_SECONDS)
+}
+
+export async function getPhase(code: string): Promise<GamePhase | null> {
+  const val = await redis.hget(KEYS.round(code), 'phase')
+  return val ? (val as GamePhase) : null
 }
 
 const skippedKey = (code: string) => `${KEYS.round(code)}:skipped`
