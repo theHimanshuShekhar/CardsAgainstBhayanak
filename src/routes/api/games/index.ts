@@ -1,6 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { db } from '~/db'
-import { gameSessions, gamePlayers } from '~/db/schema'
+import { gameSessions, gamePlayers, packs } from '~/db/schema'
 import { redis, KEYS, ROOM_TTL_SECONDS } from '~/lib/redis'
 import * as state from '~/lib/game-state'
 import { generateRoomCode } from '~/lib/code-gen.server'
@@ -9,7 +9,7 @@ import { checkRateLimit } from '~/lib/rate-limit'
 import { CreateGameSchema, errorResponse, getClientIp } from '~/lib/api-helpers'
 import { captureServerEvent } from '~/lib/posthog-server'
 import { apiLogger } from '~/lib/logger'
-import { eq } from 'drizzle-orm'
+import { eq, count } from 'drizzle-orm'
 
 async function allocateRoomCode(): Promise<string> {
   for (let attempt = 0; attempt < 5; attempt++) {
@@ -48,6 +48,12 @@ export const Route = createFileRoute('/api/games/')({
             'Invalid request body',
             parsed.error.flatten(),
           )
+
+        // S3: gameplay routes must 503 when no card data has been seeded —
+        // a game with empty decks is unplayable.
+        const [packCount] = await db.select({ cnt: count() }).from(packs)
+        if (Number(packCount?.cnt ?? 0) === 0)
+          return errorResponse(503, 'internal_error', 'No card data available')
 
         const code = await allocateRoomCode()
 

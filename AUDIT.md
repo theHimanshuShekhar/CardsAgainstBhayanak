@@ -50,7 +50,7 @@ Severity: `S0` = ships-broken (cannot play a game), `S1` = production-blocker, `
   `buildDecks` does `inArray(blackCards.packId, packs)`. The create UI
   (S2-6/S2-16) must submit pack IDs; empty/invalid → `deck_exhausted` on
   start. Ties to the S3 "empty-pack 503" item.
-- **N-3 (S3):** `SubmissionsGrid` computes `isWinner = s.submissionId ===
+- **N-3 (S3 — fixed):** `SubmissionsGrid` computes `isWinner = s.submissionId ===
 winnerId` — compares an index-string submissionId to a _playerId_.
   Winner highlight is wrong; should compare to the won `submissionId`.
 - **N-4 (S3, accepted):** `server.prod.ts` runs TS via `tsx` in prod
@@ -63,7 +63,7 @@ winnerId` — compares an index-string submissionId to a _playerId_.
   not import `~`-aliased app code at Vite config-eval time (the original
   break), or run the srvx entry in a dev mode. E2E already targets the
   prod server so the harness is unaffected.
-- **N-6 (S3):** the compose/Dockerfile healthcheck shows the app
+- **N-6 (S3 — fixed):** the compose/Dockerfile healthcheck shows the app
   container `unhealthy` even though `/api/healthz` returns 200 (busybox
   `wget` form / `PORT` mismatch in the healthcheck command). Cosmetic but
   breaks `depends_on: condition: service_healthy`. Fix: use a Node-based
@@ -84,6 +84,15 @@ winnerId` — compares an index-string submissionId to a _playerId_.
   Surfaced via S2-5 (lobby roster/config empty). Fix: send `rejoin`
   only after the `auth_ok` message — matches the spec's "auth then
   rejoin" and the protocol harness ordering.
+- **N-9 (S2, test-infra):** `tests/helpers.ts` `createGame`/`joinGame`
+  fill `input[placeholder*="handle"]`, but the S2-6 create/join rebuild
+  (`1ac4577`) changed the placeholders to `e.g. priya_was_here` /
+  `e.g. B7K-9MV` — the selector now matches nothing. This breaks the five
+  UI-driving specs that use the helpers (`reconnect`, `full-game`,
+  `mid-game-join`, `multi-blank`, `house-rules`). Pre-existing drift, not
+  a regression from the S2-18/S3 work. Fix: target the handle input by a
+  stable selector (label/`name`/`data-testid`), not its placeholder copy
+  — belongs to the S2-10 test-infra track, not this polish pass.
 
 ### Revised scope for remaining items
 
@@ -422,7 +431,7 @@ winnerId` — compares an index-string submissionId to a _playerId_.
   3. On `endRound`, `clearTimeout(roundTimers.get(code))` before the next round's `startRound` fires.
   4. The existing `currentRound !== round` guard remains as a belt-and-braces defence.
 
-### S2-18. `useGameSocket` reconnects forever after intentional close
+### S2-18. `useGameSocket` reconnects forever after intentional close (— fixed)
 
 - **Where:** `src/hooks/useGameSocket.ts`.
 - **Fix:**
@@ -431,12 +440,12 @@ winnerId` — compares an index-string submissionId to a _playerId_.
   3. In the effect's return (cleanup), set `cancelled = true` _before_ `wsRef.current?.close()`.
   4. Also clear any pending `setTimeout(connect, backoffMs)` by tracking the handle and `clearTimeout` it on cleanup.
 
-### S2-19. `cab_reconnect_attempt` posted on first close
+### S2-19. `cab_reconnect_attempt` posted on first close (— fixed)
 
 - **Where:** `useGameSocket.ts:60`.
 - **Fix:** Only `captureEvent('cab_reconnect_attempt', ...)` when `attempt > 1`.
 
-### S2-20. SPEC.md still references `docker-compose.prod.yml`
+### S2-20. SPEC.md still references `docker-compose.prod.yml` (— fixed)
 
 - **Where:** `SPEC.md` § Quick Reference + § Docker section.
 - **Fix:** Remove the `-f docker-compose.prod.yml` form from quick reference; update the Docker section to say "single `docker-compose.yml` with environment overrides for prod".
@@ -445,25 +454,28 @@ winnerId` — compares an index-string submissionId to a _playerId_.
 
 ## S3 — Minor / polish
 
-- **`stub-content.ts`** — used only for the Home-screen sample cards. Once a real Pack is wired into Home, delete this file.
+- **`stub-content.ts`** — used only for the Home-screen sample cards. Once a real Pack is wired into Home, delete this file. **(— deferred)**
   **Fix:** Replace `SAMPLE_PROMPT` / `SAMPLE_WHITE_*` in `src/routes/index.tsx` with a fetch to `/api/packs` + a random card. Delete `src/lib/stub-content.ts`.
+  _Deferred: not a bug — refactors working Home copy and adds a network dependency to the landing page for cosmetic sample cards; out of scope for a polish pass._
 
-- **`logger.ts`** — verify child loggers are named `cab.ws`, `cab.api`, `cab.engine`, `cab.seed`, `cab.sweeper` (per spec § Logging).
+- **`logger.ts`** — verify child loggers are named `cab.ws`, `cab.api`, `cab.engine`, `cab.seed`, `cab.sweeper` (per spec § Logging). **(— fixed)**
   **Fix:** Read the file and rename if necessary. Centralise the prefix into a single `BASE = 'cab'` constant.
 
-- **`useSession`** SSR hydration risk — synchronous `localStorage` read inside `useState` initialiser.
+- **`useSession`** SSR hydration risk — synchronous `localStorage` read inside `useState` initialiser. **(— fixed)**
   **Fix:** Convert to a `useEffect` that runs once on mount and sets state from `localStorage`. Initial render is `null`, which avoids SSR mismatch; an optimistic UI can use `useSyncExternalStore` if the flicker is visible.
+  _Implemented via `useSyncExternalStore` (server snapshot `null`): the repo's `react-hooks/set-state-in-effect` lint rule forbids the setState-in-effect form, and this is the React-sanctioned external-store-with-SSR pattern the note anticipates._
 
-- **`useGameSocket`** doesn't pause sends after `auth_error`.
+- **`useGameSocket`** doesn't pause sends after `auth_error`. **(— fixed)**
   **Fix:** Track `setAuthed(false)` on `auth_error`; gate `send()` on `authed === true`.
 
-- **Empty-pack-DB gameplay 503** not enforced.
+- **Empty-pack-DB gameplay 503** not enforced. **(— fixed)**
   **Fix:** In `POST /api/games`, before insertion, `const [{count}] = await db.select({count: count()}).from(packs); if (count === 0) return errorResponse(503, 'internal_error', 'No card data available')`. Mirror in `POST /api/games/$code/start`.
 
-- **Plan/spec drift**: re-tag SPEC.md sections (Game Rules Engine, Spectator Permissions, Mid-Game Join, Card Data Seeding, Stats, Screens, E2E, PostHog) from ✅ DONE → ⚠️ PARTIAL or ❌ NOT IMPLEMENTED as appropriate.
+- **Plan/spec drift**: re-tag SPEC.md sections (Game Rules Engine, Spectator Permissions, Mid-Game Join, Card Data Seeding, Stats, Screens, E2E, PostHog) from ✅ DONE → ⚠️ PARTIAL or ❌ NOT IMPLEMENTED as appropriate. **(— deferred)**
   **Fix:** After the S0/S1 fixes land, refresh SPEC.md section headers based on what's actually shipped. Same exercise on the plan markdown.
+  _Deferred: broad, judgement-heavy doc-sync spanning ~8 spec sections; best done as a dedicated final pass once the full AUDIT backlog is closed, not folded into a code-polish commit._
 
-- **Healthz `db` flag** — when DB is down, the response still names `db: 'down'` which is correct, but the response should also exclude `activeGames` (currently defaults to `0`, misleading).
+- **Healthz `db` flag** — when DB is down, the response still names `db: 'down'` which is correct, but the response should also exclude `activeGames` (currently defaults to `0`, misleading). **(— fixed)**
   **Fix:** Move the `activeGames` field inside the try block so it's only emitted on success.
 
 ---

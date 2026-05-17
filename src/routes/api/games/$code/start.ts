@@ -1,6 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { db } from '~/db'
-import { gameSessions, gamePlayers } from '~/db/schema'
+import { gameSessions, gamePlayers, packs } from '~/db/schema'
 import { authenticate } from '~/lib/api-auth'
 import { errorResponse } from '~/lib/api-helpers'
 import { apiLogger } from '~/lib/logger'
@@ -38,6 +38,12 @@ export const Route = createFileRoute('/api/games/$code/start')({
           )
         if (Number(row?.cnt ?? 0) < 3)
           return errorResponse(409, 'invalid_state', 'Need at least 3 players')
+
+        // S3: refuse to start with no seeded card data — empty decks are
+        // unplayable.
+        const [packCount] = await db.select({ cnt: count() }).from(packs)
+        if (Number(packCount?.cnt ?? 0) === 0)
+          return errorResponse(503, 'internal_error', 'No card data available')
 
         await engine.startGame(params.code)
 

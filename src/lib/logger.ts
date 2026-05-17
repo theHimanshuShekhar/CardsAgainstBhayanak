@@ -25,8 +25,9 @@ export const logger = pino(
   transport ? pino.transport(transport) : undefined,
 )
 
-export const wsLogger = logger.child({ mod: 'cab.ws' })
-export const apiLogger = logger.child({ mod: 'cab.api' })
-export const engineLogger = logger.child({ mod: 'cab.engine' })
-export const seedLogger = logger.child({ mod: 'cab.seed' })
-export const sweeperLogger = logger.child({ mod: 'cab.sweeper' })
+const BASE = 'cab'
+export const wsLogger = logger.child({ mod: `${BASE}.ws` })
+export const apiLogger = logger.child({ mod: `${BASE}.api` })
+export const engineLogger = logger.child({ mod: `${BASE}.engine` })
+export const seedLogger = logger.child({ mod: `${BASE}.seed` })
+export const sweeperLogger = logger.child({ mod: `${BASE}.sweeper` })

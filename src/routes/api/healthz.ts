@@ -22,7 +22,7 @@ export const Route = createFileRoute('/api/healthz')({
           status = 503
         }
 
-        let activeGames = 0
+        let activeGames: number | null = null
         try {
           const [row] = await db
             .select({ value: count() })
@@ -34,8 +34,14 @@ export const Route = createFileRoute('/api/healthz')({
           status = 503
         }
 
+        // S3: only report activeGames when the DB query succeeded — a 0 here
+        // when the DB is down is misleading (it's unknown, not zero).
         return Response.json(
-          { ...checks, activeGames, uptime: Math.floor((Date.now() - bootTime) / 1000) },
+          {
+            ...checks,
+            ...(activeGames !== null && { activeGames }),
+            uptime: Math.floor((Date.now() - bootTime) / 1000),
+          },
           { status },
         )
       },
