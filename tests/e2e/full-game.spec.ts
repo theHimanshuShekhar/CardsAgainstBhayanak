@@ -8,6 +8,8 @@ import {
   playCzarDrop,
   playHostDrop,
   playAllDrop,
+  playSpectatorReject,
+  playDroppedAuth,
 } from '../protocol'
 
 const BASE = process.env['CAB_E2E_BASE'] ?? 'http://localhost:3000'
@@ -89,6 +91,20 @@ test('S2-1: all players dropping pauses the game (protocol)', async () => {
   test.setTimeout(70_000)
   const r = await playAllDrop(BASE)
   expect(r.paused, `every player gone ⇒ session paused (was ${r.gameStatus})`).toBe(true)
+})
+
+test('S2-3: spectator game actions are rejected (protocol)', async () => {
+  test.setTimeout(30_000)
+  const r = await playSpectatorReject(BASE)
+  expect(r.authedOk, 'spectator still authenticates').toBe(true)
+  expect(r.errorCode, 'blocked action ⇒ spectator_action').toBe('spectator_action')
+})
+
+test('S2-4: re-auth as a dropped player yields player_dropped (protocol)', async () => {
+  test.setTimeout(50_000)
+  const r = await playDroppedAuth(BASE)
+  expect(r.gotAuthOk, 'a dropped player must not re-authenticate').toBe(false)
+  expect(r.authErrorCode, 'auth_error carries player_dropped').toBe('player_dropped')
 })
 
 // UI-driven coverage. Blocked until the create-screen packs/rules UI

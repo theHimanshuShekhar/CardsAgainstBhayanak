@@ -101,6 +101,16 @@ export type AllDropResult = {
   gameStatus: string
 }
 
+export type SpectatorRejectResult = {
+  errorCode: string
+  authedOk: boolean
+}
+
+export type DroppedAuthResult = {
+  authErrorCode: string
+  gotAuthOk: boolean
+}
+
 // Resolves once the Nth event of `type` has been observed on `p`. Needed
 // for multi-round drives where `waitFor` would match a stale prior round.
 function waitForNth(p: Peer, type: string, n: number, ms = 12000): Promise<any> {
@@ -684,4 +694,113 @@ export async function playAllDrop(base: string): Promise<AllDropResult> {
   }
 
   return { paused: gameStatus === 'paused', gameStatus }
+}
+
+// S2-3: an authenticated spectator socket may stay connected but must
+// not drive the game. A blocked action returns error: spectator_action.
+export async function playSpectatorReject(base: string): Promise<SpectatorRejectResult> {
+  const packsJson = (await (await fetch(base + '/api/packs')).json()) as {
+    packs: { id: string; name: string }[]
+  }
+  const base0 = packsJson.packs.find((p) => /base/i.test(p.name)) ?? packsJson.packs[0]
+  if (!base0) throw new Error('no packs seeded')
+
+  const cfg = {
+    maxPlayers: 10,
+    roundsToWin: 20,
+    timer: 'Off' as const,
+    packs: [base0.id],
+    rules: [] as string[],
+  }
+  const c = await post(base, '/api/games', { username: 'host', anonId: 'a-host', config: cfg })
+  if (c.status !== 201 && c.status !== 200) throw new Error(`create ${c.status}`)
+  const code = c.json.roomCode as string
+
+  const spec = await post(base, `/api/games/${code}/join`, {
+    username: 'watcher',
+    anonId: 'a-watcher',
+    role: 'spectator',
+  })
+  if (spec.status !== 200) throw new Error(`spectator join ${spec.status}`)
+
+  // connect() resolves on auth_ok — spectators authenticate fine.
+  const peer = await connect(base, code, spec.json.sessionToken, 'watcher')
+  const authedOk = peer.events.some((e) => e.type === 'auth_ok')
+
+  send(peer, { type: 'play', cardIds: [] })
+  const err = await waitFor(peer, 'error', 8_000).then(
+    (e) => e,
+    () => null,
+  )
+  try {
+    peer.ws.close()
+  } catch {
+    /* already closing */
+  }
+
+  return { errorCode: err?.code ?? '', authedOk }
+}
+
+// S2-4: a player whose grace window expired is 'dropped'. Re-authenticating
+// with that (still cryptographically valid) token must yield auth_error
+// with code player_dropped — not a silent invalid_token.
+export async function playDroppedAuth(base: string): Promise<DroppedAuthResult> {
+  const packsJson = (await (await fetch(base + '/api/packs')).json()) as {
+    packs: { id: string; name: string }[]
+  }
+  const base0 = packsJson.packs.find((p) => /base/i.test(p.name)) ?? packsJson.packs[0]
+  if (!base0) throw new Error('no packs seeded')
+
+  const cfg = {
+    maxPlayers: 10,
+    roundsToWin: 20,
+    timer: 'Off' as const,
+    packs: [base0.id],
+    rules: [] as string[],
+  }
+  const c = await post(base, '/api/games', { username: 'host', anonId: 'a-host', config: cfg })
+  if (c.status !== 201 && c.status !== 200) throw new Error(`create ${c.status}`)
+  const code = c.json.roomCode as string
+
+  const j = await post(base, `/api/games/${code}/join`, {
+    username: 'p2',
+    anonId: 'a-p2',
+    role: 'player',
+  })
+  if (j.status !== 200) throw new Error(`join ${j.status}`)
+  const token = j.json.sessionToken as string
+
+  // Connect then vanish; the grace timer drops the player after ~30s.
+  const peer = await connect(base, code, token, 'p2')
+  peer.ws.close()
+  await sleep(33_000)
+
+  // Re-auth with the same token — the player is now 'dropped'.
+  const wsBase = base.replace(/^http/, 'ws')
+  const result = await new Promise<{ type: string; code?: string }>((resolve, reject) => {
+    const ws = new WebSocket(`${wsBase}/api/games/${code}/ws`)
+    const to = setTimeout(() => reject(new Error('reauth timeout')), 8_000)
+    ws.onopen = () => ws.send(JSON.stringify({ type: 'auth', sessionToken: token }))
+    ws.onmessage = (e) => {
+      const msg = JSON.parse(String(e.data)) as { type: string; code?: string }
+      if (msg.type === 'auth_ok' || msg.type === 'auth_error') {
+        clearTimeout(to)
+        try {
+          ws.close()
+        } catch {
+          /* already closing */
+        }
+        resolve(msg)
+      }
+    }
+    ws.onerror = () => {
+      clearTimeout(to)
+      reject(new Error('reauth ws error'))
+    }
+  })
+
+  return {
+    authErrorCode: result.type === 'auth_error' ? (result.code ?? '') : '',
+    gotAuthOk: result.type === 'auth_ok',
+  }
 }

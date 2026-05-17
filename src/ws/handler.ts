@@ -18,9 +18,29 @@ import type {
   Submission,
   PlayerScore,
   GameConfig,
+  Role,
 } from '~/lib/types'
 
-type PeerCtx = { code: string; playerId?: string; anonId?: string; lastPing: number }
+// S2-3: a spectator socket may keep the connection alive and re-sync,
+// but never drive the game.
+const SPECTATOR_BLOCKED = new Set<ClientToServerEvent['type']>([
+  'play',
+  'gamble',
+  'pick',
+  'rank',
+  'vote',
+  'eliminate',
+  'redraw',
+  'confess_discard',
+])
+
+type PeerCtx = {
+  code: string
+  playerId?: string
+  anonId?: string
+  role?: Role
+  lastPing: number
+}
 
 async function buildSnapshot(code: string, playerId: string): Promise<SessionState | null> {
   const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
@@ -205,16 +225,17 @@ export const wsHooks = {
       if (parsed.type !== 'auth')
         return send(peer, { type: 'error', code: 'not_authorized', message: 'auth first' })
       const auth = await authenticateSocket(ctx.code, parsed)
-      if (!auth)
+      if (!auth.ok)
         return send(peer, {
           type: 'auth_error',
-          code: 'invalid_token',
-          message: 'invalid token',
+          code: auth.code,
+          message: auth.code === 'player_dropped' ? 'player dropped' : 'invalid token',
         })
       ctx.playerId = auth.playerId
       ctx.anonId = auth.anonId
       send(peer, { type: 'auth_ok' })
       const player = await state.getPlayer(ctx.code, auth.playerId)
+      ctx.role = player?.role
       if (player?.status === 'grace') {
         await state.updatePlayer(ctx.code, auth.playerId, { status: 'active' })
         await state.clearGrace(ctx.code, auth.playerId)
@@ -223,6 +244,15 @@ export const wsHooks = {
     }
 
     ctx.lastPing = Date.now()
+
+    // S2-3: spectators may ping / rejoin / leave, never act on the game.
+    if (ctx.role === 'spectator' && SPECTATOR_BLOCKED.has(parsed.type)) {
+      return send(peer, {
+        type: 'error',
+        code: 'spectator_action',
+        message: 'spectators cannot perform game actions',
+      })
+    }
 
     switch (parsed.type) {
       case 'ping':
