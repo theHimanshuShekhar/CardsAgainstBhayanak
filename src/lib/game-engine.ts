@@ -619,6 +619,20 @@ export async function migrateHost(code: string): Promise<string | null> {
   return next.id
 }
 
+// S2-1: when every human player has dropped, there is no one left to
+// resolve or advance the round. Park the session in 'paused' so the
+// 6h stale-game sweeper can later abandon it. The 'paused' status also
+// makes voidRound/migrateHost no-ops (their `status !== 'active'`
+// guard), suppressing pointless work on a deserted room.
+export async function pauseGame(code: string): Promise<void> {
+  const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
+  if (!session || session.status !== 'active') return
+  await db.update(gameSessions).set({ status: 'paused' }).where(eq(gameSessions.id, session.id))
+  await redis.hset(KEYS.game(code), 'status', 'paused')
+  await redis.expire(KEYS.game(code), ROOM_TTL_SECONDS)
+  engineLogger.info({ code }, 'all players dropped — game paused')
+}
+
 // ── House rule mechanics ──────────────────────────────────────────
 
 // Gamble submissions are stored under `${playerId}:gamble` in the submissions hash.

@@ -96,6 +96,11 @@ export type HostDropResult = {
   oldHostId: string
 }
 
+export type AllDropResult = {
+  paused: boolean
+  gameStatus: string
+}
+
 // Resolves once the Nth event of `type` has been observed on `p`. Needed
 // for multi-round drives where `waitFor` would match a stale prior round.
 function waitForNth(p: Peer, type: string, n: number, ms = 12000): Promise<any> {
@@ -607,4 +612,76 @@ export async function playHostDrop(base: string): Promise<HostDropResult> {
     expectedHostId,
     oldHostId,
   }
+}
+
+// S2-1: every player disconnects mid-game. After the grace window the
+// session must be parked in 'paused' (no one left to resolve the round)
+// rather than churning zombie void/migrate work. No WS event is emitted
+// (no clients are connected), so the pause is observed via the join
+// endpoint, which echoes the live session.status as `gameStatus`.
+export async function playAllDrop(base: string): Promise<AllDropResult> {
+  const packsJson = (await (await fetch(base + '/api/packs')).json()) as {
+    packs: { id: string; name: string }[]
+  }
+  const base0 = packsJson.packs.find((p) => /base/i.test(p.name)) ?? packsJson.packs[0]
+  if (!base0) throw new Error('no packs seeded')
+
+  const cfg = {
+    maxPlayers: 10,
+    roundsToWin: 20,
+    timer: 'Off' as const,
+    packs: [base0.id],
+    rules: [] as string[],
+  }
+  const c = await post(base, '/api/games', { username: 'host', anonId: 'a-host', config: cfg })
+  if (c.status !== 201 && c.status !== 200) throw new Error(`create ${c.status}`)
+  const code = c.json.roomCode as string
+
+  const joins = []
+  for (let i = 2; i <= 3; i++) {
+    joins.push(
+      await post(base, `/api/games/${code}/join`, {
+        username: `p${i}`,
+        anonId: `a-p${i}`,
+        role: 'player',
+      }),
+    )
+  }
+
+  const peers: Peer[] = []
+  peers.push(await connect(base, code, c.json.sessionToken, 'host'))
+  for (let i = 0; i < joins.length; i++) {
+    peers.push(await connect(base, code, joins[i]!.json.sessionToken, `p${i + 2}`))
+  }
+
+  const s = await post(base, `/api/games/${code}/start`, {}, c.json.sessionToken)
+  if (s.status !== 204) throw new Error(`start ${s.status}`)
+  await sleep(800)
+  for (const p of peers) send(p, { type: 'rejoin' })
+  await sleep(1200)
+
+  // Everyone vanishes — no keepalive, so all sockets hit grace expiry.
+  for (const p of peers) {
+    try {
+      p.ws.close()
+    } catch {
+      /* already closing */
+    }
+  }
+
+  // One grace cycle (30s + 100ms handler delay) plus margin, then poll
+  // the join endpoint until it reports the paused status.
+  await sleep(32_000)
+  let gameStatus = 'active'
+  for (let attempt = 0; attempt < 6 && gameStatus !== 'paused'; attempt++) {
+    const probe = await post(base, `/api/games/${code}/join`, {
+      username: `probe-${attempt}`,
+      anonId: `a-probe-${attempt}`,
+      role: 'spectator',
+    })
+    gameStatus = (probe.json.gameStatus as string) ?? gameStatus
+    if (gameStatus !== 'paused') await sleep(3_000)
+  }
+
+  return { paused: gameStatus === 'paused', gameStatus }
 }

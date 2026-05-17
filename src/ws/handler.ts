@@ -297,6 +297,19 @@ export const wsHooks = {
 
         const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
         if (session?.status === 'active') {
+          // S2-1: if no human players remain, no one can resolve or
+          // advance the round. Pause the session (sweeper abandons it
+          // after 6h) and skip host-migrate/czar-void — they would be
+          // no-ops on a deserted room and just churn the event loop.
+          const players = await state.getAllPlayers(code)
+          const activeHumans = players.filter(
+            (p) => p.status === 'active' && p.role === 'player' && !p.isRando,
+          )
+          if (activeHumans.length === 0) {
+            await engine.pauseGame(code)
+            return
+          }
+
           // S2-1: if the dropped player was the host, hand the host role
           // to the longest-present active player so host-only actions
           // (Happy Ending, etc.) keep working.

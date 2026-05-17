@@ -1,7 +1,14 @@
 import { test, expect } from '@playwright/test'
 import { HANDLES } from '../fixtures/handles'
 import { createGame, joinGame } from '../helpers'
-import { playRound, playGodmode, playHappyEnding, playCzarDrop, playHostDrop } from '../protocol'
+import {
+  playRound,
+  playGodmode,
+  playHappyEnding,
+  playCzarDrop,
+  playHostDrop,
+  playAllDrop,
+} from '../protocol'
 
 const BASE = process.env['CAB_E2E_BASE'] ?? 'http://localhost:3000'
 
@@ -76,6 +83,12 @@ test('S2-1: host drop migrates the host role (protocol)', async () => {
     r.expectedHostId,
   )
   expect(r.newHostId, 'new host is not the dropped host').not.toBe(r.oldHostId)
+})
+
+test('S2-1: all players dropping pauses the game (protocol)', async () => {
+  test.setTimeout(70_000)
+  const r = await playAllDrop(BASE)
+  expect(r.paused, `every player gone ⇒ session paused (was ${r.gameStatus})`).toBe(true)
 })
 
 // UI-driven coverage. Blocked until the create-screen packs/rules UI
