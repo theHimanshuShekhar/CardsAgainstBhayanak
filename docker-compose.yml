@@ -75,6 +75,7 @@ services:
       # omits NODE_ENV still enforces rate limiting (enforceRateLimit gates
       # on 'production'). Local dev uses `pnpm dev`, not this compose.
       NODE_ENV: ${NODE_ENV:-production}
+      AXIOM_URL: ${AXIOM_URL:-}
       AXIOM_TOKEN: ${AXIOM_TOKEN:-}
       AXIOM_DATASET: ${AXIOM_DATASET:-}
       POSTHOG_API_KEY: ${POSTHOG_API_KEY:-}

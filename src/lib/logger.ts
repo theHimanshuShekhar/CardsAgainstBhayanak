@@ -12,6 +12,7 @@ function buildTransport(): PinoTransport | undefined {
       options: {
         dataset: process.env['AXIOM_DATASET'] ?? 'cab-prod',
         token: process.env['AXIOM_TOKEN'],
+        url: process.env['AXIOM_URL'],
       },
     }
   }
