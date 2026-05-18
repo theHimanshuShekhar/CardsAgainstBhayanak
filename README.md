@@ -27,16 +27,21 @@ pnpm dev
 
 ## Environment variables
 
-Copy `.env.example` to `.env` and fill in:
+For the **full Docker stack**, copy `.env.example` to `.env`. `DATABASE_URL`
+and `REDIS_URL` are derived inside `docker-compose.yml` — don't set them.
+`compose up` fails fast unless the two required vars are set:
 
-| Variable                           | Purpose                    |
-| ---------------------------------- | -------------------------- |
-| `DATABASE_URL`                     | Postgres connection string |
-| `REDIS_URL`                        | Redis/Valkey URL           |
-| `SESSION_SECRET`                   | HMAC secret (≥32 chars)    |
-| `PORT`                             | Default `3000`             |
-| `AXIOM_TOKEN` + `AXIOM_DATASET`    | Log shipping (prod only)   |
-| `POSTHOG_API_KEY` + `POSTHOG_HOST` | Analytics                  |
+| Variable                           | Required | Purpose                                       |
+| ---------------------------------- | -------- | --------------------------------------------- |
+| `POSTGRES_PASSWORD`                | ✅       | Postgres password; also feeds `DATABASE_URL`  |
+| `SESSION_SECRET`                   | ✅       | HMAC secret for session tokens (≥32 chars)    |
+| `PORT`                             |          | Host/container port (default `3000`)          |
+| `NODE_ENV`                         |          | Default `production` (enforces rate limiting) |
+| `AXIOM_TOKEN` + `AXIOM_DATASET`    |          | Log shipping (prod only)                      |
+| `POSTHOG_API_KEY` + `POSTHOG_HOST` |          | Product analytics / replay (prod only)        |
+
+For **local `pnpm dev`** against `docker compose up -d postgres redis`, set
+`DATABASE_URL`, `REDIS_URL`, and `SESSION_SECRET` directly in your shell/`.env`.
 
 ## Commands
 
@@ -55,8 +60,16 @@ Copy `.env.example` to `.env` and fill in:
 
 ## Production
 
+A single `docker-compose.yml` serves dev and prod (no separate prod compose
+file). Provide a `.env` (see above; `SESSION_SECRET` ≥32 chars —
+`openssl rand -hex 32`), then:
+
 ```bash
-docker compose -f docker-compose.prod.yml up -d
+docker compose up -d
 ```
+
+`NODE_ENV` defaults to `production` (rate limiting enforced). All three
+services have healthchecks; the app is `build: .` — rebuild with
+`docker compose build app && docker compose up -d app` after source changes.
 
 Cloudflare Tunnel is managed externally — see `SPEC.md § Deployment` for details.

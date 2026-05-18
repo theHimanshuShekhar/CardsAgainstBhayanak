@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A real-time multiplayer Cards Against Humanity clone, **Cards Against Bhayanak**. Jackbox-style: no accounts, 6-char room codes. Rotating Czar reads a black prompt, others submit white cards, funniest wins an Awesome Point. First to N points wins. Implements all 8 official 2014 CAH rulebook house rules.
 
-**Status:** pre-implementation. Spec is complete; no source code yet. The next step is the `writing-plans` skill to convert the spec into an execution plan.
+**Status:** implemented. Backend + frontend are built end-to-end and the full Playwright E2E suite is green. `AUDIT.md` tracks the S0–S3 / N-\* gap backlog (worked on branch `fix/audit-priority-fixes`) — treat it as the authority for what's fixed vs. deferred. Verify against current code before asserting; the spec (`SPEC.md`) remains canonical for intended behaviour.
 
 ## Reference materials
 
@@ -408,7 +408,7 @@ Room code generation: `crypto.randomInt(0, 31)` per char, alphabet `ABCDEFGHJKMN
 
 ---
 
-## Project file structure (target — does not exist yet)
+## Project file structure
 
 The spec § Project File Structure is authoritative. Key directories:
 
@@ -421,11 +421,11 @@ The spec § Project File Structure is authoritative. Key directories:
 - `src/db/{schema,index}.ts` — Drizzle
 - `src/styles.css` — single CSS file
 - `tests/e2e/` — Playwright specs; `tests/fixtures/{handles,expected-outcomes}.ts`
-- `Dockerfile`, `docker-compose.yml`, `docker-compose.prod.yml`
+- `Dockerfile`, `docker-compose.yml` (single file for dev + prod; no separate prod compose), `.env.example`
 
 ---
 
-## Commands (target — will exist once `package.json` is created)
+## Commands
 
 | Command                               | Purpose                                      |
 | ------------------------------------- | -------------------------------------------- |
@@ -463,4 +463,4 @@ These are the things the spec was deliberate about — don't "improve" them with
 
 ## Memory
 
-Auto-memory lives in `/home/hshekhar/.claude/projects/-home-hshekhar-code-CardsAgainstBhayanak/memory/`. The existing `project_overview.md` predates the current spec and references files that don't exist yet. **Trust the spec over memory** if they disagree.
+Auto-memory lives in `/home/hshekhar/.claude/projects/-home-hshekhar-code-CardsAgainstBhayanak/memory/` (index: `MEMORY.md`; current state: `project_status.md`). **Trust `SPEC.md` over memory** if they disagree — memory is point-in-time and may lag the code.
