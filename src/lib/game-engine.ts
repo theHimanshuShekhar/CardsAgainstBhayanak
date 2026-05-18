@@ -1088,7 +1088,11 @@ export async function gamble(code: string, playerId: string): Promise<void> {
   }
   await state.publishEvent(code, { type: 'player_gambled', playerId })
   const gamblerDistinctId = await distinctIdFor(code, playerId)
-  captureServerEvent(gamblerDistinctId, 'cab_gambled', { roomCode: code, playerId })
+  captureServerEvent(gamblerDistinctId, 'cab_gambled', {
+    roomCode: code,
+    round: roundRow.roundNum,
+    playerId,
+  })
   captureServerEvent(gamblerDistinctId, 'cab_rule_triggered', {
     roomCode: code,
     playerId,
