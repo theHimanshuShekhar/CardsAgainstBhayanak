@@ -3,7 +3,6 @@ import { eq, inArray, desc } from 'drizzle-orm'
 import { db } from '~/db'
 import { blackCards, whiteCards, gameSessions, gameRounds } from '~/db/schema'
 import { wsLogger } from '~/lib/logger'
-import { captureServerEvent, distinctIdFor } from '~/lib/posthog-server'
 import { authenticateSocket } from './auth'
 import { redis, getSubscriber, KEYS } from '~/lib/redis'
 import * as engine from '~/lib/game-engine'
@@ -337,13 +336,11 @@ export const wsHooks = {
         await engine.triggerHappyEnding(ctx.code, ctx.playerId)
         return
       case 'leave':
-        await state.updatePlayer(ctx.code, ctx.playerId, { status: 'dropped' })
-        await state.publishEvent(ctx.code, { type: 'player_left', playerId: ctx.playerId })
-        captureServerEvent(await distinctIdFor(ctx.code, ctx.playerId), 'cab_player_dropped', {
-          roomCode: ctx.code,
-          playerId: ctx.playerId,
-          reason: 'leave',
-        })
+        // S2-5: explicit leave is immediate — no 30s grace. Stop
+        // broadcasting to this peer and run the full drop path now;
+        // the subsequent socket `close` no-ops (already 'dropped').
+        roomPeers.get(ctx.code)?.delete(peer)
+        await engine.dropPlayer(ctx.code, ctx.playerId, 'leave')
         return
     }
   },
@@ -358,57 +355,23 @@ export const wsHooks = {
     const playerId = ctx.playerId
     const code = ctx.code
 
+    // S2-5: an explicit `leave` already dropped this player. Don't
+    // resurrect them into 'grace' or schedule a duplicate drop.
+    const existing = await state.getPlayer(code, playerId)
+    if (!existing || existing.status === 'dropped') {
+      wsLogger.info({ code, playerId }, 'peer closed (already dropped)')
+      return
+    }
+
     await state.updatePlayer(code, playerId, { status: 'grace' })
     await state.setGrace(code, playerId, TIMING.GRACE_WINDOW_MS)
 
+    // Grace window: drop only if the player never reconnected (auth
+    // flips 'grace' → 'active'). dropPlayer runs the void/migrate/pause
+    // path and is idempotent.
     setTimeout(async () => {
       const player = await state.getPlayer(code, playerId)
-      if (player?.status === 'grace') {
-        await state.updatePlayer(code, playerId, { status: 'dropped' })
-        await state.publishEvent(code, { type: 'player_left', playerId })
-        captureServerEvent(await distinctIdFor(code, playerId), 'cab_player_dropped', {
-          roomCode: code,
-          playerId,
-          reason: 'grace',
-        })
-
-        const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
-        if (session?.status === 'active') {
-          // S2-1: if no human players remain, no one can resolve or
-          // advance the round. Pause the session (sweeper abandons it
-          // after 6h) and skip host-migrate/czar-void — they would be
-          // no-ops on a deserted room and just churn the event loop.
-          const players = await state.getAllPlayers(code)
-          const activeHumans = players.filter(
-            (p) => p.status === 'active' && p.role === 'player' && !p.isRando,
-          )
-          if (activeHumans.length === 0) {
-            await engine.pauseGame(code)
-            return
-          }
-
-          // S2-1: if the dropped player was the host, hand the host role
-          // to the longest-present active player so host-only actions
-          // (Happy Ending, etc.) keep working.
-          if (session.hostPlayerId === playerId) {
-            await engine.migrateHost(code)
-          }
-
-          // S2-1: if the dropped player was the Czar of a live round, it
-          // can no longer be resolved — void it and rotate to the next
-          // Czar. phase null/'transition' ⇒ no round is mid-flight.
-          const [roundRow] = await db
-            .select()
-            .from(gameRounds)
-            .where(eq(gameRounds.sessionId, session.id))
-            .orderBy(desc(gameRounds.roundNum))
-            .limit(1)
-          const phase = await state.getPhase(code)
-          if (roundRow?.czarPlayerId === playerId && phase && phase !== 'transition') {
-            await engine.voidRound(code, 'czar_dropped')
-          }
-        }
-      }
+      if (player?.status === 'grace') await engine.dropPlayer(code, playerId, 'grace')
     }, TIMING.GRACE_WINDOW_MS + 100)
 
     wsLogger.info({ code, playerId }, 'peer closed')

@@ -751,6 +751,64 @@ export async function resumeIfReady(code: string): Promise<void> {
   await voidRound(code, 'resumed after pause')
 }
 
+// S2-5/S2-6: the canonical "remove a player from a live game" path,
+// shared by the grace-timeout drop (WS close), the explicit WS `leave`
+// message, and the HTTP /leave beacon. Idempotent — a `leave` followed
+// by the socket close (or a double beacon) must not double-emit
+// player_left or re-void/re-migrate/re-pause. This is the logic the
+// close-handler grace timeout used to run inline.
+export async function dropPlayer(
+  code: string,
+  playerId: string,
+  reason: 'grace' | 'leave',
+): Promise<void> {
+  const player = await state.getPlayer(code, playerId)
+  if (!player || player.status === 'dropped') return
+
+  await state.updatePlayer(code, playerId, { status: 'dropped' })
+  await state.publishEvent(code, { type: 'player_left', playerId })
+  captureServerEvent(await distinctIdFor(code, playerId), 'cab_player_dropped', {
+    roomCode: code,
+    playerId,
+    reason,
+  })
+
+  const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
+  if (session?.status !== 'active') return
+
+  // No human left to resolve/advance the round → pause (the 6h sweeper
+  // abandons it later). Skip migrate/void: no-ops on a deserted room
+  // that would just churn the event loop.
+  const players = await state.getAllPlayers(code)
+  const activeHumans = players.filter(
+    (p) => p.status === 'active' && p.role === 'player' && !p.isRando,
+  )
+  if (activeHumans.length === 0) {
+    await pauseGame(code)
+    return
+  }
+
+  // Host left → hand the role to the longest-present active player so
+  // host-only actions (Happy Ending, etc.) keep working.
+  if (session.hostPlayerId === playerId) {
+    await migrateHost(code)
+  }
+
+  // Czar of a live round left → it can no longer be resolved; void it
+  // and rotate to the next Czar. phase null/'transition' ⇒ no round is
+  // mid-flight, so nothing to void.
+  const [roundRow] = await db
+    .select()
+    .from(gameRounds)
+    .where(eq(gameRounds.sessionId, session.id))
+    .orderBy(desc(gameRounds.roundNum))
+    .limit(1)
+  const phase = await state.getPhase(code)
+  if (roundRow?.czarPlayerId === playerId && phase && phase !== 'transition') {
+    await voidRound(code, 'czar_dropped')
+  }
+}
+
 // ── House rule mechanics ──────────────────────────────────────────
 
 // Gamble submissions are stored under `${playerId}:gamble` in the submissions hash.
