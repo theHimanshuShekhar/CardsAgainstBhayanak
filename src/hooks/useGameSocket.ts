@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { TIMING } from '~/lib/timing'
 import { captureEvent } from '~/lib/posthog-client'
 import type { ServerToClientEvent, ClientToServerEvent } from '~/lib/types'
@@ -91,12 +91,16 @@ export function useGameSocket(code: string | null, sessionToken: string | null, 
     if (!authed) return
     wsRef.current?.send(JSON.stringify(event))
   }
-  const on = (handler: (e: ServerToClientEvent) => void) => {
+  // Stable identity: the consumer's subscription effect must not tear down
+  // and re-add its handler every render. A re-subscribe has a window between
+  // passive-effect cleanup and setup where handlersRef is empty, and any WS
+  // frame arriving then (e.g. a staggered card_revealed) is silently dropped.
+  const on = useCallback((handler: (e: ServerToClientEvent) => void) => {
     handlersRef.current.push(handler)
     return () => {
       handlersRef.current = handlersRef.current.filter((h) => h !== handler)
     }
-  }
+  }, [])
 
   return { connected, authed, send, on }
 }

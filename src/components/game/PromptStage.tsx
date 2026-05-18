@@ -12,7 +12,11 @@ export function PromptStage({ prompt, phase, czarName, submissions }: Props) {
   const isWaiting = phase === 'waiting'
   const isPicking = phase === 'picking'
 
-  const submittedCount = submissions.length
+  // filter(Boolean): a stale card_revealed landing after round_started
+  // cleared submissions[] leaves a sparse hole; rendering it would crash
+  // every client via the error boundary — degrade, don't white-screen.
+  const present = submissions.filter(Boolean)
+  const submittedCount = present.length
 
   return (
     <div className="stage-prompt stage-prompt-hero">
@@ -47,7 +51,7 @@ export function PromptStage({ prompt, phase, czarName, submissions }: Props) {
             )}
           </div>
           <div className="pick-progress">
-            {submissions.map((s, i) => (
+            {present.map((s, i) => (
               <div key={i} className={`pick-pip ${isWaiting ? 'on' : ''}`}>
                 <span className="pick-pip-letter">
                   {(s.playerId ?? '?').slice(0, 1).toUpperCase()}

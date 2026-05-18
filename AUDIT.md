@@ -119,6 +119,44 @@ winnerId` — compares an index-string submissionId to a _playerId_.
   `reconnect.spec.ts`'s grace-window test got an explicit 75s `setTimeout`
   (the 30s default cap can't contain a 30s grace wait).
 
+- **N-12 (S2, product bug — fixed):** the 6-player golden path crashed every
+  client at a round transition with `TypeError: Cannot read properties of
+undefined (reading 'submissionId')` in `SubmissionsGrid`. Root cause was
+  client-side WS event loss, not the engine: `useGameSocket.on` was a fresh
+  closure each render and `session.tsx`'s socket effect listed both `on` and
+  `round` in its deps, so it tore the handler down and re-added it on every
+  render and every round. React runs passive-effect cleanup _before_ setup;
+  a `card_revealed` frame arriving in that gap hit an empty `handlersRef`
+  and was silently dropped. A dropped reveal made the client index sequence
+  non-contiguous, so `next[event.submissionIndex] = …` left an `undefined`
+  hole, and `submissions.flatMap(s => s.submissionId…)` threw on every
+  client → error boundary wedged all players. 6 players amplified it (5
+  `card_revealed`/round vs 2 ⇒ far likelier to land in the teardown window);
+  N-10 adding `round` to the deps raised the re-subscribe cadence. Fixed at
+  source: `on` is now a stable `useCallback`, and `session.tsx` reads
+  `round` via a ref so the subscription is created once and never torn down
+  mid-game. Defense-in-depth: `SubmissionsGrid` filters falsy submissions so
+  a lost frame degrades instead of white-screening every client. Protocol
+  tests never hit it (no browser/React effects).
+
+- **N-13 (S2, product bug — fixed):** after N-12 the golden path still
+  crashed a few rounds later with `TypeError: Cannot read properties of
+undefined (reading 'playerId')` in `PromptStage` — a distinct, server-side
+  root cause. `pick` is not phase-gated (`ws/handler.ts`), so the Czar's
+  pick runs `pickWinner → endRound → startRound(next)` immediately, even
+  while `checkRoundReady`'s reveal loop is still `await sleep`-ing between
+  staggered `card_revealed` emits for the just-finished round. The loop kept
+  publishing `card_revealed` after the round advanced; those stale frames
+  arrived after the client's `round_started` reset `submissions = []`, so
+  `next[submissionIndex] = …` rebuilt a sparse array and `PromptStage`'s
+  pick-pip `submissions.map(s => s.playerId…)` threw on every client. Fixed
+  at source: the reveal loop captures its `subOrderKey` value and bails
+  before each emit once that key no longer matches (endRound deletes it; a
+  fresh round rewrites it) — the loop can no longer outlive its round.
+  Defense-in-depth: `PromptStage` filters falsy submissions, matching the
+  N-12 `SubmissionsGrid` guard. With both fixes, six consecutive 6-player
+  games (including pick-2 rounds) and the un-skipped golden path run clean.
+
 ### Revised scope for remaining items
 
 | Item                        | Original sketch         | Revised reality                                                                                                                 | Est. surface                             |

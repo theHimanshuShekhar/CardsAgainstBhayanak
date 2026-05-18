@@ -32,7 +32,9 @@ export function SubmissionsGrid({
 
       {phase === 'judging' && (
         <div className="subs-grid subs-grid-large">
-          {submissions.flatMap((s, i) =>
+          {/* filter(Boolean): a lost reveal frame must never crash every
+              client via the error boundary — degrade, don't white-screen. */}
+          {submissions.filter(Boolean).flatMap((s, i) =>
             s.fills.map((_, fi) => (
               <div
                 key={`${i}-${fi}`}
@@ -51,7 +53,7 @@ export function SubmissionsGrid({
 
       {phase === 'reveal' && (
         <div className="subs-grid subs-grid-large">
-          {submissions.flatMap((s, i) => {
+          {submissions.filter(Boolean).flatMap((s, i) => {
             const revealed = i < revealIndex
             const isWinner = s.submissionId === winnerId
             const isLoser = winnerId != null && !isWinner

@@ -305,7 +305,8 @@ export async function checkRoundReady(code: string): Promise<void> {
   // Permute storage keys once; persist so pick/vote/eliminate and the
   // rejoin snapshot all agree on index → submission.
   const order = shuffle(Object.keys(submissions))
-  await redis.set(subOrderKey(code), JSON.stringify(order), 'EX', ROOM_TTL_SECONDS)
+  const orderJson = JSON.stringify(order)
+  await redis.set(subOrderKey(code), orderJson, 'EX', ROOM_TTL_SECONDS)
 
   await state.setPhase(code, 'reveal')
   await state.publishEvent(code, { type: 'reveal_start' })
@@ -313,6 +314,15 @@ export async function checkRoundReady(code: string): Promise<void> {
     const sub = submissions[order[i]!]
     if (!sub) continue
     await sleep(REVEAL_STAGGER)
+    // `pick` is not phase-gated: pickWinner → endRound can resolve and
+    // advance the round while this loop is still sleeping between
+    // staggered reveals. endRound deletes subOrderKey; a fresh round
+    // rewrites it with a new order. Either way, emitting more
+    // card_revealed frames for a finished round lands them after the
+    // client's round_started cleared submissions[], producing a sparse
+    // array that crashes the next round's render. Bail the instant this
+    // reveal sequence is no longer the live one.
+    if ((await redis.get(subOrderKey(code))) !== orderJson) return
     await redis.set(revealedKey(code), String(i + 1), 'EX', ROOM_TTL_SECONDS)
     await state.publishEvent(code, { type: 'card_revealed', submissionIndex: i, fills: sub.fills })
   }

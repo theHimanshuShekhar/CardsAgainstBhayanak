@@ -33,6 +33,12 @@ function SessionScreen() {
   // before WINNER_PAUSE elapses, that stale timer would clobber the new
   // round's phase — hold it so round_started / unmount can cancel it.
   const winnerTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Read inside the socket handler without putting `round` in the effect
+  // deps — re-subscribing mid-game drops WS frames in the cleanup→setup gap.
+  const roundRef = useRef(round)
+  useEffect(() => {
+    roundRef.current = round
+  }, [round])
 
   const myId = session?.playerId ?? ''
   const isCzar = czarId === myId
@@ -117,7 +123,7 @@ function SessionScreen() {
             finalScores: event.finalScores,
             winnerId: event.winnerId,
             mode: event.mode,
-            totalRounds: round,
+            totalRounds: roundRef.current,
           }),
         )
         void navigate({ to: '/games/$code/end', params: { code } })
@@ -131,7 +137,7 @@ function SessionScreen() {
       off()
       if (winnerTimer.current) clearTimeout(winnerTimer.current)
     }
-  }, [on, code, navigate, setSession, myId, round])
+  }, [on, code, navigate, setSession, myId])
 
   const handleToggle = useCallback(
     (cardId: string) => {
