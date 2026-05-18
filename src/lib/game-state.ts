@@ -211,6 +211,40 @@ export async function getPhase(code: string): Promise<GamePhase | null> {
   return val ? (val as GamePhase) : null
 }
 
+// S2-9: persist the round outcome so a reconnect during the post-resolve
+// 'transition' window (and the Survival turn / Serious Business ranking)
+// can be restored in the snapshot instead of being lost.
+export async function setRoundWinner(code: string, winnerId: string): Promise<void> {
+  await redis.hset(KEYS.round(code), 'winnerId', winnerId)
+  await redis.expire(KEYS.round(code), ROOM_TTL_SECONDS)
+}
+
+export async function getRoundWinner(code: string): Promise<string | null> {
+  const val = await redis.hget(KEYS.round(code), 'winnerId')
+  return val || null
+}
+
+export async function setRoundRanking(code: string, ranking: Submission[]): Promise<void> {
+  await redis.hset(KEYS.round(code), 'ranking', JSON.stringify(ranking))
+  await redis.expire(KEYS.round(code), ROOM_TTL_SECONDS)
+}
+
+export async function getRoundRanking(code: string): Promise<Submission[] | null> {
+  const val = await redis.hget(KEYS.round(code), 'ranking')
+  return val ? (JSON.parse(val) as Submission[]) : null
+}
+
+export async function getEliminationTurn(code: string): Promise<string | null> {
+  const val = await redis.hget(KEYS.round(code), 'eliminationTurnPlayerId')
+  return val || null
+}
+
+// Wipe per-round resolution fields so a fresh round's snapshot doesn't
+// surface the previous round's winner / ranking / elimination turn.
+export async function clearRoundResolution(code: string): Promise<void> {
+  await redis.hdel(KEYS.round(code), 'winnerId', 'ranking', 'eliminationTurnPlayerId')
+}
+
 const skippedKey = (code: string) => `${KEYS.round(code)}:skipped`
 
 export async function addSkippedPlayer(code: string, playerId: string): Promise<void> {

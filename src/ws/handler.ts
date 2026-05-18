@@ -101,15 +101,22 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
   const expectedSubmitters = activePlayers.filter((p) => p.id !== czarId && !p.isRando)
   const skippedPlayers = await state.getSkippedPlayers(code)
 
-  let phase: GamePhase = 'picking'
-  if (
-    submissions.length > 0 &&
-    submissions.length + skippedPlayers.length >= expectedSubmitters.length
-  ) {
-    if (config.rules.includes('godmode')) phase = 'waiting'
-    else if (config.rules.includes('survival')) phase = 'eliminating'
-    else if (config.rules.includes('serious_business')) phase = 'ranking'
-    else phase = 'judging'
+  // S2-9: the engine persists the authoritative phase at every
+  // transition (state.setPhase). Trust it so a reconnect during
+  // reveal/judging/transition resumes correctly; the submission-count
+  // heuristic is only a defensive fallback for a room with no phase yet.
+  let phase: GamePhase | null = await state.getPhase(code)
+  if (!phase) {
+    phase = 'picking'
+    if (
+      submissions.length > 0 &&
+      submissions.length + skippedPlayers.length >= expectedSubmitters.length
+    ) {
+      if (config.rules.includes('godmode')) phase = 'waiting'
+      else if (config.rules.includes('survival')) phase = 'eliminating'
+      else if (config.rules.includes('serious_business')) phase = 'ranking'
+      else phase = 'judging'
+    }
   }
 
   let voteTally: Record<string, number> | undefined
@@ -121,6 +128,18 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
     }
   }
 
+  // S2-9: the round outcome is persisted at resolution so a reconnect
+  // during the post-resolve 'transition' window (and the Survival
+  // elimination turn / Serious Business ranking) is restored instead of
+  // being lost. clearRoundResolution wipes these at the next startRound.
+  const winnerId = await state.getRoundWinner(code)
+  const eliminationTurnPlayerId = config.rules.includes('survival')
+    ? ((await state.getEliminationTurn(code)) ?? undefined)
+    : undefined
+  const ranking = config.rules.includes('serious_business')
+    ? ((await state.getRoundRanking(code)) ?? undefined)
+    : undefined
+
   return {
     phase,
     round: roundRow.roundNum,
@@ -130,8 +149,10 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
     submissions,
     scores,
     revealIndex,
-    winnerId: null,
+    winnerId,
     ...(voteTally ? { voteTally } : {}),
+    ...(eliminationTurnPlayerId ? { eliminationTurnPlayerId } : {}),
+    ...(ranking ? { ranking } : {}),
   }
 }
 

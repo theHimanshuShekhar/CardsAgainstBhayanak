@@ -156,6 +156,10 @@ export async function startRound(
   }
 
   await state.clearSkippedPlayers(code)
+  // S2-9: drop the prior round's winner/ranking/elimination turn so a
+  // reconnect during this round's picking phase can't surface a stale
+  // outcome in the snapshot.
+  await state.clearRoundResolution(code)
   await state.setCurrentRound(code, round)
   await state.setPhase(code, 'picking')
 
@@ -462,6 +466,7 @@ export async function pickWinner(
     isRando: p.isRando,
   }))
 
+  await state.setRoundWinner(code, winnerPlayerId)
   await state.publishEvent(code, {
     type: 'round_won',
     winnerId: winnerPlayerId,
@@ -803,6 +808,7 @@ export async function castVote(code: string, voterId: string, submissionId: stri
     isRando: p.isRando,
   }))
 
+  await state.setRoundWinner(code, winnerPlayerId)
   await state.publishEvent(code, {
     type: 'round_won',
     winnerId: winnerPlayerId,
@@ -857,6 +863,7 @@ export async function eliminateSubmission(
       isJudge: false,
       isRando: p.isRando,
     }))
+    await state.setRoundWinner(code, winnerPlayerId)
     await state.publishEvent(code, {
       type: 'round_won',
       winnerId: winnerPlayerId,
@@ -914,6 +921,7 @@ export async function applyRanking(code: string, czarId: string, ranking: string
     rankedSubmissions.push({ ...submissions[key], submissionId: sid, rank: (i + 1) as 1 | 2 | 3 })
   }
 
+  await state.setRoundRanking(code, rankedSubmissions)
   await state.publishEvent(code, { type: 'round_ranked', ranking: rankedSubmissions, scoresDelta })
   captureServerEvent(await distinctIdForHost(code), 'cab_round_ranked', {
     roomCode: code,
