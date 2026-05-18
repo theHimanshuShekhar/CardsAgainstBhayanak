@@ -712,6 +712,45 @@ export async function pauseGame(code: string): Promise<void> {
   engineLogger.info({ code }, 'all players dropped — game paused')
 }
 
+// S2-8: pauseGame parks a deserted room; nothing un-parks it, so a
+// rejoiner is stranded until the 6h sweeper abandons it. A fresh joiner
+// arrives via POST /join as a *new* player (their old session was
+// cleared on player_dropped), so join.ts calls this after addPlayer.
+// Resume only once ≥3 present humans exist — the same minimum start.ts
+// enforces to begin a game — then activate anyone the pause/queue path
+// left without a hand or a czarOrder slot and void the stuck round (its
+// Czar is a dropped player and can never resolve it) so a present
+// player Czars a fresh one.
+export async function resumeIfReady(code: string): Promise<void> {
+  const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
+  if (!session || session.status !== 'paused') return
+
+  const players = await state.getAllPlayers(code)
+  const humans = players.filter((p) => p.role === 'player' && !p.isRando && p.status !== 'dropped')
+  if (humans.length < 3) return
+
+  // Activate every present human the pause/queue path left un-set-up
+  // (the new joiner; any stranded queued player). Mirrors endRound's
+  // queued→active activation: Redis-only, like the rest of the engine.
+  const inOrder = new Set(await state.getCzarOrder(code))
+  for (const p of humans) {
+    if (p.status !== 'active') await state.updatePlayer(code, p.id, { status: 'active' })
+    if (!inOrder.has(p.id)) {
+      await state.appendCzarOrder(code, p.id)
+      await state.setHand(code, p.id, await state.drawCards(code, 'white', 10))
+    }
+  }
+
+  // Flip active *before* voidRound — it (and startRound's downstream
+  // helpers) no-op unless the session is 'active'.
+  await db.update(gameSessions).set({ status: 'active' }).where(eq(gameSessions.id, session.id))
+  await redis.hset(KEYS.game(code), 'status', 'active')
+  await redis.expire(KEYS.game(code), ROOM_TTL_SECONDS)
+  engineLogger.info({ code, humans: humans.length }, 'game resumed from pause')
+
+  await voidRound(code, 'resumed after pause')
+}
+
 // ── House rule mechanics ──────────────────────────────────────────
 
 // Gamble submissions are stored under `${playerId}:gamble` in the submissions hash.

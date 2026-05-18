@@ -3,13 +3,14 @@ import { db } from '~/db'
 import { gameSessions, gamePlayers } from '~/db/schema'
 import { redis, KEYS } from '~/lib/redis'
 import * as state from '~/lib/game-state'
+import * as engine from '~/lib/game-engine'
 import { signSessionToken } from '~/lib/session-token'
 import { enforceRateLimit } from '~/lib/rate-limit'
 import { JoinGameSchema, errorResponse, getClientIp } from '~/lib/api-helpers'
 import { captureServerEvent } from '~/lib/posthog-server'
 import { apiLogger } from '~/lib/logger'
 import { eq, and, sql } from 'drizzle-orm'
-import type { GameConfig } from '~/lib/types'
+import type { GameConfig, SessionStatus } from '~/lib/types'
 
 export const Route = createFileRoute('/api/games/$code/join')({
   server: {
@@ -67,12 +68,12 @@ export const Route = createFileRoute('/api/games/$code/join')({
           )
         if (dup) return errorResponse(409, 'duplicate_username', 'Handle taken in this room')
 
+        // S2-8: a 'paused' session is deserted — a joiner must come in
+        // 'active' (not 'queued' behind nobody) so resumeIfReady can
+        // restart the round. Only a live 'active' game queues mid-game
+        // joiners for round_end activation.
         const status =
-          role === 'spectator'
-            ? 'spectator'
-            : session.status === 'active' || session.status === 'paused'
-              ? 'queued'
-              : 'active'
+          role === 'spectator' ? 'spectator' : session.status === 'active' ? 'queued' : 'active'
 
         const [player] = await db
           .insert(gamePlayers)
@@ -102,6 +103,19 @@ export const Route = createFileRoute('/api/games/$code/join')({
         await state.addPlayer(code, gamePlayer)
         await state.publishEvent(code, { type: 'player_joined', player: gamePlayer })
 
+        // S2-8: this join may make a paused room playable again. resume
+        // flips it back to 'active' and re-arms a round, so report the
+        // post-resume status to the client.
+        let gameStatus: SessionStatus = session.status
+        if (role === 'player' && session.status === 'paused') {
+          await engine.resumeIfReady(code)
+          const [fresh] = await db
+            .select({ status: gameSessions.status })
+            .from(gameSessions)
+            .where(eq(gameSessions.id, session.id))
+          if (fresh) gameStatus = fresh.status
+        }
+
         const token = await signSessionToken({ playerId: player.id, roomCode: code })
 
         captureServerEvent(parsed.data.anonId, 'cab_game_joined', {
@@ -115,7 +129,7 @@ export const Route = createFileRoute('/api/games/$code/join')({
           playerId: player.id,
           sessionToken: token,
           status,
-          gameStatus: session.status,
+          gameStatus,
         })
       },
     },
