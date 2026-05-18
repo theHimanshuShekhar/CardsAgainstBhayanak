@@ -44,12 +44,16 @@ export async function startGame(code: string): Promise<void> {
 
   await buildDecks(code, config.packs)
 
+  // Ordered by joined_at: czarOrder is built from this and the spec
+  // requires the stable rotation to follow join order (SPEC.md § Czar
+  // selection).
   const activePlayers = await db
     .select()
     .from(gamePlayers)
     .where(
       sql`${gamePlayers.sessionId} = ${session.id} AND ${gamePlayers.role} = 'player' AND ${gamePlayers.status} = 'active'`,
     )
+    .orderBy(gamePlayers.joinedAt)
 
   if (config.rules.includes('rando')) {
     const [rando] = await db
@@ -80,12 +84,16 @@ export async function startGame(code: string): Promise<void> {
   }
 
   const playerIds = activePlayers.map((p) => p.id)
-  await state.setCzarOrder(code, playerIds)
+  // czarOrder excludes Rando (synthetic, can't read prompts) and is the
+  // *stable* rotation list — never rebuilt from a live array (SPEC.md
+  // § Czar selection). playerIds (incl. Rando) is only for hand dealing.
+  const czarOrderIds = activePlayers.filter((p) => !p.isRando).map((p) => p.id)
+  await state.setCzarOrder(code, czarOrderIds)
   await dealStartingHands(code, playerIds)
 
   // Round-1 Czar is a random offset into czarOrder; persist it so the
   // rotation is stable and seeded-RNG runs are deterministic.
-  const firstCzarIdx = chooseFirstCzar(activePlayers.length)
+  const firstCzarIdx = chooseFirstCzar(czarOrderIds.length)
   await redis.hset(KEYS.game(code), 'czarStartOffset', String(firstCzarIdx))
   await db.update(gameSessions).set({ status: 'active' }).where(eq(gameSessions.id, session.id))
 
@@ -125,17 +133,26 @@ export async function startRound(
   if (forceCzarId !== undefined) {
     czarId = forceCzarId
   } else if (!config.rules.includes('godmode')) {
+    // Traverse the *stable* czarOrder — never rebuild it from a live
+    // filtered array (that shifts every player's turn when anyone drops).
+    // Land on czarOrder[(offset + round - 1) % len], then step forward
+    // past players who are `dropped`, keeping every other player's turn
+    // fixed (SPEC.md § Czar selection — Drops).
     const order = await state.getCzarOrder(code)
-    const allPlayers = await state.getAllPlayers(code)
-    const activeOrder = order.filter((pid) => {
-      const p = allPlayers.find((x) => x.id === pid)
-      return p && p.status === 'active' && !p.isRando
-    })
-    const offset = Number(await redis.hget(KEYS.game(code), 'czarStartOffset')) || 0
-    czarId =
-      activeOrder.length > 0
-        ? (activeOrder[(offset + round - 1) % activeOrder.length] ?? null)
-        : null
+    if (order.length > 0) {
+      const allPlayers = await state.getAllPlayers(code)
+      const dropped = (pid: string) => allPlayers.find((x) => x.id === pid)?.status === 'dropped'
+      const offset = Number(await redis.hget(KEYS.game(code), 'czarStartOffset')) || 0
+      let idx = (offset + round - 1) % order.length
+      for (let step = 0; step < order.length; step++) {
+        const candidate = order[idx]
+        if (candidate && !dropped(candidate)) {
+          czarId = candidate
+          break
+        }
+        idx = (idx + 1) % order.length
+      }
+    }
   }
 
   await state.clearSkippedPlayers(code)
