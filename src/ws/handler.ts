@@ -192,8 +192,10 @@ export function startKeepaliveEnforcer(): void {
 }
 
 function extractCode(url: string): string | null {
-  const match = /\/api\/games\/([A-Z0-9]{6})\/ws/.exec(url)
-  return match?.[1] ?? null
+  // S3-1: accept a lowercased code in the WS URL; codes are stored
+  // raw-uppercase, so normalize before any lookup keys off it.
+  const match = /\/api\/games\/([A-Za-z0-9]{6})\/ws/.exec(url)
+  return match?.[1]?.toUpperCase() ?? null
 }
 
 function send(peer: Peer, event: ServerToClientEvent): void {

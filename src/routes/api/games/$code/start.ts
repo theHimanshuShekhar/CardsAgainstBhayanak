@@ -16,10 +16,11 @@ export const Route = createFileRoute('/api/games/$code/start')({
         const auth = await authenticate(request)
         if (!auth) return errorResponse(401, 'not_authorized', 'Missing or invalid token')
 
-        const [session] = await db
-          .select()
-          .from(gameSessions)
-          .where(eq(gameSessions.code, params.code))
+        // S3-1: room codes are stored raw-uppercase; normalize the URL param
+        // so a lowercased link resolves (mirrors join.ts).
+        const code = params.code.toUpperCase()
+
+        const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
         if (!session) return errorResponse(404, 'room_not_found', 'Room not found')
         if (session.hostPlayerId !== auth.playerId)
           return errorResponse(403, 'host_only', 'Only the host can start')
@@ -45,14 +46,14 @@ export const Route = createFileRoute('/api/games/$code/start')({
         if (Number(packCount?.cnt ?? 0) === 0)
           return errorResponse(503, 'internal_error', 'No card data available')
 
-        await engine.startGame(params.code)
+        await engine.startGame(code)
 
         // N-1: the engine is the sole emitter of `round_started`
         // (inside startRound). Emit `game_started` first so clients see
         // the correct game_started → round_started ordering.
         const round = 1
-        await state.publishEvent(params.code, { type: 'game_started', firstRound: round })
-        await engine.startRound(params.code, round)
+        await state.publishEvent(code, { type: 'game_started', firstRound: round })
+        await engine.startRound(code, round)
 
         const [spectators] = await db
           .select({ cnt: count() })
@@ -67,14 +68,14 @@ export const Route = createFileRoute('/api/games/$code/start')({
 
         if (hostPlayer?.posthogAnonId) {
           captureServerEvent(hostPlayer.posthogAnonId, 'cab_game_started', {
-            roomCode: params.code,
+            roomCode: code,
             playerCount: Number(row?.cnt ?? 0),
             spectatorCount: Number(spectators?.cnt ?? 0),
             durationLobbyMs: Date.now() - session.createdAt.getTime(),
           })
         }
 
-        apiLogger.info({ roomCode: params.code }, 'game started')
+        apiLogger.info({ roomCode: code }, 'game started')
 
         return new Response(null, { status: 204 })
       },
