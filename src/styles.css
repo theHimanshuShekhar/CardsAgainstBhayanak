@@ -1709,21 +1709,47 @@ button {
   position: relative;
   z-index: 101;
 }
+/* Flat, scrollable hand strip at every width (no fanned arc). `safe center`
+   centers the row when the cards fit and falls back to start when they
+   overflow, so the leftmost cards stay reachable while scrolling. */
 .hand {
   display: flex;
-  justify-content: center;
+  justify-content: safe center;
   align-items: flex-end;
-  gap: -12px;
-  height: 200px;
+  gap: 10px;
+  height: auto;
   position: relative;
+  overflow-x: auto;
+  padding: 6px 4px 8px;
+  scroll-snap-type: x mandatory;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.hand::-webkit-scrollbar {
+  display: none;
 }
 .hand-card-wrap {
-  margin: 0 -22px;
-  transition: transform 0.25s cubic-bezier(0.2, 0.7, 0.3, 1.2);
+  margin: 0;
+  flex-shrink: 0;
+  scroll-snap-align: center;
 }
-.hand-card-wrap:hover {
-  transform: translateY(-30px) rotate(0) !important;
-  z-index: 100 !important;
+.hand-card-wrap .card-md {
+  /* Fluid card sizing at every width: a fixed 148px card (≈207px tall via
+     the locked 5:7 ratio) made the sticky dock ~46% of an iPhone SE /
+     ~50% of a 280px fold and clipped the prompt. Scale with viewport
+     width, capped at 148px so tablets / large phones (≥412px) and desktop
+     render at the original size. */
+  width: clamp(116px, 36vw, 148px);
+  aspect-ratio: 5 / 7;
+  height: auto;
+  padding: clamp(10px, 3vw, 14px);
+}
+.hand-card-wrap .card-md .card-text {
+  font-size: clamp(12px, 3.4vw, 14px);
+  line-height: 1.22;
+}
+.hand-card-wrap.deal {
+  animation: dealInMobile 0.5s cubic-bezier(0.2, 0.7, 0.3, 1.2) backwards;
 }
 
 /* ── Responsive ──────────────────────────────────────────────────── */
@@ -1955,42 +1981,6 @@ button {
     margin-bottom: 8px;
     flex-wrap: wrap;
     gap: 8px;
-  }
-  .hand {
-    height: auto;
-    justify-content: flex-start;
-    overflow-x: auto;
-    padding: 6px 4px 8px;
-    gap: 10px;
-    scroll-snap-type: x mandatory;
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: none;
-  }
-  .hand::-webkit-scrollbar {
-    display: none;
-  }
-  .hand-card-wrap {
-    margin: 0;
-    flex-shrink: 0;
-    scroll-snap-align: center;
-    transform: none !important;
-  }
-  .hand-card-wrap .card-md {
-    /* Fluid below 720px: a fixed 148px card (≈207px tall via the locked 5:7
-       ratio) made the sticky dock ~46% of an iPhone SE / ~50% of a 280px
-       fold and clipped the prompt. Scale with viewport width, capped at the
-       original 148px so tablets / large phones (≥412px) are unchanged. */
-    width: clamp(116px, 36vw, 148px);
-    aspect-ratio: 5 / 7;
-    height: auto;
-    padding: clamp(10px, 3vw, 14px);
-  }
-  .hand-card-wrap .card-md .card-text {
-    font-size: clamp(12px, 3.4vw, 14px);
-    line-height: 1.22;
-  }
-  .hand-card-wrap.deal {
-    animation: dealInMobile 0.5s cubic-bezier(0.2, 0.7, 0.3, 1.2) backwards;
   }
   .card-selected {
     outline-offset: 3px;
