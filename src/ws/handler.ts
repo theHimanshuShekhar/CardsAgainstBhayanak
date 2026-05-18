@@ -274,13 +274,17 @@ export const wsHooks = {
         })
       ctx.playerId = auth.playerId
       ctx.anonId = auth.anonId
-      send(peer, { type: 'auth_ok' })
+      // Bind role + clear grace BEFORE acking. The client fires its next
+      // message (e.g. `play`) the instant it sees auth_ok; acking first
+      // left a window where ctx.role was still undefined and the
+      // spectator action guard below was skipped (S2-3).
       const player = await state.getPlayer(ctx.code, auth.playerId)
       ctx.role = player?.role
       if (player?.status === 'grace') {
         await state.updatePlayer(ctx.code, auth.playerId, { status: 'active' })
         await state.clearGrace(ctx.code, auth.playerId)
       }
+      send(peer, { type: 'auth_ok' })
       return
     }
 
