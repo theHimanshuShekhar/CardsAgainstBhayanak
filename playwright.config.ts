@@ -35,7 +35,14 @@ export default defineConfig({
             SESSION_SECRET: 'test-secret-min-32-chars-test-test-test',
             CAB_RNG_SEED: 'test-seed-2026',
             PORT: '3000',
-            NODE_ENV: 'production',
+            // NOT 'production': rate-limit.ts enforces only when
+            // NODE_ENV==='production', and the suite creates >5 games
+            // serially from one IP — prod's create budget (5/3600s) then
+            // 429s every test past ~#16. rate-limit.ts documents that the
+            // suite must pass through; this is the env that honours it.
+            // Nothing else in the suite needs prod mode (logger.ts is the
+            // only other gate and is a no-op without an Axiom token).
+            NODE_ENV: 'test',
           },
         },
       }),
