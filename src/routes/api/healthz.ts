@@ -3,10 +3,8 @@ import { redis } from '~/lib/redis'
 import { db } from '~/db'
 import { gameSessions } from '~/db/schema'
 import { count, sql } from 'drizzle-orm'
-import { ensureServerBoot } from '~/lib/server-boot'
 
 const bootTime = Date.now()
-ensureServerBoot()
 
 export const Route = createFileRoute('/api/healthz')({
   server: {

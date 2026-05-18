@@ -10,10 +10,6 @@ import { serve } from 'srvx'
 import { plugin as ws } from 'crossws/server'
 import tssServer from './dist/server/server.js'
 import { wsHooks } from './src/ws/handler'
-import { ensureServerBoot } from './src/lib/server-boot'
-
-// Seed cards, start the stale-game sweeper and keepalive enforcer.
-ensureServerBoot()
 
 const port = Number(process.env['PORT'] ?? 3000)
 
