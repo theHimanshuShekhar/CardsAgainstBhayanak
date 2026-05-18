@@ -226,6 +226,11 @@ export async function expireRoundTimer(
     )
     await state.clearSubmissions(code)
     await state.clearSkippedPlayers(code)
+    // Voided round never resolves: clear wagers so settleGambles doesn't
+    // debit these players when a *later* round resolves (deferred debit).
+    for (const p of await state.getAllPlayers(code)) {
+      if (p.hasGambled) await state.updatePlayer(code, p.id, { hasGambled: false })
+    }
     await startRound(code, round + 1, czarId)
     return
   }
@@ -413,15 +418,16 @@ export async function pickWinner(
 
   const winner = await state.getPlayer(code, winnerPlayerId)
   if (!winner) throw new Error('winner not found')
-  const bonus = countGambleTransfers(submissions, winnerPlayerId)
-  const gain = 1 + bonus
-  await state.updatePlayer(code, winnerPlayerId, { score: winner.score + gain })
+  // Read winner score before settling so the failed-gambler debits (which
+  // skip the winner) don't race the winner's own credit.
+  const transfer = await settleGambles(code, winnerPlayerId)
+  await state.updatePlayer(code, winnerPlayerId, { score: winner.score + 1 + transfer })
 
   const players = await state.getAllPlayers(code)
   const scores = players.map((p) => ({
     playerId: p.id,
     username: p.username,
-    score: p.id === winnerPlayerId ? p.score + gain : p.score,
+    score: p.score,
     isJudge: p.id === czarId,
     isRando: p.isRando,
   }))
@@ -597,6 +603,11 @@ export async function voidRound(code: string, reason: string): Promise<void> {
   await state.discardCards(code, 'black', [roundRow.blackCardId])
   await state.clearSubmissions(code)
   await state.clearSkippedPlayers(code)
+  // Voided round never resolves: clear wagers so settleGambles doesn't
+  // debit these players when a *later* round resolves (deferred debit).
+  for (const p of await state.getAllPlayers(code)) {
+    if (p.hasGambled) await state.updatePlayer(code, p.id, { hasGambled: false })
+  }
   await redis.hdel(KEYS.round(code), 'eliminationTurnPlayerId')
   await redis.del(
     subOrderKey(code),
@@ -666,20 +677,24 @@ function resolvePlayerId(key: string): string {
   return key.endsWith(':gamble') ? key.slice(0, -7) : key
 }
 
-// Returns extra points the round winner earns from failed gamblers (point transfer mechanic).
-function countGambleTransfers(
-  submissions: Record<string, import('./types').Submission>,
-  winnerPlayerId: string,
-): number {
-  let bonus = 0
-  for (const key of Object.keys(submissions)) {
-    if (!key.endsWith(':gamble')) continue
-    const gamblerId = resolvePlayerId(key)
-    if (gamblerId === winnerPlayerId) continue // their gamble sub won → they keep their point
-    // Check if the gambler's regular sub also lost
-    if (submissions[gamblerId]) bonus += 1
+// Settles the gambling point-transfer for a resolved round. The wagered
+// point is *not* debited at `gamble()` time — it is debited here, so a
+// round that voids (never calls this) correctly leaves wagers intact.
+// Keyed off the authoritative `hasGambled` player flag rather than
+// submission keys, so it is correct even if a gambler submitted 0 or 1
+// times instead of 2 (S3-2). Every player who wagered and did *not* win
+// forfeits their point to the round winner; a winning gambler keeps
+// their point (no debit). Returns the points the winner gains from
+// forfeited wagers (the +1 win bonus is added by the caller).
+async function settleGambles(code: string, winnerPlayerId: string): Promise<number> {
+  const players = await state.getAllPlayers(code)
+  let transfer = 0
+  for (const p of players) {
+    if (!p.hasGambled || p.id === winnerPlayerId) continue
+    await state.updatePlayer(code, p.id, { score: Math.max(0, p.score - 1) })
+    transfer += 1
   }
-  return bonus
+  return transfer
 }
 
 export async function castVote(code: string, voterId: string, submissionId: string): Promise<void> {
@@ -739,15 +754,14 @@ export async function castVote(code: string, voterId: string, submissionId: stri
 
   const winner = await state.getPlayer(code, winnerPlayerId)
   if (!winner) return
-  const bonus = countGambleTransfers(submissions, winnerPlayerId)
-  const gain = 1 + bonus
-  await state.updatePlayer(code, winnerPlayerId, { score: winner.score + gain })
+  const transfer = await settleGambles(code, winnerPlayerId)
+  await state.updatePlayer(code, winnerPlayerId, { score: winner.score + 1 + transfer })
 
   const allPlayers = await state.getAllPlayers(code)
   const scores = allPlayers.map((p) => ({
     playerId: p.id,
     username: p.username,
-    score: p.id === winnerPlayerId ? p.score + gain : p.score,
+    score: p.score,
     isJudge: false,
     isRando: p.isRando,
   }))
@@ -795,15 +809,14 @@ export async function eliminateSubmission(
     const winnerPlayerId = resolvePlayerId(winnerKey)
     const winner = await state.getPlayer(code, winnerPlayerId)
     if (!winner) return
-    const bonus = countGambleTransfers(submissions, winnerPlayerId)
-    const gain = 1 + bonus
-    await state.updatePlayer(code, winnerPlayerId, { score: winner.score + gain })
+    const transfer = await settleGambles(code, winnerPlayerId)
+    await state.updatePlayer(code, winnerPlayerId, { score: winner.score + 1 + transfer })
 
     const allPlayers = await state.getAllPlayers(code)
     const scores = allPlayers.map((p) => ({
       playerId: p.id,
       username: p.username,
-      score: p.id === winnerPlayerId ? p.score + gain : p.score,
+      score: p.score,
       isJudge: false,
       isRando: p.isRando,
     }))
@@ -890,7 +903,10 @@ export async function gamble(code: string, playerId: string): Promise<void> {
   const [black] = await db.select().from(blackCards).where(eq(blackCards.id, roundRow.blackCardId))
   if (!black) return
 
-  await state.updatePlayer(code, playerId, { score: player.score - 1, hasGambled: true })
+  // Eligibility (score >= 1) is checked above; the wagered point is debited
+  // at round resolution (settleGambles), not here, so a voided round leaves
+  // the wager intact.
+  await state.updatePlayer(code, playerId, { hasGambled: true })
   const extra = await state.drawCards(code, 'white', black.pick)
   if (extra.length > 0) {
     const current = await state.getHand(code, playerId)
