@@ -10,7 +10,12 @@ export function Scoreboard({ scores, czarId }: Props) {
   return (
     <div className="scoreboard">
       {scores.map((s) => {
-        const isJudge = s.playerId === czarId || s.isJudge
+        // czarId is the single authoritative source, refreshed on every
+        // round_started. PlayerScore.isJudge is baked at round_won time and
+        // goes stale once the Czar rotates without a new scores payload —
+        // ORing it in renders the *previous* Czar as JUDGE too. (czarId is
+        // null in God Is Dead, which correctly yields no JUDGE chip.)
+        const isJudge = s.playerId === czarId
         return (
           <div key={s.playerId} className={`score-chip ${isJudge ? 'is-judge' : ''}`}>
             <Avatar name={s.username} size="sm" />

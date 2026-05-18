@@ -173,6 +173,19 @@ test('6-player 5-win golden path', async ({ browser }) => {
     ])
     if (outcome === 'end') break
     expect(outcome, `round ${round} neither ended nor advanced`).toBe('next')
+    // Czar rotates every round. The scoreboard must show exactly ONE judge
+    // chip — regression: round_won bakes isJudge into PlayerScore for the
+    // round that just ended, and round_started rotates czarId without
+    // re-sending scores, so a Scoreboard that ORs the two sources renders
+    // the previous Czar AND the new Czar as JUDGE from round 2 on.
+    await Promise.all(
+      allHandles.map((h) =>
+        expect(
+          h.page.locator('.score-chip.is-judge'),
+          `round ${round + 1}: exactly one player shown as JUDGE`,
+        ).toHaveCount(1),
+      ),
+    )
   }
 
   await Promise.all(allHandles.map((h) => h.page.waitForURL('**/end', { timeout: 30_000 })))
