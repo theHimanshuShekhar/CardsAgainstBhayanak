@@ -6,12 +6,21 @@ services:
     mem_limit: 1g
     environment:
       POSTGRES_USER: cab
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cab}
+      # :? fails `compose up` fast if unset — never silently boot prod on a
+      # default credential. Supply via Dockhand stack env / .env.example.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set (see .env.example)}
       POSTGRES_DB: cab
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    logging:
+      driver: json-file
+      options: { max-size: '10m', max-file: '3' }
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U cab -d cab']
+      # start_period: a fresh-volume initdb takes ~10-15s; without it those
+      # early failures burn the retry budget and can flap the container to
+      # unhealthy, tripping the app's service_healthy gate on a cold host.
+      start_period: 20s
       interval: 5s
       timeout: 3s
       retries: 5
@@ -24,28 +33,48 @@ services:
     command: ['valkey-server', '--appendonly', 'yes', '--save', '300', '1']
     volumes:
       - redis_data:/data
+    logging:
+      driver: json-file
+      options: { max-size: '10m', max-file: '3' }
     healthcheck:
+      # PING returns a LOADING error (non-zero) while the AOF replays, so
+      # this also gates on the dataset being ready, not just the port.
       test: ['CMD', 'valkey-cli', 'ping']
+      start_period: 10s
       interval: 5s
       timeout: 3s
       retries: 5
 
   app:
+    # Dockhand's git-sync runs `docker compose up -d`; rebuilding from this
+    # `build:` only happens when the stack's "Build" (ideally also "Force
+    # redeploy") option is enabled — otherwise a synced commit reuses the
+    # cached image and silently ships stale code. The explicit image tag
+    # keeps the built image identifiable/manageable from Dockhand.
     build: .
+    image: cab-app:latest
     container_name: cab_app
     restart: unless-stopped
     mem_limit: 512m
+    logging:
+      driver: json-file
+      options: { max-size: '10m', max-file: '3' }
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgres://cab:${POSTGRES_PASSWORD:-cab}@postgres:5432/cab
+      DATABASE_URL: postgres://cab:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set (see .env.example)}@postgres:5432/cab
       REDIS_URL: redis://redis:6379/0
-      SESSION_SECRET: ${SESSION_SECRET:-dev-secret-change-in-prod}
+      # :? — a forgeable HMAC secret is worse than a failed deploy. Never
+      # let prod fall back to a known default.
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set, 32+ chars (see .env.example)}
       PORT: ${PORT:-3000}
-      NODE_ENV: ${NODE_ENV:-development}
+      # Prod-only image: default to production so a Dockhand deploy that
+      # omits NODE_ENV still enforces rate limiting (enforceRateLimit gates
+      # on 'production'). Local dev uses `pnpm dev`, not this compose.
+      NODE_ENV: ${NODE_ENV:-production}
       AXIOM_TOKEN: ${AXIOM_TOKEN:-}
       AXIOM_DATASET: ${AXIOM_DATASET:-}
       POSTHOG_API_KEY: ${POSTHOG_API_KEY:-}
@@ -62,6 +91,10 @@ services:
           '-e',
           "fetch('http://localhost:'+(process.env.PORT||3000)+'/api/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
         ]
+      # start_period covers boot + DB/Redis connect + async card seeding;
+      # without it a slow cold start flaps the app to unhealthy and the
+      # restart loop never lets it settle.
+      start_period: 40s
       interval: 10s
       timeout: 5s
       retries: 5
