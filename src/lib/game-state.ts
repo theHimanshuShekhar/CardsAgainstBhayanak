@@ -31,15 +31,28 @@ export async function getPlayer(code: string, playerId: string): Promise<GamePla
   return raw ? (JSON.parse(raw) as GamePlayer) : null
 }
 
+// S2-11: the read-modify-write must be atomic. A JS get → spread → hset
+// races concurrent callers (the grace-timeout drop vs. an engine score
+// update, or endRound clearing hasGambled for many players) and loses
+// writes via last-writer-wins on the whole JSON blob. Do the field merge
+// inside a Lua script so Redis (single-threaded) applies every patch
+// against the latest committed value.
+const UPDATE_PLAYER_LUA = `
+local cur = redis.call('HGET', KEYS[1], ARGV[1])
+if not cur then return 0 end
+local obj = cjson.decode(cur)
+local patch = cjson.decode(ARGV[2])
+for k, v in pairs(patch) do obj[k] = v end
+redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(obj))
+return 1
+`
+
 export async function updatePlayer(
   code: string,
   playerId: string,
   patch: Partial<GamePlayer>,
 ): Promise<void> {
-  const existing = await getPlayer(code, playerId)
-  if (!existing) return
-  const updated = { ...existing, ...patch }
-  await redis.hset(KEYS.players(code), playerId, JSON.stringify(updated))
+  await redis.eval(UPDATE_PLAYER_LUA, 1, KEYS.players(code), playerId, JSON.stringify(patch))
 }
 
 export async function getAllPlayers(code: string): Promise<GamePlayer[]> {
