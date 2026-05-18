@@ -1701,6 +1701,13 @@ button {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 14px;
+  /* The fanned `.hand-card-wrap` cards each create a stacking context
+     (transform) with z-index up to 100 (hover) / 99 (selected) and, being
+     280px tall in a 200px flex-end `.hand`, overflow up over this header.
+     Without its own stacking, the label + Submit button render behind the
+     hand and are unclickable. Sit above every card. */
+  position: relative;
+  z-index: 101;
 }
 .hand {
   display: flex;
@@ -1936,7 +1943,7 @@ button {
   }
 
   .hand-dock {
-    padding: 12px 0 16px;
+    padding: 10px 0 10px;
     margin-top: 0;
     position: sticky;
     bottom: 0;
@@ -1945,7 +1952,7 @@ button {
     z-index: 5;
   }
   .hand-dock-hd {
-    margin-bottom: 10px;
+    margin-bottom: 8px;
     flex-wrap: wrap;
     gap: 8px;
   }
@@ -1953,7 +1960,7 @@ button {
     height: auto;
     justify-content: flex-start;
     overflow-x: auto;
-    padding: 8px 4px 16px;
+    padding: 6px 4px 8px;
     gap: 10px;
     scroll-snap-type: x mandatory;
     -webkit-overflow-scrolling: touch;
@@ -1969,13 +1976,17 @@ button {
     transform: none !important;
   }
   .hand-card-wrap .card-md {
-    width: 148px;
+    /* Fluid below 720px: a fixed 148px card (≈207px tall via the locked 5:7
+       ratio) made the sticky dock ~46% of an iPhone SE / ~50% of a 280px
+       fold and clipped the prompt. Scale with viewport width, capped at the
+       original 148px so tablets / large phones (≥412px) are unchanged. */
+    width: clamp(116px, 36vw, 148px);
     aspect-ratio: 5 / 7;
     height: auto;
-    padding: 14px 14px 12px;
+    padding: clamp(10px, 3vw, 14px);
   }
   .hand-card-wrap .card-md .card-text {
-    font-size: 14px;
+    font-size: clamp(12px, 3.4vw, 14px);
     line-height: 1.22;
   }
   .hand-card-wrap.deal {
@@ -2030,6 +2041,37 @@ button {
   .subs-grid-large {
     grid-template-columns: 1fr 1fr;
     gap: 8px;
+  }
+}
+
+/* Short viewports can't fit the locked 5:7 prompt card above the sticky
+   hand dock — its lower half rendered behind the dock with no way to see
+   it at rest. The chrome above the prompt (topbar + scoreboard ≈ 226px
+   desktop / 188px phone) and the dock height (≈285px desktop / ≈265px
+   phone) are FIXED pixels, not viewport-relative, so a flat `vh` cap can't
+   be correct at every height. Cap the prompt to the space actually left
+   between the scoreboard and the dock — viewport height minus that fixed
+   overhead, plus a small safety margin — keeping 5:7 (width derives from
+   height) and scaling text down since `.card` clips overflow. Two width
+   bands because the desktop fanned dock and the compact phone dock have
+   different overhead. The full card needs ≈1014px of height to clear the
+   desktop dock, so the cap must apply up to ~1024px (above that the
+   unmodified card fits). Higher-specificity selector overrides the base
+   and max-width prompt rules regardless of source order. */
+@media (max-height: 1024px) {
+  .card-prompt.card-xl {
+    width: auto;
+    height: min(504px, calc(100vh - 470px));
+    aspect-ratio: 5 / 7;
+    min-height: 0;
+  }
+  .card-prompt.card-xl .card-text {
+    font-size: clamp(14px, 2.2vh, 22px);
+  }
+}
+@media (max-height: 1024px) and (min-width: 861px) {
+  .card-prompt.card-xl {
+    height: min(504px, calc(100vh - 523px));
   }
 }
 
