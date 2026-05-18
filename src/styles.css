@@ -2060,8 +2060,13 @@ button {
   }
 }
 @media (max-height: 1024px) and (min-width: 861px) {
+  /* 560, not 523: the flat hand strip uses a 148px (≈207px tall) card at
+     every width ≥861px, so the sticky dock is ~21px taller than the old
+     fanned 200px region this band was first tuned for. Shrink the prompt
+     enough that it clears the taller dock at rest on short laptops
+     (≤720px tall), where the dock would otherwise paint over it. */
   .card-prompt.card-xl {
-    height: min(504px, calc(100vh - 523px));
+    height: min(504px, calc(100vh - 560px));
   }
 }
 
