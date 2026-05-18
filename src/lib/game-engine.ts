@@ -241,6 +241,19 @@ export async function expireRoundTimer(
       { code, round, submitters: uniqueSubmitters.size },
       'round voided — too few submissions',
     )
+    // S2-1: return submitted white cards and discard the black card
+    // before the replay — a voided round must not leak them out of
+    // circulation (this path previously did neither).
+    const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
+    const [roundRow] = session
+      ? await db
+          .select()
+          .from(gameRounds)
+          .where(eq(gameRounds.sessionId, session.id))
+          .orderBy(desc(gameRounds.roundNum))
+          .limit(1)
+      : []
+    if (roundRow) await returnRoundCards(code, roundRow.blackCardId)
     await state.clearSubmissions(code)
     await state.clearSkippedPlayers(code)
     // Voided round never resolves: clear wagers so settleGambles doesn't
@@ -589,6 +602,22 @@ export async function endGame(code: string, mode: GameOverMode, winnerId?: strin
   engineLogger.info({ code, mode, winnerId }, 'game over')
 }
 
+// S2-1: return every submitted white card to its submitter's hand and
+// discard the round's black card (no reshuffle, per spec). Shared by
+// voidRound and the timer-expiry void path so a voided round never leaks
+// cards out of circulation. Rando has no hand, so its cards just vanish.
+async function returnRoundCards(code: string, blackCardId: string): Promise<void> {
+  const submissions = await state.getSubmissions(code)
+  for (const [key, sub] of Object.entries(submissions)) {
+    const pid = resolvePlayerId(key)
+    const p = await state.getPlayer(code, pid)
+    if (!p || p.isRando) continue
+    const current = await state.getHand(code, pid)
+    await state.setHand(code, pid, [...current, ...sub.fills.map((f) => f.id)])
+  }
+  await state.discardCards(code, 'black', [blackCardId])
+}
+
 // S2-1: the current Czar dropped mid-round and can no longer resolve it.
 // Discard the round entirely — return every submitted white card to its
 // submitter's hand, discard the black card (no reshuffle, per spec), wipe
@@ -608,16 +637,7 @@ export async function voidRound(code: string, reason: string): Promise<void> {
   if (!roundRow) return
   const round = roundRow.roundNum
 
-  const submissions = await state.getSubmissions(code)
-  for (const [key, sub] of Object.entries(submissions)) {
-    const pid = resolvePlayerId(key)
-    const p = await state.getPlayer(code, pid)
-    if (!p || p.isRando) continue // Rando has no hand; its cards just vanish
-    const current = await state.getHand(code, pid)
-    await state.setHand(code, pid, [...current, ...sub.fills.map((f) => f.id)])
-  }
-
-  await state.discardCards(code, 'black', [roundRow.blackCardId])
+  await returnRoundCards(code, roundRow.blackCardId)
   await state.clearSubmissions(code)
   await state.clearSkippedPlayers(code)
   // Voided round never resolves: clear wagers so settleGambles doesn't
