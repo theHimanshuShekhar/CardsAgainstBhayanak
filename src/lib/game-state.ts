@@ -193,6 +193,13 @@ export async function setRoundTimerExpiresAt(code: string, expiresAt: number): P
   await redis.expire(KEYS.round(code), ROOM_TTL_SECONDS)
 }
 
+// S2-10: read back the persisted expiry so a server restart can re-arm
+// the (process-local) round timer instead of leaving the round timerless.
+export async function getRoundTimerExpiresAt(code: string): Promise<number | null> {
+  const val = await redis.hget(KEYS.round(code), 'roundTimerExpiresAt')
+  return val ? Number(val) : null
+}
+
 // S2-1: persist the authoritative phase so a disconnect handler can tell
 // whether a round is mid-flight (and which czar owns it) without having
 // to re-derive it the way buildSnapshot does.

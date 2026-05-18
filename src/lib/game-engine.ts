@@ -272,6 +272,38 @@ export async function expireRoundTimer(
   await checkRoundReady(code)
 }
 
+// S2-10: the round timer is a process-local setTimeout — a restart
+// mid-round loses it, so a round whose players never submit hangs
+// forever (CLAUDE.md: server-controlled phase timing). roundTimerExpiresAt
+// is persisted; on boot, re-arm a timer for every active session still
+// in `picking` from that expiry, firing immediately if it already
+// lapsed during downtime. expireRoundTimer self-guards on a stale round
+// number, so a duplicate (vs. a round started just after boot) no-ops.
+export async function restoreRoundTimers(): Promise<void> {
+  const sessions = await db
+    .select({ id: gameSessions.id, code: gameSessions.code })
+    .from(gameSessions)
+    .where(eq(gameSessions.status, 'active'))
+  for (const s of sessions) {
+    const { code } = s
+    if ((await state.getPhase(code)) !== 'picking') continue
+    const expiresAt = await state.getRoundTimerExpiresAt(code)
+    if (!expiresAt) continue
+    const round = await state.getCurrentRound(code)
+    const [roundRow] = await db
+      .select({ czarPlayerId: gameRounds.czarPlayerId })
+      .from(gameRounds)
+      .where(eq(gameRounds.sessionId, s.id))
+      .orderBy(desc(gameRounds.roundNum))
+      .limit(1)
+    const czarId = roundRow?.czarPlayerId ?? null
+    const ms = expiresAt - Date.now()
+    if (ms <= 0) void expireRoundTimer(code, round, czarId)
+    else setTimeout(() => void expireRoundTimer(code, round, czarId), ms)
+    engineLogger.info({ code, round, ms: Math.max(0, ms) }, 'round timer restored')
+  }
+}
+
 // ── Reveal / judging orchestration ────────────────────────────────
 //
 // The public submissionId is the index into a server-persisted permuted
