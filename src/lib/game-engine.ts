@@ -1,6 +1,6 @@
 import { db } from '~/db'
 import { blackCards, whiteCards, gameSessions, gamePlayers, gameRounds, packs } from '~/db/schema'
-import { inArray, eq, sql, desc } from 'drizzle-orm'
+import { inArray, eq, sql, desc, and } from 'drizzle-orm'
 import { randomInt, shuffle } from './rng'
 import { redis, KEYS, ROOM_TTL_SECONDS } from './redis'
 import * as state from './game-state'
@@ -510,7 +510,45 @@ export async function pickWinner(
     winnerId: winnerPlayerId,
     isRando: winner.isRando,
   })
+  await persistRoundOutcome(code, {
+    winnerPlayerId,
+    winningFills: submissions[winnerKey]!.fills,
+  })
   await endRound(code, Object.keys(submissions))
+}
+
+// Round outcomes live in Redis during play; the game_rounds row is
+// inserted at round start with only structural fields. Without this
+// write-back winner_player_id / winning_submission_fills stay NULL
+// forever, so /api/stats counts every round ever *started* (not judged)
+// and Top cards is permanently empty. Called from every judged path
+// (normal / God Is Dead / Survival / Serious Business) just before
+// endRound; voided rounds never reach here, so they correctly stay
+// unjudged.
+async function persistRoundOutcome(
+  code: string,
+  outcome: {
+    winnerPlayerId: string | null
+    winningFills: Card[]
+    ranking?: Submission[]
+    voteTally?: Record<string, number>
+  },
+): Promise<void> {
+  const [session] = await db
+    .select({ id: gameSessions.id })
+    .from(gameSessions)
+    .where(eq(gameSessions.code, code))
+  if (!session) return
+  const round = await state.getCurrentRound(code)
+  await db
+    .update(gameRounds)
+    .set({
+      winnerPlayerId: outcome.winnerPlayerId,
+      winningSubmissionFills: outcome.winningFills,
+      ...(outcome.ranking !== undefined ? { ranking: outcome.ranking } : {}),
+      ...(outcome.voteTally !== undefined ? { voteTally: outcome.voteTally } : {}),
+    })
+    .where(and(eq(gameRounds.sessionId, session.id), eq(gameRounds.roundNum, round)))
 }
 
 export async function endRound(code: string, submitterIds: string[]): Promise<void> {
@@ -950,6 +988,11 @@ export async function castVote(code: string, voterId: string, submissionId: stri
     voteSpread: tally,
   })
   await redis.del(voteTallyKey)
+  await persistRoundOutcome(code, {
+    winnerPlayerId,
+    winningFills: submissions[winnerKey]?.fills ?? [],
+    voteTally: tally,
+  })
   await endRound(code, Object.keys(submissions))
 }
 
@@ -1004,6 +1047,10 @@ export async function eliminateSubmission(
       winnerId: winnerPlayerId,
       totalEliminations: Object.keys(submissions).length - 1,
     })
+    await persistRoundOutcome(code, {
+      winnerPlayerId,
+      winningFills: submissions[winnerKey]?.fills ?? [],
+    })
     await endRound(code, Object.keys(submissions))
   } else {
     // Same turn set as checkRoundReady's Survival branch: active, not
@@ -1037,6 +1084,10 @@ export async function applyRanking(code: string, czarId: string, ranking: string
   const points = [3, 2, 1] as const
   const scoresDelta: Record<string, number> = {}
   const rankedSubmissions: Submission[] = []
+  // Serious Business has no single Czar pick — winner_player_id is the
+  // top-ranked submission's player (SPEC.md § Serious Business).
+  let topWinnerId: string | null = null
+  let topFills: Card[] = []
 
   for (let i = 0; i < ranking.length && i < 3; i++) {
     const sid = ranking[i]!
@@ -1047,6 +1098,10 @@ export async function applyRanking(code: string, czarId: string, ranking: string
     scoresDelta[pid] = pts
     const player = await state.getPlayer(code, pid)
     if (player) await state.updatePlayer(code, pid, { score: player.score + pts })
+    if (rankedSubmissions.length === 0) {
+      topWinnerId = pid
+      topFills = submissions[key].fills
+    }
     rankedSubmissions.push({ ...submissions[key], submissionId: sid, rank: (i + 1) as 1 | 2 | 3 })
   }
 
@@ -1055,6 +1110,11 @@ export async function applyRanking(code: string, czarId: string, ranking: string
   captureServerEvent(await distinctIdForHost(code), 'cab_round_ranked', {
     roomCode: code,
     top3: rankedSubmissions.map((s) => s.playerId).filter(Boolean),
+  })
+  await persistRoundOutcome(code, {
+    winnerPlayerId: topWinnerId,
+    winningFills: topFills,
+    ranking: rankedSubmissions,
   })
   await endRound(code, Object.keys(submissions))
 
