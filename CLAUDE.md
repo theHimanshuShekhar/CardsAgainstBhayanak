@@ -343,7 +343,7 @@ All keys: 24h TTL on idle, refreshed on mutation. Submissions write via single `
 - **Hand dock:** 10 cards fanned per official CAH rules
 - **Mobile breakpoints:** 1100px, 860px, 720px, 420px (verbatim from design reference)
 - **Prompt blanks:** `__________` (10 underscores) → rendered as `<u>` styled per design
-- **Animation timing constants** in `src/lib/timing.ts`: `DEAL_MS=550`, `FADE_IN_MS=400`, `REVEAL_STAGGER=700`, `WINNER_PAUSE=2600`, `RECONNECT_TOAST=250`, `GRACE_WINDOW_MS=30000`
+- **Animation timing constants** in `src/lib/timing.ts`: `DEAL_MS=550`, `FADE_IN_MS=400`, `REVEAL_STAGGER=700`, `ROUND_RESULT_PAUSE_MS=4000` (server-driven post-round hold; E2E-tunable via `CAB_ROUND_RESULT_PAUSE_MS`), `RECONNECT_TOAST=250`, `GRACE_WINDOW_MS=30000`
 
 ---
 

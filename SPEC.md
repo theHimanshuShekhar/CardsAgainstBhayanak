@@ -190,7 +190,9 @@ export const TIMING = {
   FADE_IN_MS: 400, // scene fade-in: applied via .fade-in class on scene mount
   // staggered for child elements at 0.02s/0.08s/0.14s/0.20s/0.26s
   REVEAL_STAGGER: 700, // ms between sequential card reveals
-  WINNER_PAUSE: 2600, // post-winner-picked, before next round
+  ROUND_RESULT_PAUSE_MS: 4000, // server-driven hold after a round resolves
+  // (winner highlighted) before next round_started. NOT a client timer —
+  // the engine sleeps it; E2E shrinks it via CAB_ROUND_RESULT_PAUSE_MS.
   RECONNECT_TOAST: 250, // debounce for "Reconnecting…" overlay
   GRACE_WINDOW_MS: 30000, // server-side disconnect grace (DB constant)
 } as const
@@ -869,7 +871,7 @@ Test matrix using multi-context (separate browser contexts per player):
     5. All contexts: assert cards flip in sequence (`REVEAL_STAGGER` apart)
     6. Czar context: clicks the submission marked as winning by the test plan (test plan precomputed from seed) → asserts winner badge appears
     7. All contexts: scoreboard updates; hands replenish to 10 for submitters via `round_end` event
-    8. Wait `WINNER_PAUSE` ms → next round starts
+    8. Server holds `ROUND_RESULT_PAUSE_MS` (winner highlighted) → next round starts
     9. Break loop when any context observes `game_over` event
   - Assert: total round count ≤ 20 (sanity bound), winner has exactly 5 points
   - All 6 contexts auto-navigate to `/games/$code/end`

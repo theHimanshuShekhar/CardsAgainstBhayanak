@@ -2,6 +2,8 @@
 
 _Generated 2026-05-18. Fresh audit of the current code on `main`, cross-referenced against [`SPEC.md`](./SPEC.md) and [`CLAUDE.md`](./CLAUDE.md). Every finding below was verified against the source at the file:line cited — not carried over from prior audits._
 
+_Appended 2026-05-19: three **post-audit prod-observation** findings (S2-13, S2-14, S3-6) were added to the severity sections below and shipped — see `[FIXED 2026-05-19 — prod observation]` tags. These were not in the original 2026-05-18 sweep; they surfaced from watching the deployed game._
+
 ## Severity scheme
 
 | Sev    | Meaning                                                                                                           |
@@ -171,6 +173,22 @@ The game is end-to-end playable and the E2E suite is green, but several findings
 - **Impact:** Public `/stats` over-reports "Rounds judged" by ~2 orders of magnitude and shows an empty "Top cards" forever. No gameplay impact; the DB's analytical columns were dead.
 - **Fix:** New `persistRoundOutcome` helper in `game-engine.ts`, called at all four judged-resolution funnels (normal / God Is Dead / Survival / Serious Business) just before `endRound`. Voided rounds bypass `endRound`, so they correctly stay unjudged. Serious Business derives `winner_player_id` from the top-ranked submission per spec; God Is Dead also persists `vote_tally`; Serious Business persists `ranking`. `stats.ts` "Rounds judged" now `innerJoin`s ended sessions + `isNotNull(winnerPlayerId)`. Regression test added in `tests/e2e/stats-screen.spec.ts` (TDD red→green). **Coverage gap:** the suite has no protocol driver for Survival / Serious Business, so those two persist sites are typecheck-verified only, not E2E-driven (pre-existing harness gap).
 
+### S2-13 · Round result flashed past — winner / winning card never seen — `[FIXED 2026-05-19 — prod observation]`
+
+- **Where:** `src/routes/games/$code/session.tsx` (old client `round_won` handler scheduled `setPhase('transition')` on a `WINNER_PAUSE` `setTimeout`); `src/lib/game-engine.ts` `endRound` (emitted the next `round_started` with no hold).
+- **Spec:** `SPEC.md` E2E loop step 8 — a hold after a round resolves, winner highlighted, before the next round. **CLAUDE.md non-negotiable:** _"Server-controlled phase timing — clients never run their own phase timers."_
+- **Bug:** The post-round pause was a **client** `setTimeout`. `endRound` published `round_won` → `round_end` → the next `round_started` back-to-back, so `round_started` wiped the board (cleared `submissions`/`winnerId`) before the client's timer fired. In prod the winner and winning card(s) were never visible — the round appeared to jump straight to the next one the instant the Czar picked.
+- **Impact:** Every round in every mode: players never saw who won or the winning card(s). High-visibility UX defect.
+- **Fix:** New `ROUND_RESULT_PAUSE_MS` (4000ms; `src/lib/timing.ts`) — the engine `await sleep()`s it in `endRound` between `round_end` and the next `round_started`, so the pause is **server-driven** (honours the non-negotiable). The client `WINNER_PAUSE` timer is removed; the board stays on the resolved round (phase `judging`, `winnerId` set) until the delayed `round_started`. `CAB_ROUND_RESULT_PAUSE_MS` env override shrinks it to 150ms for E2E. `tests/protocol.ts` (`playRound`/`playGodmode`) switched to `waitForNth` for round 2's `round_started` (the synchronous post-`round_end` read raced the new pause). Full E2E 46/46 green.
+
+### S2-14 · Dropped players render as phantom 0-pt chips — scores appear to "reduce" — `[FIXED 2026-05-19 — prod observation]`
+
+- **Where:** `src/lib/game-engine.ts` (four duplicated `players.map(...)` score builders in `pickWinner`/`endGame`/`castVote`/`eliminateSubmission`); `src/ws/handler.ts` `buildSnapshot`.
+- **Spec:** The scoreboard reflects active participants; `PlayerScore[]` is the live tally.
+- **Bug:** The score-payload builders included **every** player row, `status` regardless. `join.ts` always inserts a _new_ `game_players` row (new id, `score: 0`) on rejoin — it never reuses a dropped player's row — so a player who dropped and rejoined produced a stale 0-pt `dropped` chip _plus_ their fresh chip. To players this read as the scoreboard losing points / scores "weirdly reducing certain rounds" (the original prod report, observed in a plain game with no gambling/Rebooting/modal rule, ruling out the wager-transfer paths).
+- **Impact:** Confusing, apparently-wrong scores in any game where someone dropped and rejoined. No actual score corruption — purely the displayed set.
+- **Fix:** New `toPlayerScores(players, czarId)` helper (`game-engine.ts`) filters `status === 'dropped'` (keeps `grace`), used at all four engine funnels and `buildSnapshot` — one source of truth, no phantom chips. Unit tests added (`game-engine.test.ts`, TDD red→green).
+
 ---
 
 ## S3 — Robustness / polish
@@ -208,6 +226,14 @@ The game is end-to-end playable and the E2E suite is green, but several findings
 - **Where:** `cab_game_created` (`index.ts:102-109`) omits the spec's `modalRule` property; `cab_gambled` (`game-engine.ts:901`) sends `{roomCode, playerId}` but spec lists `roomCode, round, playerId` (`SPEC.md:1092`).
 - **Impact:** Minor analytics gaps only.
 - **Fix:** Add the missing properties.
+
+### S3-6 · Czar's own points hidden while judging — `[FIXED 2026-05-19 — prod observation]`
+
+- **Where:** `src/components/game/Scoreboard.tsx`.
+- **Spec:** The scoreboard shows every player's running score; the Czar is additionally flagged as judge.
+- **Bug:** The score-chip meta line rendered the literal `JUDGE` for the current Czar _instead of_ their point total, so a player who became Czar saw their own score disappear for that round (replaced by the judge indicator).
+- **Impact:** Minor but reported in prod — the Czar can't see their score while judging.
+- **Fix:** Meta line now renders `JUDGE · N pts` for the Czar (`{isJudge ? \`JUDGE · ${pts}\` : pts}`), keeping both the indicator and the score. `czarId`remains the single authoritative judge source (the stale`PlayerScore.isJudge` is not OR'd in).
 
 ---
 
