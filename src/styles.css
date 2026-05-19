@@ -936,6 +936,22 @@ button {
 .home-stack:hover .home-card-3 {
   transform: rotate(-6deg) translate(-100px, 170px) !important;
 }
+@keyframes home-card-cycle-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.home-card-cycle {
+  animation: home-card-cycle-in 0.45s ease both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .home-card-cycle {
+    animation: none;
+  }
+}
 
 .home-marquee {
   grid-column: 1 / -1;
