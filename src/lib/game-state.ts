@@ -31,15 +31,28 @@ export async function getPlayer(code: string, playerId: string): Promise<GamePla
   return raw ? (JSON.parse(raw) as GamePlayer) : null
 }
 
+// S2-11: the read-modify-write must be atomic. A JS get → spread → hset
+// races concurrent callers (the grace-timeout drop vs. an engine score
+// update, or endRound clearing hasGambled for many players) and loses
+// writes via last-writer-wins on the whole JSON blob. Do the field merge
+// inside a Lua script so Redis (single-threaded) applies every patch
+// against the latest committed value.
+const UPDATE_PLAYER_LUA = `
+local cur = redis.call('HGET', KEYS[1], ARGV[1])
+if not cur then return 0 end
+local obj = cjson.decode(cur)
+local patch = cjson.decode(ARGV[2])
+for k, v in pairs(patch) do obj[k] = v end
+redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(obj))
+return 1
+`
+
 export async function updatePlayer(
   code: string,
   playerId: string,
   patch: Partial<GamePlayer>,
 ): Promise<void> {
-  const existing = await getPlayer(code, playerId)
-  if (!existing) return
-  const updated = { ...existing, ...patch }
-  await redis.hset(KEYS.players(code), playerId, JSON.stringify(updated))
+  await redis.eval(UPDATE_PLAYER_LUA, 1, KEYS.players(code), playerId, JSON.stringify(patch))
 }
 
 export async function getAllPlayers(code: string): Promise<GamePlayer[]> {
@@ -180,6 +193,13 @@ export async function setRoundTimerExpiresAt(code: string, expiresAt: number): P
   await redis.expire(KEYS.round(code), ROOM_TTL_SECONDS)
 }
 
+// S2-10: read back the persisted expiry so a server restart can re-arm
+// the (process-local) round timer instead of leaving the round timerless.
+export async function getRoundTimerExpiresAt(code: string): Promise<number | null> {
+  const val = await redis.hget(KEYS.round(code), 'roundTimerExpiresAt')
+  return val ? Number(val) : null
+}
+
 // S2-1: persist the authoritative phase so a disconnect handler can tell
 // whether a round is mid-flight (and which czar owns it) without having
 // to re-derive it the way buildSnapshot does.
@@ -196,6 +216,40 @@ export async function getHostId(code: string): Promise<string | null> {
 export async function getPhase(code: string): Promise<GamePhase | null> {
   const val = await redis.hget(KEYS.round(code), 'phase')
   return val ? (val as GamePhase) : null
+}
+
+// S2-9: persist the round outcome so a reconnect during the post-resolve
+// 'transition' window (and the Survival turn / Serious Business ranking)
+// can be restored in the snapshot instead of being lost.
+export async function setRoundWinner(code: string, winnerId: string): Promise<void> {
+  await redis.hset(KEYS.round(code), 'winnerId', winnerId)
+  await redis.expire(KEYS.round(code), ROOM_TTL_SECONDS)
+}
+
+export async function getRoundWinner(code: string): Promise<string | null> {
+  const val = await redis.hget(KEYS.round(code), 'winnerId')
+  return val || null
+}
+
+export async function setRoundRanking(code: string, ranking: Submission[]): Promise<void> {
+  await redis.hset(KEYS.round(code), 'ranking', JSON.stringify(ranking))
+  await redis.expire(KEYS.round(code), ROOM_TTL_SECONDS)
+}
+
+export async function getRoundRanking(code: string): Promise<Submission[] | null> {
+  const val = await redis.hget(KEYS.round(code), 'ranking')
+  return val ? (JSON.parse(val) as Submission[]) : null
+}
+
+export async function getEliminationTurn(code: string): Promise<string | null> {
+  const val = await redis.hget(KEYS.round(code), 'eliminationTurnPlayerId')
+  return val || null
+}
+
+// Wipe per-round resolution fields so a fresh round's snapshot doesn't
+// surface the previous round's winner / ranking / elimination turn.
+export async function clearRoundResolution(code: string): Promise<void> {
+  await redis.hdel(KEYS.round(code), 'winnerId', 'ranking', 'eliminationTurnPlayerId')
 }
 
 const skippedKey = (code: string) => `${KEYS.round(code)}:skipped`

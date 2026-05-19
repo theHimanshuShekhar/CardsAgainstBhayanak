@@ -1,7 +1,8 @@
 import { startSweeper } from './sweeper'
 import { startKeepaliveEnforcer } from '~/ws/handler'
 import { seedPacks } from './seed'
-import { seedLogger } from './logger'
+import { restoreRoundTimers } from './game-engine'
+import { seedLogger, engineLogger } from './logger'
 
 let started = false
 
@@ -33,4 +34,10 @@ export function ensureServerBoot(): void {
   startSweeper()
   startKeepaliveEnforcer()
   seedWithRetry()
+  // S2-10: re-arm round timers lost when this process replaced the
+  // previous one mid-round. Fire-and-forget; a transient DB error here
+  // must not block boot.
+  void restoreRoundTimers().catch((err) =>
+    engineLogger.error({ err }, 'round timer restore failed'),
+  )
 }

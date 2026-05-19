@@ -49,6 +49,21 @@ export const Route = createFileRoute('/api/games/')({
             parsed.error.flatten(),
           )
 
+        // S2-7: modal rules are mutually exclusive (the UI enforces this with
+        // a radio group, but the server must too — a crafted request bypasses
+        // the client). This is the only endpoint that accepts a GameConfig.
+        const MODAL_RULE_IDS = ['godmode', 'survival', 'serious_business'] as const
+        const activeModal = parsed.data.config.rules.filter((r) =>
+          (MODAL_RULE_IDS as readonly string[]).includes(r),
+        )
+        if (activeModal.length > 1)
+          return errorResponse(
+            400,
+            'conflicting_rules',
+            'Only one modal rule (God Is Dead / Survival / Serious Business) may be enabled',
+            { rules: activeModal },
+          )
+
         // S3: gameplay routes must 503 when no card data has been seeded —
         // a game with empty decks is unplayable.
         const [packCount] = await db.select({ cnt: count() }).from(packs)
@@ -106,6 +121,7 @@ export const Route = createFileRoute('/api/games/')({
           timer: parsed.data.config.timer,
           packs: parsed.data.config.packs,
           rules: parsed.data.config.rules,
+          modalRule: activeModal[0] ?? null,
         })
 
         apiLogger.info({ roomCode: code, playerId: host.id }, 'game created')

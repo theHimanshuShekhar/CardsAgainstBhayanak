@@ -3,7 +3,6 @@ import { eq, inArray, desc } from 'drizzle-orm'
 import { db } from '~/db'
 import { blackCards, whiteCards, gameSessions, gameRounds } from '~/db/schema'
 import { wsLogger } from '~/lib/logger'
-import { captureServerEvent, distinctIdFor } from '~/lib/posthog-server'
 import { authenticateSocket } from './auth'
 import { redis, getSubscriber, KEYS } from '~/lib/redis'
 import * as engine from '~/lib/game-engine'
@@ -101,15 +100,22 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
   const expectedSubmitters = activePlayers.filter((p) => p.id !== czarId && !p.isRando)
   const skippedPlayers = await state.getSkippedPlayers(code)
 
-  let phase: GamePhase = 'picking'
-  if (
-    submissions.length > 0 &&
-    submissions.length + skippedPlayers.length >= expectedSubmitters.length
-  ) {
-    if (config.rules.includes('godmode')) phase = 'waiting'
-    else if (config.rules.includes('survival')) phase = 'eliminating'
-    else if (config.rules.includes('serious_business')) phase = 'ranking'
-    else phase = 'judging'
+  // S2-9: the engine persists the authoritative phase at every
+  // transition (state.setPhase). Trust it so a reconnect during
+  // reveal/judging/transition resumes correctly; the submission-count
+  // heuristic is only a defensive fallback for a room with no phase yet.
+  let phase: GamePhase | null = await state.getPhase(code)
+  if (!phase) {
+    phase = 'picking'
+    if (
+      submissions.length > 0 &&
+      submissions.length + skippedPlayers.length >= expectedSubmitters.length
+    ) {
+      if (config.rules.includes('godmode')) phase = 'waiting'
+      else if (config.rules.includes('survival')) phase = 'eliminating'
+      else if (config.rules.includes('serious_business')) phase = 'ranking'
+      else phase = 'judging'
+    }
   }
 
   let voteTally: Record<string, number> | undefined
@@ -121,6 +127,18 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
     }
   }
 
+  // S2-9: the round outcome is persisted at resolution so a reconnect
+  // during the post-resolve 'transition' window (and the Survival
+  // elimination turn / Serious Business ranking) is restored instead of
+  // being lost. clearRoundResolution wipes these at the next startRound.
+  const winnerId = await state.getRoundWinner(code)
+  const eliminationTurnPlayerId = config.rules.includes('survival')
+    ? ((await state.getEliminationTurn(code)) ?? undefined)
+    : undefined
+  const ranking = config.rules.includes('serious_business')
+    ? ((await state.getRoundRanking(code)) ?? undefined)
+    : undefined
+
   return {
     phase,
     round: roundRow.roundNum,
@@ -130,8 +148,10 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
     submissions,
     scores,
     revealIndex,
-    winnerId: null,
+    winnerId,
     ...(voteTally ? { voteTally } : {}),
+    ...(eliminationTurnPlayerId ? { eliminationTurnPlayerId } : {}),
+    ...(ranking ? { ranking } : {}),
   }
 }
 
@@ -172,8 +192,10 @@ export function startKeepaliveEnforcer(): void {
 }
 
 function extractCode(url: string): string | null {
-  const match = /\/api\/games\/([A-Z0-9]{6})\/ws/.exec(url)
-  return match?.[1] ?? null
+  // S3-1: accept a lowercased code in the WS URL; codes are stored
+  // raw-uppercase, so normalize before any lookup keys off it.
+  const match = /\/api\/games\/([A-Za-z0-9]{6})\/ws/.exec(url)
+  return match?.[1]?.toUpperCase() ?? null
 }
 
 function send(peer: Peer, event: ServerToClientEvent): void {
@@ -254,13 +276,17 @@ export const wsHooks = {
         })
       ctx.playerId = auth.playerId
       ctx.anonId = auth.anonId
-      send(peer, { type: 'auth_ok' })
+      // Bind role + clear grace BEFORE acking. The client fires its next
+      // message (e.g. `play`) the instant it sees auth_ok; acking first
+      // left a window where ctx.role was still undefined and the
+      // spectator action guard below was skipped (S2-3).
       const player = await state.getPlayer(ctx.code, auth.playerId)
       ctx.role = player?.role
       if (player?.status === 'grace') {
         await state.updatePlayer(ctx.code, auth.playerId, { status: 'active' })
         await state.clearGrace(ctx.code, auth.playerId)
       }
+      send(peer, { type: 'auth_ok' })
       return
     }
 
@@ -316,13 +342,11 @@ export const wsHooks = {
         await engine.triggerHappyEnding(ctx.code, ctx.playerId)
         return
       case 'leave':
-        await state.updatePlayer(ctx.code, ctx.playerId, { status: 'dropped' })
-        await state.publishEvent(ctx.code, { type: 'player_left', playerId: ctx.playerId })
-        captureServerEvent(await distinctIdFor(ctx.code, ctx.playerId), 'cab_player_dropped', {
-          roomCode: ctx.code,
-          playerId: ctx.playerId,
-          reason: 'leave',
-        })
+        // S2-5: explicit leave is immediate — no 30s grace. Stop
+        // broadcasting to this peer and run the full drop path now;
+        // the subsequent socket `close` no-ops (already 'dropped').
+        roomPeers.get(ctx.code)?.delete(peer)
+        await engine.dropPlayer(ctx.code, ctx.playerId, 'leave')
         return
     }
   },
@@ -337,57 +361,23 @@ export const wsHooks = {
     const playerId = ctx.playerId
     const code = ctx.code
 
+    // S2-5: an explicit `leave` already dropped this player. Don't
+    // resurrect them into 'grace' or schedule a duplicate drop.
+    const existing = await state.getPlayer(code, playerId)
+    if (!existing || existing.status === 'dropped') {
+      wsLogger.info({ code, playerId }, 'peer closed (already dropped)')
+      return
+    }
+
     await state.updatePlayer(code, playerId, { status: 'grace' })
     await state.setGrace(code, playerId, TIMING.GRACE_WINDOW_MS)
 
+    // Grace window: drop only if the player never reconnected (auth
+    // flips 'grace' → 'active'). dropPlayer runs the void/migrate/pause
+    // path and is idempotent.
     setTimeout(async () => {
       const player = await state.getPlayer(code, playerId)
-      if (player?.status === 'grace') {
-        await state.updatePlayer(code, playerId, { status: 'dropped' })
-        await state.publishEvent(code, { type: 'player_left', playerId })
-        captureServerEvent(await distinctIdFor(code, playerId), 'cab_player_dropped', {
-          roomCode: code,
-          playerId,
-          reason: 'grace',
-        })
-
-        const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
-        if (session?.status === 'active') {
-          // S2-1: if no human players remain, no one can resolve or
-          // advance the round. Pause the session (sweeper abandons it
-          // after 6h) and skip host-migrate/czar-void — they would be
-          // no-ops on a deserted room and just churn the event loop.
-          const players = await state.getAllPlayers(code)
-          const activeHumans = players.filter(
-            (p) => p.status === 'active' && p.role === 'player' && !p.isRando,
-          )
-          if (activeHumans.length === 0) {
-            await engine.pauseGame(code)
-            return
-          }
-
-          // S2-1: if the dropped player was the host, hand the host role
-          // to the longest-present active player so host-only actions
-          // (Happy Ending, etc.) keep working.
-          if (session.hostPlayerId === playerId) {
-            await engine.migrateHost(code)
-          }
-
-          // S2-1: if the dropped player was the Czar of a live round, it
-          // can no longer be resolved — void it and rotate to the next
-          // Czar. phase null/'transition' ⇒ no round is mid-flight.
-          const [roundRow] = await db
-            .select()
-            .from(gameRounds)
-            .where(eq(gameRounds.sessionId, session.id))
-            .orderBy(desc(gameRounds.roundNum))
-            .limit(1)
-          const phase = await state.getPhase(code)
-          if (roundRow?.czarPlayerId === playerId && phase && phase !== 'transition') {
-            await engine.voidRound(code, 'czar_dropped')
-          }
-        }
-      }
+      if (player?.status === 'grace') await engine.dropPlayer(code, playerId, 'grace')
     }, TIMING.GRACE_WINDOW_MS + 100)
 
     wsLogger.info({ code, playerId }, 'peer closed')

@@ -44,12 +44,16 @@ export async function startGame(code: string): Promise<void> {
 
   await buildDecks(code, config.packs)
 
+  // Ordered by joined_at: czarOrder is built from this and the spec
+  // requires the stable rotation to follow join order (SPEC.md § Czar
+  // selection).
   const activePlayers = await db
     .select()
     .from(gamePlayers)
     .where(
       sql`${gamePlayers.sessionId} = ${session.id} AND ${gamePlayers.role} = 'player' AND ${gamePlayers.status} = 'active'`,
     )
+    .orderBy(gamePlayers.joinedAt)
 
   if (config.rules.includes('rando')) {
     const [rando] = await db
@@ -80,12 +84,16 @@ export async function startGame(code: string): Promise<void> {
   }
 
   const playerIds = activePlayers.map((p) => p.id)
-  await state.setCzarOrder(code, playerIds)
+  // czarOrder excludes Rando (synthetic, can't read prompts) and is the
+  // *stable* rotation list — never rebuilt from a live array (SPEC.md
+  // § Czar selection). playerIds (incl. Rando) is only for hand dealing.
+  const czarOrderIds = activePlayers.filter((p) => !p.isRando).map((p) => p.id)
+  await state.setCzarOrder(code, czarOrderIds)
   await dealStartingHands(code, playerIds)
 
   // Round-1 Czar is a random offset into czarOrder; persist it so the
   // rotation is stable and seeded-RNG runs are deterministic.
-  const firstCzarIdx = chooseFirstCzar(activePlayers.length)
+  const firstCzarIdx = chooseFirstCzar(czarOrderIds.length)
   await redis.hset(KEYS.game(code), 'czarStartOffset', String(firstCzarIdx))
   await db.update(gameSessions).set({ status: 'active' }).where(eq(gameSessions.id, session.id))
 
@@ -125,20 +133,33 @@ export async function startRound(
   if (forceCzarId !== undefined) {
     czarId = forceCzarId
   } else if (!config.rules.includes('godmode')) {
+    // Traverse the *stable* czarOrder — never rebuild it from a live
+    // filtered array (that shifts every player's turn when anyone drops).
+    // Land on czarOrder[(offset + round - 1) % len], then step forward
+    // past players who are `dropped`, keeping every other player's turn
+    // fixed (SPEC.md § Czar selection — Drops).
     const order = await state.getCzarOrder(code)
-    const allPlayers = await state.getAllPlayers(code)
-    const activeOrder = order.filter((pid) => {
-      const p = allPlayers.find((x) => x.id === pid)
-      return p && p.status === 'active' && !p.isRando
-    })
-    const offset = Number(await redis.hget(KEYS.game(code), 'czarStartOffset')) || 0
-    czarId =
-      activeOrder.length > 0
-        ? (activeOrder[(offset + round - 1) % activeOrder.length] ?? null)
-        : null
+    if (order.length > 0) {
+      const allPlayers = await state.getAllPlayers(code)
+      const dropped = (pid: string) => allPlayers.find((x) => x.id === pid)?.status === 'dropped'
+      const offset = Number(await redis.hget(KEYS.game(code), 'czarStartOffset')) || 0
+      let idx = (offset + round - 1) % order.length
+      for (let step = 0; step < order.length; step++) {
+        const candidate = order[idx]
+        if (candidate && !dropped(candidate)) {
+          czarId = candidate
+          break
+        }
+        idx = (idx + 1) % order.length
+      }
+    }
   }
 
   await state.clearSkippedPlayers(code)
+  // S2-9: drop the prior round's winner/ranking/elimination turn so a
+  // reconnect during this round's picking phase can't surface a stale
+  // outcome in the snapshot.
+  await state.clearRoundResolution(code)
   await state.setCurrentRound(code, round)
   await state.setPhase(code, 'picking')
 
@@ -224,13 +245,63 @@ export async function expireRoundTimer(
       { code, round, submitters: uniqueSubmitters.size },
       'round voided — too few submissions',
     )
+    // S2-1: return submitted white cards and discard the black card
+    // before the replay — a voided round must not leak them out of
+    // circulation (this path previously did neither).
+    const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
+    const [roundRow] = session
+      ? await db
+          .select()
+          .from(gameRounds)
+          .where(eq(gameRounds.sessionId, session.id))
+          .orderBy(desc(gameRounds.roundNum))
+          .limit(1)
+      : []
+    if (roundRow) await returnRoundCards(code, roundRow.blackCardId)
     await state.clearSubmissions(code)
     await state.clearSkippedPlayers(code)
+    // Voided round never resolves: clear wagers so settleGambles doesn't
+    // debit these players when a *later* round resolves (deferred debit).
+    for (const p of await state.getAllPlayers(code)) {
+      if (p.hasGambled) await state.updatePlayer(code, p.id, { hasGambled: false })
+    }
     await startRound(code, round + 1, czarId)
     return
   }
   // 2+ submissions: skipped players are excluded, so the round is now ready.
   await checkRoundReady(code)
+}
+
+// S2-10: the round timer is a process-local setTimeout — a restart
+// mid-round loses it, so a round whose players never submit hangs
+// forever (CLAUDE.md: server-controlled phase timing). roundTimerExpiresAt
+// is persisted; on boot, re-arm a timer for every active session still
+// in `picking` from that expiry, firing immediately if it already
+// lapsed during downtime. expireRoundTimer self-guards on a stale round
+// number, so a duplicate (vs. a round started just after boot) no-ops.
+export async function restoreRoundTimers(): Promise<void> {
+  const sessions = await db
+    .select({ id: gameSessions.id, code: gameSessions.code })
+    .from(gameSessions)
+    .where(eq(gameSessions.status, 'active'))
+  for (const s of sessions) {
+    const { code } = s
+    if ((await state.getPhase(code)) !== 'picking') continue
+    const expiresAt = await state.getRoundTimerExpiresAt(code)
+    if (!expiresAt) continue
+    const round = await state.getCurrentRound(code)
+    const [roundRow] = await db
+      .select({ czarPlayerId: gameRounds.czarPlayerId })
+      .from(gameRounds)
+      .where(eq(gameRounds.sessionId, s.id))
+      .orderBy(desc(gameRounds.roundNum))
+      .limit(1)
+    const czarId = roundRow?.czarPlayerId ?? null
+    const ms = expiresAt - Date.now()
+    if (ms <= 0) void expireRoundTimer(code, round, czarId)
+    else setTimeout(() => void expireRoundTimer(code, round, czarId), ms)
+    engineLogger.info({ code, round, ms: Math.max(0, ms) }, 'round timer restored')
+  }
 }
 
 // ── Reveal / judging orchestration ────────────────────────────────
@@ -413,19 +484,21 @@ export async function pickWinner(
 
   const winner = await state.getPlayer(code, winnerPlayerId)
   if (!winner) throw new Error('winner not found')
-  const bonus = countGambleTransfers(submissions, winnerPlayerId)
-  const gain = 1 + bonus
-  await state.updatePlayer(code, winnerPlayerId, { score: winner.score + gain })
+  // Read winner score before settling so the failed-gambler debits (which
+  // skip the winner) don't race the winner's own credit.
+  const transfer = await settleGambles(code, winnerPlayerId)
+  await state.updatePlayer(code, winnerPlayerId, { score: winner.score + 1 + transfer })
 
   const players = await state.getAllPlayers(code)
   const scores = players.map((p) => ({
     playerId: p.id,
     username: p.username,
-    score: p.id === winnerPlayerId ? p.score + gain : p.score,
+    score: p.score,
     isJudge: p.id === czarId,
     isRando: p.isRando,
   }))
 
+  await state.setRoundWinner(code, winnerPlayerId)
   await state.publishEvent(code, {
     type: 'round_won',
     winnerId: winnerPlayerId,
@@ -566,6 +639,22 @@ export async function endGame(code: string, mode: GameOverMode, winnerId?: strin
   engineLogger.info({ code, mode, winnerId }, 'game over')
 }
 
+// S2-1: return every submitted white card to its submitter's hand and
+// discard the round's black card (no reshuffle, per spec). Shared by
+// voidRound and the timer-expiry void path so a voided round never leaks
+// cards out of circulation. Rando has no hand, so its cards just vanish.
+async function returnRoundCards(code: string, blackCardId: string): Promise<void> {
+  const submissions = await state.getSubmissions(code)
+  for (const [key, sub] of Object.entries(submissions)) {
+    const pid = resolvePlayerId(key)
+    const p = await state.getPlayer(code, pid)
+    if (!p || p.isRando) continue
+    const current = await state.getHand(code, pid)
+    await state.setHand(code, pid, [...current, ...sub.fills.map((f) => f.id)])
+  }
+  await state.discardCards(code, 'black', [blackCardId])
+}
+
 // S2-1: the current Czar dropped mid-round and can no longer resolve it.
 // Discard the round entirely — return every submitted white card to its
 // submitter's hand, discard the black card (no reshuffle, per spec), wipe
@@ -585,18 +674,14 @@ export async function voidRound(code: string, reason: string): Promise<void> {
   if (!roundRow) return
   const round = roundRow.roundNum
 
-  const submissions = await state.getSubmissions(code)
-  for (const [key, sub] of Object.entries(submissions)) {
-    const pid = resolvePlayerId(key)
-    const p = await state.getPlayer(code, pid)
-    if (!p || p.isRando) continue // Rando has no hand; its cards just vanish
-    const current = await state.getHand(code, pid)
-    await state.setHand(code, pid, [...current, ...sub.fills.map((f) => f.id)])
-  }
-
-  await state.discardCards(code, 'black', [roundRow.blackCardId])
+  await returnRoundCards(code, roundRow.blackCardId)
   await state.clearSubmissions(code)
   await state.clearSkippedPlayers(code)
+  // Voided round never resolves: clear wagers so settleGambles doesn't
+  // debit these players when a *later* round resolves (deferred debit).
+  for (const p of await state.getAllPlayers(code)) {
+    if (p.hasGambled) await state.updatePlayer(code, p.id, { hasGambled: false })
+  }
   await redis.hdel(KEYS.round(code), 'eliminationTurnPlayerId')
   await redis.del(
     subOrderKey(code),
@@ -659,6 +744,103 @@ export async function pauseGame(code: string): Promise<void> {
   engineLogger.info({ code }, 'all players dropped — game paused')
 }
 
+// S2-8: pauseGame parks a deserted room; nothing un-parks it, so a
+// rejoiner is stranded until the 6h sweeper abandons it. A fresh joiner
+// arrives via POST /join as a *new* player (their old session was
+// cleared on player_dropped), so join.ts calls this after addPlayer.
+// Resume only once ≥3 present humans exist — the same minimum start.ts
+// enforces to begin a game — then activate anyone the pause/queue path
+// left without a hand or a czarOrder slot and void the stuck round (its
+// Czar is a dropped player and can never resolve it) so a present
+// player Czars a fresh one.
+export async function resumeIfReady(code: string): Promise<void> {
+  const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
+  if (!session || session.status !== 'paused') return
+
+  const players = await state.getAllPlayers(code)
+  const humans = players.filter((p) => p.role === 'player' && !p.isRando && p.status !== 'dropped')
+  if (humans.length < 3) return
+
+  // Activate every present human the pause/queue path left un-set-up
+  // (the new joiner; any stranded queued player). Mirrors endRound's
+  // queued→active activation: Redis-only, like the rest of the engine.
+  const inOrder = new Set(await state.getCzarOrder(code))
+  for (const p of humans) {
+    if (p.status !== 'active') await state.updatePlayer(code, p.id, { status: 'active' })
+    if (!inOrder.has(p.id)) {
+      await state.appendCzarOrder(code, p.id)
+      await state.setHand(code, p.id, await state.drawCards(code, 'white', 10))
+    }
+  }
+
+  // Flip active *before* voidRound — it (and startRound's downstream
+  // helpers) no-op unless the session is 'active'.
+  await db.update(gameSessions).set({ status: 'active' }).where(eq(gameSessions.id, session.id))
+  await redis.hset(KEYS.game(code), 'status', 'active')
+  await redis.expire(KEYS.game(code), ROOM_TTL_SECONDS)
+  engineLogger.info({ code, humans: humans.length }, 'game resumed from pause')
+
+  await voidRound(code, 'resumed after pause')
+}
+
+// S2-5/S2-6: the canonical "remove a player from a live game" path,
+// shared by the grace-timeout drop (WS close), the explicit WS `leave`
+// message, and the HTTP /leave beacon. Idempotent — a `leave` followed
+// by the socket close (or a double beacon) must not double-emit
+// player_left or re-void/re-migrate/re-pause. This is the logic the
+// close-handler grace timeout used to run inline.
+export async function dropPlayer(
+  code: string,
+  playerId: string,
+  reason: 'grace' | 'leave',
+): Promise<void> {
+  const player = await state.getPlayer(code, playerId)
+  if (!player || player.status === 'dropped') return
+
+  await state.updatePlayer(code, playerId, { status: 'dropped' })
+  await state.publishEvent(code, { type: 'player_left', playerId })
+  captureServerEvent(await distinctIdFor(code, playerId), 'cab_player_dropped', {
+    roomCode: code,
+    playerId,
+    reason,
+  })
+
+  const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
+  if (session?.status !== 'active') return
+
+  // No human left to resolve/advance the round → pause (the 6h sweeper
+  // abandons it later). Skip migrate/void: no-ops on a deserted room
+  // that would just churn the event loop.
+  const players = await state.getAllPlayers(code)
+  const activeHumans = players.filter(
+    (p) => p.status === 'active' && p.role === 'player' && !p.isRando,
+  )
+  if (activeHumans.length === 0) {
+    await pauseGame(code)
+    return
+  }
+
+  // Host left → hand the role to the longest-present active player so
+  // host-only actions (Happy Ending, etc.) keep working.
+  if (session.hostPlayerId === playerId) {
+    await migrateHost(code)
+  }
+
+  // Czar of a live round left → it can no longer be resolved; void it
+  // and rotate to the next Czar. phase null/'transition' ⇒ no round is
+  // mid-flight, so nothing to void.
+  const [roundRow] = await db
+    .select()
+    .from(gameRounds)
+    .where(eq(gameRounds.sessionId, session.id))
+    .orderBy(desc(gameRounds.roundNum))
+    .limit(1)
+  const phase = await state.getPhase(code)
+  if (roundRow?.czarPlayerId === playerId && phase && phase !== 'transition') {
+    await voidRound(code, 'czar_dropped')
+  }
+}
+
 // ── House rule mechanics ──────────────────────────────────────────
 
 // Gamble submissions are stored under `${playerId}:gamble` in the submissions hash.
@@ -666,20 +848,24 @@ function resolvePlayerId(key: string): string {
   return key.endsWith(':gamble') ? key.slice(0, -7) : key
 }
 
-// Returns extra points the round winner earns from failed gamblers (point transfer mechanic).
-function countGambleTransfers(
-  submissions: Record<string, import('./types').Submission>,
-  winnerPlayerId: string,
-): number {
-  let bonus = 0
-  for (const key of Object.keys(submissions)) {
-    if (!key.endsWith(':gamble')) continue
-    const gamblerId = resolvePlayerId(key)
-    if (gamblerId === winnerPlayerId) continue // their gamble sub won → they keep their point
-    // Check if the gambler's regular sub also lost
-    if (submissions[gamblerId]) bonus += 1
+// Settles the gambling point-transfer for a resolved round. The wagered
+// point is *not* debited at `gamble()` time — it is debited here, so a
+// round that voids (never calls this) correctly leaves wagers intact.
+// Keyed off the authoritative `hasGambled` player flag rather than
+// submission keys, so it is correct even if a gambler submitted 0 or 1
+// times instead of 2 (S3-2). Every player who wagered and did *not* win
+// forfeits their point to the round winner; a winning gambler keeps
+// their point (no debit). Returns the points the winner gains from
+// forfeited wagers (the +1 win bonus is added by the caller).
+async function settleGambles(code: string, winnerPlayerId: string): Promise<number> {
+  const players = await state.getAllPlayers(code)
+  let transfer = 0
+  for (const p of players) {
+    if (!p.hasGambled || p.id === winnerPlayerId) continue
+    await state.updatePlayer(code, p.id, { score: Math.max(0, p.score - 1) })
+    transfer += 1
   }
-  return bonus
+  return transfer
 }
 
 export async function castVote(code: string, voterId: string, submissionId: string): Promise<void> {
@@ -739,19 +925,19 @@ export async function castVote(code: string, voterId: string, submissionId: stri
 
   const winner = await state.getPlayer(code, winnerPlayerId)
   if (!winner) return
-  const bonus = countGambleTransfers(submissions, winnerPlayerId)
-  const gain = 1 + bonus
-  await state.updatePlayer(code, winnerPlayerId, { score: winner.score + gain })
+  const transfer = await settleGambles(code, winnerPlayerId)
+  await state.updatePlayer(code, winnerPlayerId, { score: winner.score + 1 + transfer })
 
   const allPlayers = await state.getAllPlayers(code)
   const scores = allPlayers.map((p) => ({
     playerId: p.id,
     username: p.username,
-    score: p.id === winnerPlayerId ? p.score + gain : p.score,
+    score: p.score,
     isJudge: false,
     isRando: p.isRando,
   }))
 
+  await state.setRoundWinner(code, winnerPlayerId)
   await state.publishEvent(code, {
     type: 'round_won',
     winnerId: winnerPlayerId,
@@ -795,18 +981,18 @@ export async function eliminateSubmission(
     const winnerPlayerId = resolvePlayerId(winnerKey)
     const winner = await state.getPlayer(code, winnerPlayerId)
     if (!winner) return
-    const bonus = countGambleTransfers(submissions, winnerPlayerId)
-    const gain = 1 + bonus
-    await state.updatePlayer(code, winnerPlayerId, { score: winner.score + gain })
+    const transfer = await settleGambles(code, winnerPlayerId)
+    await state.updatePlayer(code, winnerPlayerId, { score: winner.score + 1 + transfer })
 
     const allPlayers = await state.getAllPlayers(code)
     const scores = allPlayers.map((p) => ({
       playerId: p.id,
       username: p.username,
-      score: p.id === winnerPlayerId ? p.score + gain : p.score,
+      score: p.score,
       isJudge: false,
       isRando: p.isRando,
     }))
+    await state.setRoundWinner(code, winnerPlayerId)
     await state.publishEvent(code, {
       type: 'round_won',
       winnerId: winnerPlayerId,
@@ -864,6 +1050,7 @@ export async function applyRanking(code: string, czarId: string, ranking: string
     rankedSubmissions.push({ ...submissions[key], submissionId: sid, rank: (i + 1) as 1 | 2 | 3 })
   }
 
+  await state.setRoundRanking(code, rankedSubmissions)
   await state.publishEvent(code, { type: 'round_ranked', ranking: rankedSubmissions, scoresDelta })
   captureServerEvent(await distinctIdForHost(code), 'cab_round_ranked', {
     roomCode: code,
@@ -890,7 +1077,10 @@ export async function gamble(code: string, playerId: string): Promise<void> {
   const [black] = await db.select().from(blackCards).where(eq(blackCards.id, roundRow.blackCardId))
   if (!black) return
 
-  await state.updatePlayer(code, playerId, { score: player.score - 1, hasGambled: true })
+  // Eligibility (score >= 1) is checked above; the wagered point is debited
+  // at round resolution (settleGambles), not here, so a voided round leaves
+  // the wager intact.
+  await state.updatePlayer(code, playerId, { hasGambled: true })
   const extra = await state.drawCards(code, 'white', black.pick)
   if (extra.length > 0) {
     const current = await state.getHand(code, playerId)
@@ -898,7 +1088,11 @@ export async function gamble(code: string, playerId: string): Promise<void> {
   }
   await state.publishEvent(code, { type: 'player_gambled', playerId })
   const gamblerDistinctId = await distinctIdFor(code, playerId)
-  captureServerEvent(gamblerDistinctId, 'cab_gambled', { roomCode: code, playerId })
+  captureServerEvent(gamblerDistinctId, 'cab_gambled', {
+    roomCode: code,
+    round: roundRow.roundNum,
+    playerId,
+  })
   captureServerEvent(gamblerDistinctId, 'cab_rule_triggered', {
     roomCode: code,
     playerId,
