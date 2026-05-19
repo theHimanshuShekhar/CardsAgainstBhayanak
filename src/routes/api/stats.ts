@@ -1,7 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { db } from '~/db'
 import { gameSessions, gamePlayers, gameRounds } from '~/db/schema'
-import { sql, eq, count } from 'drizzle-orm'
+import { sql, eq, count, and, isNotNull } from 'drizzle-orm'
 import type { RuleId } from '~/lib/types'
 
 // Labels mirror create.tsx MODAL_RULES/ORTHO_RULES. Duplicated inline (not
@@ -26,7 +26,17 @@ export const Route = createFileRoute('/api/stats')({
           .from(gameSessions)
           .where(eq(gameSessions.status, 'ended'))
 
-        const [roundsRow] = await db.select({ total: count() }).from(gameRounds)
+        // "Rounds judged" = rounds that resolved with a winner in games
+        // that finished. game_rounds rows are inserted at round *start*
+        // for every session (lobby/abandoned/voided/in-progress too), so
+        // an unfiltered count(*) over-reports massively. Scope to ended
+        // sessions + a persisted winner, mirroring every other aggregate
+        // here.
+        const [roundsRow] = await db
+          .select({ total: count() })
+          .from(gameRounds)
+          .innerJoin(gameSessions, eq(gameSessions.id, gameRounds.sessionId))
+          .where(and(eq(gameSessions.status, 'ended'), isNotNull(gameRounds.winnerPlayerId)))
 
         const [randoRow] = await db
           .select({ total: count() })

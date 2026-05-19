@@ -163,6 +163,14 @@ The game is end-to-end playable and the E2E suite is green, but several findings
 - **Impact:** Occasional lost score/status updates under concurrency.
 - **Fix sketch:** Use per-field `HSET` on a per-player hash, or a Lua/`WATCH` CAS, instead of whole-object rewrite.
 
+### S2-12 · Round outcomes are never persisted to `game_rounds` — `[FIXED 2026-05-19]`
+
+- **Where:** `src/lib/game-engine.ts:166-174` (the only `INSERT`, at round _start_); `src/lib/game-state.ts:224-227` (`setRoundWinner` — Redis only); `src/routes/api/stats.ts:29` (unfiltered `count()`).
+- **Spec:** The `game_rounds` schema (`SPEC.md` / `CLAUDE.md` DB schema) defines `winner_player_id`, `winning_submission_fills`, `ranking` (Serious Business), `vote_tally` (God Is Dead) — these are intended to be written on round resolution. `/api/stats` "Rounds judged" is meant to count judged rounds.
+- **Bug:** The sole `game_rounds` insert fires at `round_started` with only structural fields (`sessionId, roundNum, blackCardId, czarPlayerId`). There was **no `UPDATE game_rounds` anywhere** — `setRoundWinner` and the ranking/vote-tally setters write Redis only. So all four result columns stayed permanently NULL; a row meant merely "a round was started" in _any_ session (lobby/abandoned/voided/in-progress/ended). `stats.ts` then did `count(*)` over the whole table with no `status='ended'` join and no winner filter, while every other aggregate in that endpoint scopes to ended sessions. Live prod showed **`rounds: 708` against only 2 ended games**, and **`topCards: []`** (its query needs `winning_submission_fills IS NOT NULL`, a column that was never written).
+- **Impact:** Public `/stats` over-reports "Rounds judged" by ~2 orders of magnitude and shows an empty "Top cards" forever. No gameplay impact; the DB's analytical columns were dead.
+- **Fix:** New `persistRoundOutcome` helper in `game-engine.ts`, called at all four judged-resolution funnels (normal / God Is Dead / Survival / Serious Business) just before `endRound`. Voided rounds bypass `endRound`, so they correctly stay unjudged. Serious Business derives `winner_player_id` from the top-ranked submission per spec; God Is Dead also persists `vote_tally`; Serious Business persists `ranking`. `stats.ts` "Rounds judged" now `innerJoin`s ended sessions + `isNotNull(winnerPlayerId)`. Regression test added in `tests/e2e/stats-screen.spec.ts` (TDD red→green). **Coverage gap:** the suite has no protocol driver for Survival / Serious Business, so those two persist sites are typecheck-verified only, not E2E-driven (pre-existing harness gap).
+
 ---
 
 ## S3 — Robustness / polish
