@@ -68,13 +68,7 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
   const czarId = roundRow.czarPlayerId ?? null
   const config = session.config as GameConfig
 
-  const scores: PlayerScore[] = players.map((p) => ({
-    playerId: p.id,
-    username: p.username,
-    score: p.score,
-    isJudge: p.id === czarId,
-    isRando: p.isRando,
-  }))
+  const scores: PlayerScore[] = engine.toPlayerScores(players, czarId)
 
   // The public submissionId is the index into the server-persisted
   // permuted order so a reconnecting client agrees with everyone else.

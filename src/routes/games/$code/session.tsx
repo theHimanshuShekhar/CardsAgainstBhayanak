@@ -8,7 +8,6 @@ import { PromptStage } from '~/components/game/PromptStage'
 import { useSession } from '~/hooks/useSession'
 import { useGameSocket } from '~/hooks/useGameSocket'
 import type { BlackCard, Card, GamePhase, PlayerScore, Submission } from '~/lib/types'
-import { WINNER_PAUSE } from '~/lib/timing'
 
 export const Route = createFileRoute('/games/$code/session')({
   component: SessionScreen,
@@ -29,10 +28,6 @@ function SessionScreen() {
   const [submissions, setSubmissions] = useState<Submission[]>([])
   const [revealIndex, setRevealIndex] = useState(-1)
   const [winnerId, setWinnerId] = useState<string | null>(null)
-  // round_won schedules a delayed phase→transition. If the next round starts
-  // before WINNER_PAUSE elapses, that stale timer would clobber the new
-  // round's phase — hold it so round_started / unmount can cancel it.
-  const winnerTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   // Read inside the socket handler without putting `round` in the effect
   // deps — re-subscribing mid-game drops WS frames in the cleanup→setup gap.
   const roundRef = useRef(round)
@@ -65,10 +60,6 @@ function SessionScreen() {
         setPhase(s.phase === 'picking' && s.czarId === myId ? 'waiting' : s.phase)
       }
       if (event.type === 'round_started') {
-        if (winnerTimer.current) {
-          clearTimeout(winnerTimer.current)
-          winnerTimer.current = null
-        }
         setRound(event.round)
         setPrompt(event.prompt)
         setCzarId(event.czarId)
@@ -107,10 +98,12 @@ function SessionScreen() {
       if (event.type === 'round_won') {
         // N-3: SubmissionsGrid highlights by submissionId, so track the
         // winning submission — not event.winnerId, which is a playerId.
+        // The grid stays up (phase still 'judging', winnerId set) until
+        // the server's ROUND_RESULT_PAUSE_MS-delayed round_started — the
+        // pace is server-driven, never a client timer (which round_started
+        // used to race, so the winner never showed).
         setWinnerId(event.submissionId)
         setScores(event.scores)
-        if (winnerTimer.current) clearTimeout(winnerTimer.current)
-        winnerTimer.current = setTimeout(() => setPhase('transition'), WINNER_PAUSE)
       }
       if (event.type === 'round_end') {
         const myHand = event.handsRefilled[myId]
@@ -135,7 +128,6 @@ function SessionScreen() {
     })
     return () => {
       off()
-      if (winnerTimer.current) clearTimeout(winnerTimer.current)
     }
   }, [on, code, navigate, setSession, myId])
 

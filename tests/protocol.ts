@@ -228,8 +228,8 @@ export async function playGodmode(
     () => false,
   )
   const reachedRound2 = won
-    ? await waitFor(any, 'round_started', 10000)
-        .then(() => any.events.some((e) => e.type === 'round_started' && e.round === 2))
+    ? await waitForNth(any, 'round_started', 2, 10_000)
+        .then((e) => e.round === 2)
         .catch(() => false)
     : false
 
@@ -319,7 +319,12 @@ export async function playRound(
   const observer = Object.values(peers).find((p) => idByName[p.name] !== czarId)!
   const won = await waitFor(observer, 'round_won')
   const end = await waitFor(observer, 'round_end')
-  const reachedRound2 = observer.events.some((e) => e.type === 'round_started' && e.round === 2)
+  // The engine holds ROUND_RESULT_PAUSE_MS between round_end and the next
+  // round_started so players see the winner. Wait for the 2nd round_started
+  // rather than reading synchronously after round_end, which races that pause.
+  const reachedRound2 = await waitForNth(observer, 'round_started', 2, 10_000)
+    .then((e) => e.round === 2)
+    .catch(() => false)
   // N-1: round 1 must emit exactly one round_started (engine is the sole
   // emitter; start.ts no longer double-publishes).
   const round1StartedCount = observer.events.filter(
