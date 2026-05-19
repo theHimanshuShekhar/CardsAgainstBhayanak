@@ -16,14 +16,13 @@ export function Scoreboard({ scores, czarId }: Props) {
         // ORing it in renders the *previous* Czar as JUDGE too. (czarId is
         // null in God Is Dead, which correctly yields no JUDGE chip.)
         const isJudge = s.playerId === czarId
+        const pts = `${s.score} pt${s.score === 1 ? '' : 's'}`
         return (
           <div key={s.playerId} className={`score-chip ${isJudge ? 'is-judge' : ''}`}>
             <Avatar name={s.username} size="sm" />
             <div className="col" style={{ gap: 1 }}>
               <div className="score-name">{s.username}</div>
-              <div className="score-meta">
-                {isJudge ? 'JUDGE' : `${s.score} pt${s.score === 1 ? '' : 's'}`}
-              </div>
+              <div className="score-meta">{isJudge ? `JUDGE · ${pts}` : pts}</div>
             </div>
           </div>
         )

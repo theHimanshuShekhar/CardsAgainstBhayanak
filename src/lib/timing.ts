@@ -1,7 +1,12 @@
 export const DEAL_MS = 550
 export const FADE_IN_MS = 400
 export const REVEAL_STAGGER = 700
-export const WINNER_PAUSE = 2600
+// Server-driven beat between a round resolving (round_won/round_ranked +
+// round_end, winner highlighted) and the next round_started, so players
+// can see who won and the winning card(s). Server-controlled per the
+// "clients never run their own phase timers" invariant; the engine reads
+// CAB_ROUND_RESULT_PAUSE_MS to shrink this for E2E.
+export const ROUND_RESULT_PAUSE_MS = 4000
 export const RECONNECT_TOAST = 250
 export const GRACE_WINDOW_MS = 30_000
 export const KEEPALIVE_INTERVAL_MS = 15_000

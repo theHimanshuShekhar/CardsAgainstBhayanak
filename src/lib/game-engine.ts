@@ -6,12 +6,40 @@ import { redis, KEYS, ROOM_TTL_SECONDS } from './redis'
 import * as state from './game-state'
 import { engineLogger } from './logger'
 import { captureServerEvent, distinctIdFor, distinctIdForHost } from './posthog-server'
-import { TIMER_MS, REVEAL_STAGGER } from './timing'
-import type { GameConfig, GameOverMode, Submission, Card, BlackCard } from './types'
+import { TIMER_MS, REVEAL_STAGGER, ROUND_RESULT_PAUSE_MS } from './timing'
+import type {
+  GameConfig,
+  GameOverMode,
+  Submission,
+  Card,
+  BlackCard,
+  GamePlayer,
+  PlayerScore,
+} from './types'
 import { createId } from '@paralleldrive/cuid2'
 
 export function chooseFirstCzar(activePlayerCount: number): number {
   return randomInt(0, activePlayerCount)
+}
+
+// Every scores payload (round_won / state_snapshot / game_over) must
+// exclude `dropped` players. A player who disconnects past the grace
+// window stays in the Redis players hash with a frozen score; if they
+// re-join they get a brand-new row (new id, score 0 — join.ts), so the
+// same handle would render twice: a stale ghost at the old score and a
+// fresh 0pt chip. To an observer that reads as a player's points
+// "weirdly reducing". `grace` is kept — a transient disconnect that may
+// still return — only the terminal `dropped` is filtered.
+export function toPlayerScores(players: GamePlayer[], czarId: string | null): PlayerScore[] {
+  return players
+    .filter((p) => p.status !== 'dropped')
+    .map((p) => ({
+      playerId: p.id,
+      username: p.username,
+      score: p.score,
+      isJudge: p.id === czarId,
+      isRando: p.isRando,
+    }))
 }
 
 export async function buildDecks(code: string, packIds: string[]): Promise<void> {
@@ -320,6 +348,13 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms))
 }
 
+// E2E shrinks the round-result beat (CAB_ROUND_RESULT_PAUSE_MS) so the
+// suite isn't paced by the 4s production pause; prod uses the constant.
+function roundResultPauseMs(): number {
+  const override = Number(process.env.CAB_ROUND_RESULT_PAUSE_MS)
+  return Number.isFinite(override) && override >= 0 ? override : ROUND_RESULT_PAUSE_MS
+}
+
 async function getSubOrder(code: string): Promise<string[]> {
   const raw = await redis.get(subOrderKey(code))
   return raw ? (JSON.parse(raw) as string[]) : []
@@ -490,13 +525,7 @@ export async function pickWinner(
   await state.updatePlayer(code, winnerPlayerId, { score: winner.score + 1 + transfer })
 
   const players = await state.getAllPlayers(code)
-  const scores = players.map((p) => ({
-    playerId: p.id,
-    username: p.username,
-    score: p.score,
-    isJudge: p.id === czarId,
-    isRando: p.isRando,
-  }))
+  const scores = toPlayerScores(players, czarId)
 
   await state.setRoundWinner(code, winnerPlayerId)
   await state.publishEvent(code, {
@@ -641,19 +670,20 @@ export async function endRound(code: string, submitterIds: string[]): Promise<vo
     return
   }
 
+  // Hold on the resolved round (winner highlighted via round_won, hands
+  // already refilled via round_end) before the next round_started wipes
+  // the board. Server-driven so it can't be raced by an immediate
+  // round_started — the bug where the winner never showed. Game-over
+  // paths returned above, so the end screen is unaffected.
+  await sleep(roundResultPauseMs())
+
   const nextRound = (await state.getCurrentRound(code)) + 1
   await startRound(code, nextRound)
 }
 
 export async function endGame(code: string, mode: GameOverMode, winnerId?: string): Promise<void> {
   const players = await state.getAllPlayers(code)
-  const finalScores = players.map((p) => ({
-    playerId: p.id,
-    username: p.username,
-    score: p.score,
-    isJudge: false,
-    isRando: p.isRando,
-  }))
+  const finalScores = toPlayerScores(players, null)
 
   const [updated] = await db
     .update(gameSessions)
@@ -967,13 +997,7 @@ export async function castVote(code: string, voterId: string, submissionId: stri
   await state.updatePlayer(code, winnerPlayerId, { score: winner.score + 1 + transfer })
 
   const allPlayers = await state.getAllPlayers(code)
-  const scores = allPlayers.map((p) => ({
-    playerId: p.id,
-    username: p.username,
-    score: p.score,
-    isJudge: false,
-    isRando: p.isRando,
-  }))
+  const scores = toPlayerScores(allPlayers, null)
 
   await state.setRoundWinner(code, winnerPlayerId)
   await state.publishEvent(code, {
@@ -1028,13 +1052,7 @@ export async function eliminateSubmission(
     await state.updatePlayer(code, winnerPlayerId, { score: winner.score + 1 + transfer })
 
     const allPlayers = await state.getAllPlayers(code)
-    const scores = allPlayers.map((p) => ({
-      playerId: p.id,
-      username: p.username,
-      score: p.score,
-      isJudge: false,
-      isRando: p.isRando,
-    }))
+    const scores = toPlayerScores(allPlayers, null)
     await state.setRoundWinner(code, winnerPlayerId)
     await state.publishEvent(code, {
       type: 'round_won',
