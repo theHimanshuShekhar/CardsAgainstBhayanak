@@ -125,6 +125,7 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
   // during the post-resolve 'transition' window (and the Survival
   // elimination turn / Serious Business ranking) is restored instead of
   // being lost. clearRoundResolution wipes these at the next startRound.
+  const { submitted, expected } = await engine.submissionProgress(code)
   const winnerId = await state.getRoundWinner(code)
   const eliminationTurnPlayerId = config.rules.includes('survival')
     ? ((await state.getEliminationTurn(code)) ?? undefined)
@@ -143,6 +144,8 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
     scores,
     revealIndex,
     winnerId,
+    submitted,
+    expected,
     ...(voteTally ? { voteTally } : {}),
     ...(eliminationTurnPlayerId ? { eliminationTurnPlayerId } : {}),
     ...(ranking ? { ranking } : {}),
@@ -209,9 +212,20 @@ function broadcast(code: string, event: ServerToClientEvent): void {
 async function ensureSubscriber(code: string): Promise<void> {
   const channel = KEYS.channel(code)
   const sub = getSubscriber(channel)
-  // Only attach listener once (first call per channel)
-  if (sub.listenerCount('message') > 0) return
-  await sub.subscribe(channel)
+  // Only attach the listener once per channel. Attach it BEFORE awaiting
+  // subscribe: peers connect concurrently and all call this, so the
+  // guard check and the `sub.on` that satisfies it must run with no
+  // `await` between them — otherwise every racing peer slips past a
+  // still-zero listenerCount while `subscribe` is in flight and adds its
+  // own listener, fanning each published event out 2–3× (a single
+  // round_started/reveal then duplicates per extra listener).
+  if (sub.listenerCount('message') > 0) {
+    // Listener exists but a concurrent first caller may still be
+    // awaiting subscribe; ensure this channel is subscribed before
+    // returning so we don't miss frames.
+    await sub.subscribe(channel)
+    return
+  }
   sub.on('message', (_ch, msg) => {
     try {
       const event = JSON.parse(msg) as ServerToClientEvent
@@ -230,6 +244,7 @@ async function ensureSubscriber(code: string): Promise<void> {
       wsLogger.error({ err }, 'bad pub/sub payload')
     }
   })
+  await sub.subscribe(channel)
 }
 
 export const wsHooks = {

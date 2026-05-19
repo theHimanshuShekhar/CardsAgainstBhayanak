@@ -127,14 +127,19 @@ export async function discardCards(
   await redis.expire(key, ROOM_TTL_SECONDS)
 }
 
+// The hand is an ordered Redis list (not a set): a set's SMEMBERS returns
+// members in arbitrary order, so every refill / state_snapshot reshuffled
+// the player's hand on each round. A list keeps surviving cards in place
+// and appends refilled cards to the tail. Card IDs are unique per hand,
+// so LREM count 0 is safe.
 export async function setHand(code: string, playerId: string, cardIds: string[]): Promise<void> {
   await redis.del(KEYS.hand(code, playerId))
-  if (cardIds.length > 0) await redis.sadd(KEYS.hand(code, playerId), ...cardIds)
+  if (cardIds.length > 0) await redis.rpush(KEYS.hand(code, playerId), ...cardIds)
   await redis.expire(KEYS.hand(code, playerId), ROOM_TTL_SECONDS)
 }
 
 export async function getHand(code: string, playerId: string): Promise<string[]> {
-  return await redis.smembers(KEYS.hand(code, playerId))
+  return await redis.lrange(KEYS.hand(code, playerId), 0, -1)
 }
 
 export async function removeFromHand(
@@ -142,7 +147,9 @@ export async function removeFromHand(
   playerId: string,
   cardIds: string[],
 ): Promise<void> {
-  if (cardIds.length > 0) await redis.srem(KEYS.hand(code, playerId), ...cardIds)
+  for (const id of cardIds) {
+    await redis.lrem(KEYS.hand(code, playerId), 0, id)
+  }
 }
 
 const submissionsKey = (code: string) => `${KEYS.round(code)}:submissions`

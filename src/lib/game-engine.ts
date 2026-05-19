@@ -201,11 +201,14 @@ export async function startRound(
     })
     .onConflictDoNothing()
 
+  const startProgress = await submissionProgress(code)
   await state.publishEvent(code, {
     type: 'round_started',
     round,
     prompt: { id: black.id, text: black.text, pick: black.pick },
     czarId,
+    submitted: startProgress.submitted,
+    expected: startProgress.expected,
   })
   captureServerEvent(await distinctIdForHost(code), 'cab_round_started', {
     roomCode: code,
@@ -258,7 +261,14 @@ export async function expireRoundTimer(
   for (const player of expectedSubmitters) {
     if (!submittedIds.has(player.id)) {
       await state.addSkippedPlayer(code, player.id)
-      await state.publishEvent(code, { type: 'player_skipped', playerId: player.id, round })
+      const skipProgress = await submissionProgress(code)
+      await state.publishEvent(code, {
+        type: 'player_skipped',
+        playerId: player.id,
+        round,
+        submitted: skipProgress.submitted,
+        expected: skipProgress.expected,
+      })
       captureServerEvent(await distinctIdFor(code, player.id), 'cab_player_skipped', {
         roomCode: code,
         playerId: player.id,
@@ -372,6 +382,38 @@ export function publicIdForKey(order: string[], key: string): string {
   return String(order.indexOf(key))
 }
 
+// Picking-phase submission progress for the client counter. Uses the
+// EXACT same predicate as checkRoundReady's resolution gate below so the
+// UI reaches "N of N" precisely when the round resolves. Rando is
+// excluded (it auto-submits and is not part of human progress); skipped
+// players drop out so the count can still complete after a timer skip.
+// Keep this predicate in sync with checkRoundReady.
+export async function submissionProgress(
+  code: string,
+): Promise<{ submitted: number; expected: number }> {
+  const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
+  if (!session) return { submitted: 0, expected: 0 }
+  const [roundRow] = await db
+    .select()
+    .from(gameRounds)
+    .where(eq(gameRounds.sessionId, session.id))
+    .orderBy(desc(gameRounds.roundNum))
+    .limit(1)
+  const czarId = roundRow?.czarPlayerId ?? null
+  const [submissions, players, skipped] = await Promise.all([
+    state.getSubmissions(code),
+    state.getAllPlayers(code),
+    state.getSkippedPlayers(code),
+  ])
+  const skippedSet = new Set(skipped)
+  const expectedPlayers = players.filter(
+    (p) => p.status === 'active' && p.id !== czarId && !p.isRando && !skippedSet.has(p.id),
+  )
+  const submittedSet = new Set(Object.keys(submissions).map(resolvePlayerId))
+  const submitted = expectedPlayers.filter((p) => submittedSet.has(p.id)).length
+  return { submitted, expected: expectedPlayers.length }
+}
+
 // Detects "all expected players have submitted", then drives the
 // server-controlled reveal and hands off to the mode-specific resolver.
 export async function checkRoundReady(code: string): Promise<void> {
@@ -475,7 +517,13 @@ export async function submitCards(
 
   await state.setSubmission(code, storageKey, submission)
   await state.removeFromHand(code, playerId, cardIds)
-  await state.publishEvent(code, { type: 'player_played', playerId })
+  const playedProgress = await submissionProgress(code)
+  await state.publishEvent(code, {
+    type: 'player_played',
+    playerId,
+    submitted: playedProgress.submitted,
+    expected: playedProgress.expected,
+  })
   captureServerEvent(await distinctIdFor(code, playerId), 'cab_card_played', {
     roomCode: code,
     playerId,
@@ -500,7 +548,16 @@ export async function autoSubmitRando(code: string, pick: number): Promise<void>
   })
   const submission: Submission = { submissionId: createId(), fills, playerId: rando.id }
   await state.setSubmission(code, rando.id, submission)
-  await state.publishEvent(code, { type: 'player_played', playerId: rando.id })
+  // Rando is excluded from submissionProgress's expected set, but the
+  // event still drives the client pip counter — carry the same
+  // server-authoritative counts every other player_played does.
+  const randoProgress = await submissionProgress(code)
+  await state.publishEvent(code, {
+    type: 'player_played',
+    playerId: rando.id,
+    submitted: randoProgress.submitted,
+    expected: randoProgress.expected,
+  })
   captureServerEvent(await distinctIdForHost(code), 'cab_rule_triggered', {
     roomCode: code,
     rule: 'rando',
@@ -650,6 +707,15 @@ export async function endRound(code: string, submitterIds: string[]): Promise<vo
   await state.setPhase(code, 'transition')
   await state.publishEvent(code, { type: 'round_end', activatedPlayers: activated, handsRefilled })
 
+  // Hold on the resolved round (winner highlighted via round_won, hands
+  // refilled via round_end) before *anything* that wipes the board —
+  // whether that's the next round_started or game_over on the deciding
+  // round. Hoisted above the game-over branches so the FINAL round gets
+  // the same paced reveal as every other round (it used to skip straight
+  // to the end screen). Server-driven so it can't be raced by an
+  // immediate round_started / game_over.
+  await sleep(roundResultPauseMs())
+
   const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
   if (!session) return
   const config = session.config as GameConfig
@@ -669,13 +735,6 @@ export async function endRound(code: string, submitterIds: string[]): Promise<vo
     await endGame(code, winnerPlayer.isRando ? 'rando_won' : 'normal', winnerPlayer.id)
     return
   }
-
-  // Hold on the resolved round (winner highlighted via round_won, hands
-  // already refilled via round_end) before the next round_started wipes
-  // the board. Server-driven so it can't be raced by an immediate
-  // round_started — the bug where the winner never showed. Game-over
-  // paths returned above, so the end screen is unaffected.
-  await sleep(roundResultPauseMs())
 
   const nextRound = (await state.getCurrentRound(code)) + 1
   await startRound(code, nextRound)

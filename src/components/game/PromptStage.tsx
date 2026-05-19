@@ -1,22 +1,20 @@
 import { PromptCard } from '~/components/ui/Card'
-import type { BlackCard, Submission, GamePhase } from '~/lib/types'
+import type { BlackCard, GamePhase } from '~/lib/types'
 
 type Props = {
   prompt: BlackCard
   phase: GamePhase
   czarName: string
-  submissions: Submission[]
+  // Server-authoritative picking progress: `submitted` of `expected`
+  // players are in. Reaches submitted === expected exactly when the
+  // round resolves.
+  submitted: number
+  expected: number
 }
 
-export function PromptStage({ prompt, phase, czarName, submissions }: Props) {
+export function PromptStage({ prompt, phase, czarName, submitted, expected }: Props) {
   const isWaiting = phase === 'waiting'
   const isPicking = phase === 'picking'
-
-  // filter(Boolean): a stale card_revealed landing after round_started
-  // cleared submissions[] leaves a sparse hole; rendering it would crash
-  // every client via the error boundary — degrade, don't white-screen.
-  const present = submissions.filter(Boolean)
-  const submittedCount = present.length
 
   return (
     <div className="stage-prompt stage-prompt-hero">
@@ -51,17 +49,11 @@ export function PromptStage({ prompt, phase, czarName, submissions }: Props) {
             )}
           </div>
           <div className="pick-progress">
-            {present.map((s, i) => (
-              <div key={i} className={`pick-pip ${isWaiting ? 'on' : ''}`}>
-                <span className="pick-pip-letter">
-                  {(s.playerId ?? '?').slice(0, 1).toUpperCase()}
-                </span>
-              </div>
+            {Array.from({ length: expected }).map((_, i) => (
+              <div key={i} className={`pick-pip ${i < submitted ? 'on' : ''}`} />
             ))}
             <div className="pick-progress-label muted">
-              {isWaiting
-                ? `${submittedCount} of ${submittedCount} submitted`
-                : `0 of ${submittedCount} submitted`}
+              {submitted} of {expected} submitted
             </div>
           </div>
         </>

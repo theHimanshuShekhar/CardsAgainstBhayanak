@@ -32,6 +32,15 @@ Root causes below were traced to specific source lines on `main`.
 - **Surface:** props only; no server or protocol change.
 - **Verify:** in a finished round the winner badge reads the winner's handle;
   unknown/missing id degrades to a neutral placeholder, never a crash.
+- **Deviation (as built):** the prescribed `playerId → username` lookup keyed
+  on `s.playerId` is unworkable — the client never receives `s.playerId`
+  (`card_revealed` omits it for submission privacy), so it is always
+  `undefined` and the badge never rendered. As built: resolve the winner's
+  handle in `session.tsx` from `round_won.winnerId` (a playerId) + the
+  `scores` payload (and the equivalent from `state_snapshot.winnerId`), and
+  thread it as a `winnerName` prop. Still props-only; no protocol change.
+  Missing id → `"Winner"` placeholder. The grid still highlights the
+  winning card by `submissionId`; only the badge text/avatar changed.
 
 ### #4 · Prompt text doesn't scale between phone and desktop
 
@@ -76,6 +85,29 @@ Root causes below were traced to specific source lines on `main`.
 - **Verify:** a 4-player normal game shows `0→1→2→3 of 3` (Czar excluded);
   a Rando game's auto-submit advances the count; a God Is Dead game shows
   `… of {all players}`.
+- **Deviation (as built):** Rando is **excluded** from both `submitted` and
+  `expected`, not included as the doc states. The counter must reach
+  `N of N` exactly when the round resolves, and `checkRoundReady`'s
+  resolution gate already excludes Rando (it auto-submits at round start and
+  is not a gate member). Counting Rando would desync the displayed counter
+  from the resolution predicate. `submissionProgress` deliberately mirrors
+  `checkRoundReady`'s predicate verbatim (a code comment ties them together).
+  `autoSubmitRando` still emits its `player_played` with the (Rando-excluded)
+  counts so the client pip state stays consistent.
+- **Root-cause fix surfaced during verification (not in original scope):**
+  the Rando protocol E2E failed under full-suite load with `cardRevealed=6`
+  (every published frame delivered 2–3×). Traced to a pre-existing
+  concurrency race in `ensureSubscriber` (`src/ws/handler.ts`): the
+  idempotency guard (`listenerCount > 0`) was checked, then `await
+sub.subscribe(...)`, then the listener attached — so concurrently-
+  connecting peers all slipped past a still-zero count and each attached a
+  duplicate `message` listener on the shared per-channel subscriber. #5's
+  added `submissionProgress` latency widened the window enough to expose it
+  (passed in isolation, failed under load). Fix: attach the listener
+  **before** awaiting `subscribe` so the guard check and the `sub.on` that
+  satisfies it run with no `await` between them (atomic w.r.t. the event
+  loop); racing callers now await `subscribe` for frame-safety and return
+  without adding a listener. Full E2E green (46/46) after the fix.
 
 ### #6 · Multi-blank pick numbering scrambles
 

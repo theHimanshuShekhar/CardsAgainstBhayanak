@@ -75,6 +75,10 @@ export type SessionState = {
   scores: PlayerScore[]
   revealIndex: number
   winnerId: string | null
+  // Picking-phase progress (server-authoritative); reaches submitted ===
+  // expected exactly when the round resolves.
+  submitted: number
+  expected: number
   eliminationTurnPlayerId?: string
   voteTally?: Record<string, number>
   ranking?: Submission[]
@@ -181,11 +185,19 @@ export type ServerMessage =
   | { type: 'player_left'; playerId: string }
   | { type: 'host_changed'; hostId: string }
   | { type: 'game_started'; firstRound: number }
-  | { type: 'round_started'; round: number; prompt: BlackCard; czarId: string | null; hand?: Hand }
-  | { type: 'player_played'; playerId: string }
+  | {
+      type: 'round_started'
+      round: number
+      prompt: BlackCard
+      czarId: string | null
+      hand?: Hand
+      submitted: number
+      expected: number
+    }
+  | { type: 'player_played'; playerId: string; submitted: number; expected: number }
   | { type: 'hand_update'; playerId: string; hand: Hand }
   | { type: 'player_gambled'; playerId: string }
-  | { type: 'player_skipped'; playerId: string; round: number }
+  | { type: 'player_skipped'; playerId: string; round: number; submitted: number; expected: number }
   | { type: 'reveal_start' }
   | { type: 'card_revealed'; submissionIndex: number; fills: Card[] }
   | { type: 'round_won'; winnerId: string; submissionId: string; scores: PlayerScore[] }
