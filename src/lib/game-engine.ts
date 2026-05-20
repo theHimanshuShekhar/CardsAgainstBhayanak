@@ -23,6 +23,20 @@ export function chooseFirstCzar(activePlayerCount: number): number {
   return randomInt(0, activePlayerCount)
 }
 
+// S1-NEW: gameSessions.last_activity_at heartbeat. Without this the
+// sweeper's 6h filter compares against the row's creation time forever
+// and only the `hlen(players) === 0` safety net keeps live games out of
+// the 'abandoned' bucket. Called from every gameplay anchor that signals
+// real activity; cheap (one HSET + one indexed UPDATE).
+export async function touchSessionActivity(code: string): Promise<void> {
+  const now = Date.now()
+  await redis.hset(KEYS.game(code), 'lastActivityAt', String(now))
+  await db
+    .update(gameSessions)
+    .set({ lastActivityAt: new Date(now) })
+    .where(eq(gameSessions.code, code))
+}
+
 // Every scores payload (round_won / state_snapshot / game_over) must
 // exclude `dropped` players. A player who disconnects past the grace
 // window stays in the Redis players hash with a frozen score; if they
@@ -143,7 +157,10 @@ export async function startGame(code: string): Promise<void> {
   // rotation is stable and seeded-RNG runs are deterministic.
   const firstCzarIdx = chooseFirstCzar(czarOrderIds.length)
   await redis.hset(KEYS.game(code), 'czarStartOffset', String(firstCzarIdx))
-  await db.update(gameSessions).set({ status: 'active' }).where(eq(gameSessions.id, session.id))
+  await db
+    .update(gameSessions)
+    .set({ status: 'active', lastActivityAt: new Date() })
+    .where(eq(gameSessions.id, session.id))
 
   engineLogger.info({ code, firstCzarIdx, players: activePlayers.length }, 'game started')
 }
@@ -220,6 +237,7 @@ export async function startRound(
       czarPlayerId: czarId ?? undefined,
     })
     .onConflictDoNothing()
+  await touchSessionActivity(code)
 
   // Arm the round timer before announcing the round so round_started can
   // carry the authoritative expiry for the client's display-only countdown.
@@ -228,7 +246,8 @@ export async function startRound(
     const ms = TIMER_MS[config.timer]
     roundTimerExpiresAt = Date.now() + ms
     await state.setRoundTimerExpiresAt(code, roundTimerExpiresAt)
-    setTimeout(() => void expireRoundTimer(code, round, czarId), ms)
+    const armedAt = roundTimerExpiresAt
+    setTimeout(() => void expireRoundTimer(code, round, czarId, armedAt), ms)
   }
 
   const startProgress = await submissionProgress(code)
@@ -268,10 +287,25 @@ export async function expireRoundTimer(
   code: string,
   round: number,
   czarId: string | null,
+  armedAt: number | null,
 ): Promise<void> {
-  // Guard: if the round has already advanced, this is a stale timer
+  // Guard 1: round already advanced past this timer.
   const currentRound = await state.getCurrentRound(code)
   if (currentRound !== round) return
+
+  // Guard 2 (S3-NEW-A): the persisted expiry no longer matches ours. A
+  // setTimeout queued for the old game's round N can otherwise fire inside
+  // a rematch's round N (resetGame zeroes currentRound first, but startGame
+  // immediately re-stamps it back to round 1) and force-voids the new
+  // round. A non-null `armedAt` means the timer was armed at a known epoch
+  // ms; if persisted is null (round hash wiped by reset) or different
+  // (round armed a fresh timer), this is a stale callback. The legacy
+  // restoreRoundTimers path passes null and skips this guard, since the
+  // re-armed timer IS by definition the authoritative one.
+  if (armedAt !== null) {
+    const persisted = await state.getRoundTimerExpiresAt(code)
+    if (persisted !== armedAt) return
+  }
 
   const [submissions, players] = await Promise.all([
     state.getSubmissions(code),
@@ -334,35 +368,83 @@ export async function expireRoundTimer(
   await checkRoundReady(code)
 }
 
-// S2-10: the round timer is a process-local setTimeout — a restart
-// mid-round loses it, so a round whose players never submit hangs
-// forever (CLAUDE.md: server-controlled phase timing). roundTimerExpiresAt
-// is persisted; on boot, re-arm a timer for every active session still
-// in `picking` from that expiry, firing immediately if it already
-// lapsed during downtime. expireRoundTimer self-guards on a stale round
-// number, so a duplicate (vs. a round started just after boot) no-ops.
+// S2-10 + S2-NEW: on boot, sweep every active session for in-flight
+// process-local awaits that died with the previous process and resume
+// them. Three cases:
+//   1. phase='picking' with a persisted roundTimerExpiresAt → re-arm
+//      the round-timeout setTimeout (S2-10).
+//   2. phase='transition' with a persisted postResolveResumeAt → schedule
+//      finalizeRoundAfterPause (the 4s ROUND_RESULT_PAUSE_MS that the
+//      previous process was sleeping through when it died) (S2-NEW).
+//   3. phase='reveal' → fast-forward through the staggered reveal loop's
+//      tail: skip remaining card_revealed publishes (clients resync via
+//      rejoin's state_snapshot) and run transitionAfterReveal so the
+//      round can hand off to the Czar / vote / elimination phase (S2-NEW).
+// All three callees are guarded against duplicate calls.
 export async function restoreRoundTimers(): Promise<void> {
   const sessions = await db
-    .select({ id: gameSessions.id, code: gameSessions.code })
+    .select({ id: gameSessions.id, code: gameSessions.code, config: gameSessions.config })
     .from(gameSessions)
     .where(eq(gameSessions.status, 'active'))
   for (const s of sessions) {
     const { code } = s
-    if ((await state.getPhase(code)) !== 'picking') continue
-    const expiresAt = await state.getRoundTimerExpiresAt(code)
-    if (!expiresAt) continue
-    const round = await state.getCurrentRound(code)
-    const [roundRow] = await db
-      .select({ czarPlayerId: gameRounds.czarPlayerId })
-      .from(gameRounds)
-      .where(eq(gameRounds.sessionId, s.id))
-      .orderBy(desc(gameRounds.roundNum))
-      .limit(1)
-    const czarId = roundRow?.czarPlayerId ?? null
-    const ms = expiresAt - Date.now()
-    if (ms <= 0) void expireRoundTimer(code, round, czarId)
-    else setTimeout(() => void expireRoundTimer(code, round, czarId), ms)
-    engineLogger.info({ code, round, ms: Math.max(0, ms) }, 'round timer restored')
+    const phase = await state.getPhase(code)
+
+    // Case 1 — picking-phase round timer (S2-10)
+    if (phase === 'picking') {
+      const expiresAt = await state.getRoundTimerExpiresAt(code)
+      if (!expiresAt) continue
+      const round = await state.getCurrentRound(code)
+      const [roundRow] = await db
+        .select({ czarPlayerId: gameRounds.czarPlayerId })
+        .from(gameRounds)
+        .where(eq(gameRounds.sessionId, s.id))
+        .orderBy(desc(gameRounds.roundNum))
+        .limit(1)
+      const czarId = roundRow?.czarPlayerId ?? null
+      const ms = expiresAt - Date.now()
+      // armedAt=null bypasses the persisted-expiry guard: the boot-restore
+      // path IS the authoritative re-arm, and the persisted value is what
+      // we just read, so a match-check would be tautological.
+      if (ms <= 0) void expireRoundTimer(code, round, czarId, null)
+      else setTimeout(() => void expireRoundTimer(code, round, czarId, null), ms)
+      engineLogger.info({ code, round, ms: Math.max(0, ms) }, 'round timer restored')
+      continue
+    }
+
+    // Case 2 — post-resolve pause (S2-NEW)
+    if (phase === 'transition') {
+      const resumeAt = await state.getPostResolveResumeAt(code)
+      if (!resumeAt) continue // not a finalize-pending transition (no-op)
+      const ms = resumeAt - Date.now()
+      if (ms <= 0) void finalizeRoundAfterPause(code)
+      else setTimeout(() => void finalizeRoundAfterPause(code), ms)
+      engineLogger.info({ code, ms: Math.max(0, ms) }, 'post-resolve pause restored')
+      continue
+    }
+
+    // Case 3 — reveal-loop interrupted mid-stagger (S2-NEW). The post-loop
+    // transition (set next phase + publish elimination_turn / vote_tally)
+    // never ran, so the Czar has no signal to act. Fast-forward: skip the
+    // remaining REVEAL_STAGGER beats and run transitionAfterReveal now.
+    // Clients reconnecting via rejoin pick up the missed card_revealed
+    // events from the snapshot's submissions array.
+    if (phase === 'reveal') {
+      const [roundRow] = await db
+        .select({ czarPlayerId: gameRounds.czarPlayerId })
+        .from(gameRounds)
+        .where(eq(gameRounds.sessionId, s.id))
+        .orderBy(desc(gameRounds.roundNum))
+        .limit(1)
+      const czarId = roundRow?.czarPlayerId ?? null
+      const players = await state.getAllPlayers(code)
+      const config = s.config as GameConfig
+      void transitionAfterReveal(code, config, czarId, players).catch((err) =>
+        engineLogger.error({ err, code }, 'reveal fast-forward failed'),
+      )
+      engineLogger.info({ code }, 'reveal phase fast-forwarded')
+      continue
+    }
   }
 }
 
@@ -499,6 +581,19 @@ export async function checkRoundReady(code: string): Promise<void> {
     await state.publishEvent(code, { type: 'card_revealed', submissionIndex: i, fills: sub.fills })
   }
 
+  await transitionAfterReveal(code, config, czarId, players)
+}
+
+// S2-NEW: extracted so the boot path can fast-forward a round whose
+// reveal-loop crashed mid-stagger. Idempotent — re-publishing
+// elimination_turn / vote_tally is harmless (the client just re-syncs)
+// and setPhase is a single HSET.
+async function transitionAfterReveal(
+  code: string,
+  config: GameConfig,
+  czarId: string | null,
+  players: GamePlayer[],
+): Promise<void> {
   if (config.rules.includes('survival')) {
     await state.setPhase(code, 'eliminating')
     const turnOrder = players.filter((p) => p.status === 'active' && p.id !== czarId && !p.isRando)
@@ -659,6 +754,7 @@ async function persistRoundOutcome(
       ...(outcome.voteTally !== undefined ? { voteTally: outcome.voteTally } : {}),
     })
     .where(and(eq(gameRounds.sessionId, session.id), eq(gameRounds.roundNum, round)))
+  await touchSessionActivity(code)
 }
 
 export async function endRound(code: string, submitterIds: string[]): Promise<void> {
@@ -738,10 +834,34 @@ export async function endRound(code: string, submitterIds: string[]): Promise<vo
   // the same paced reveal as every other round (it used to skip straight
   // to the end screen). Server-driven so it can't be raced by an
   // immediate round_started / game_over.
+  //
+  // S2-NEW: the pause used to be a bare `await sleep(...)`, which a
+  // process restart in this 4s window dropped on the floor — the round
+  // stayed in 'transition' forever. Persist a resume-at cursor before
+  // sleeping; the boot path schedules finalizeRoundAfterPause for any
+  // session that still has one when this process takes over.
+  const resumeAt = Date.now() + roundResultPauseMs()
+  await state.setPostResolveResumeAt(code, resumeAt)
   await sleep(roundResultPauseMs())
+  await finalizeRoundAfterPause(code)
+}
+
+// S2-NEW: the post-pause tail of endRound, extracted so the boot path
+// can run it for a session whose endRound was killed mid-sleep. The
+// resume-cursor clear at the top doubles as an idempotency guard —
+// two concurrent callers (the original endRound continuation racing the
+// boot-scheduled timer) see one mismatch and the second bails.
+async function finalizeRoundAfterPause(code: string): Promise<void> {
+  const cursor = await state.getPostResolveResumeAt(code)
+  if (cursor === null) return // already finalized by an earlier caller
+  await state.clearPostResolveResumeAt(code)
 
   const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
   if (!session) return
+  // The session may have been ended/reset/abandoned out from under us
+  // (e.g. host clicked rematch after the round resolved but before the
+  // pause finished). Bail rather than start a phantom next round.
+  if (session.status !== 'active') return
   const config = session.config as GameConfig
   const refreshed = await state.getAllPlayers(code)
 
@@ -865,6 +985,7 @@ export async function resetGame(code: string, mode: ResetMode): Promise<void> {
       endedAt: null,
       endMode: null,
       winnerPlayerId: null,
+      lastActivityAt: new Date(),
     })
     .where(eq(gameSessions.id, session.id))
 
@@ -1052,6 +1173,7 @@ export async function dropPlayer(
   if (!player || player.status === 'dropped') return
 
   await state.updatePlayer(code, playerId, { status: 'dropped' })
+  await touchSessionActivity(code)
   await state.publishEvent(code, { type: 'player_left', playerId })
   captureServerEvent(await distinctIdFor(code, playerId), 'cab_player_dropped', {
     roomCode: code,

@@ -134,10 +134,46 @@ function SessionScreen() {
         const myHand = event.handsRefilled[myId]
         if (myHand) setHand(myHand)
       }
+      // S3-NEW-B: a voided round (czar dropped, or timer expiry with <2
+      // submitters) is followed immediately by a fresh round_started from
+      // the engine. Drop the dead round's UI state so the incoming round
+      // doesn't render against a stale winner badge / partial submissions.
+      if (event.type === 'round_voided') {
+        setSelected([])
+        setSubmissions([])
+        setRevealIndex(-1)
+        setWinnerId(null)
+        setWinnerName(null)
+      }
+      // S3-NEW-B: rematch/back-to-lobby reset. Normally a player is on
+      // /end when this fires (the host can only reset from `ended`), but
+      // a defensive handler keeps a still-mounted session screen sane
+      // if it raced the navigation. 'lobby' → bounce to /lobby; 'rematch'
+      // → clear so the incoming game_started+round_started repopulate.
+      if (event.type === 'game_reset') {
+        if (event.mode === 'lobby') {
+          void navigate({ to: '/games/$code/lobby', params: { code } })
+        } else {
+          setRound(0)
+          setPrompt(null)
+          setSelected([])
+          setSubmissions([])
+          setRevealIndex(-1)
+          setWinnerId(null)
+          setWinnerName(null)
+          setTimerExpiresAt(null)
+        }
+      }
       if (event.type === 'game_over') {
+        // S3-NEW-E: stamp the roomCode so end.tsx can reject a stale
+        // payload from a previous game's tab (sessionStorage survives
+        // navigation, and a direct visit to a different /end without
+        // going through session.tsx would otherwise read someone else's
+        // result).
         sessionStorage.setItem(
           'cab_last_game_over',
           JSON.stringify({
+            code,
             finalScores: event.finalScores,
             winnerId: event.winnerId,
             mode: event.mode,

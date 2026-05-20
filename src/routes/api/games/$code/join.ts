@@ -101,6 +101,7 @@ export const Route = createFileRoute('/api/games/$code/join')({
           joinedAt: player.joinedAt.toISOString(),
         } as const
         await state.addPlayer(code, gamePlayer)
+        await engine.touchSessionActivity(code)
         await state.publishEvent(code, { type: 'player_joined', player: gamePlayer })
 
         // S2-8: this join may make a paused room playable again. resume

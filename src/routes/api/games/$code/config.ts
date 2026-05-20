@@ -1,10 +1,10 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { db } from '~/db'
-import { gameSessions } from '~/db/schema'
+import { gameSessions, gamePlayers } from '~/db/schema'
 import { authenticate } from '~/lib/api-auth'
 import { GameConfigSchema, conflictingModalRules, errorResponse } from '~/lib/api-helpers'
 import { apiLogger } from '~/lib/logger'
-import { eq } from 'drizzle-orm'
+import { eq, and, sql } from 'drizzle-orm'
 import * as state from '~/lib/game-state'
 import type { SessionStatus } from '~/lib/types'
 
@@ -45,9 +45,33 @@ export const Route = createFileRoute('/api/games/$code/config')({
         if (session.status !== 'lobby')
           return errorResponse(409, 'invalid_state', 'Config can only change in the lobby')
 
+        // S3-NEW-C: maxPlayers must not drop below the current player-role
+        // roster — otherwise the next join sees a phantom "room full" and
+        // the existing lobby UI shows more chips than the new cap allows.
+        // Zod already enforces the absolute 3..10 bound; this is the
+        // dynamic floor based on who's already in the room.
+        const [activePlayers] = await db
+          .select({ cnt: sql<number>`count(*)` })
+          .from(gamePlayers)
+          .where(
+            and(
+              eq(gamePlayers.sessionId, session.id),
+              eq(gamePlayers.role, 'player'),
+              sql`${gamePlayers.status} != 'dropped'`,
+            ),
+          )
+        const rosterSize = Number(activePlayers?.cnt ?? 0)
+        if (parsed.data.maxPlayers < rosterSize)
+          return errorResponse(
+            409,
+            'invalid_state',
+            `Cannot set maxPlayers below current roster (${rosterSize})`,
+            { rosterSize, requested: parsed.data.maxPlayers },
+          )
+
         await db
           .update(gameSessions)
-          .set({ config: parsed.data })
+          .set({ config: parsed.data, lastActivityAt: new Date() })
           .where(eq(gameSessions.id, session.id))
 
         // Refresh every connected lobby client with the new config.

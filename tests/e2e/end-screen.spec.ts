@@ -20,8 +20,18 @@ const SCORES: Score[] = [
   { playerId: 'p3', username: 'AlsoRan', score: 1, isJudge: false, isRando: false },
 ]
 
+// S3-NEW-E: end.tsx now rejects payloads whose code doesn't match the
+// /end route (a stale game's payload would otherwise leak into a different
+// room's end screen). Tests visit /games/TESTAB/end, so seed `code:
+// 'TESTAB'`.
 function seed(scores: Score[], winnerId: string, mode: string) {
-  return JSON.stringify({ finalScores: scores, winnerId, mode, totalRounds: 9 })
+  return JSON.stringify({
+    code: 'TESTAB',
+    finalScores: scores,
+    winnerId,
+    mode,
+    totalRounds: 9,
+  })
 }
 
 test('S2-8: normal mode shows winner + final scoreboard', async ({ page }) => {

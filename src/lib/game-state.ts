@@ -207,6 +207,26 @@ export async function getRoundTimerExpiresAt(code: string): Promise<number | nul
   return val ? Number(val) : null
 }
 
+// S2-NEW: the post-resolve ROUND_RESULT_PAUSE_MS hold (the 4s beat that
+// lets clients read the round_won badge before the next round_started)
+// was a process-local `await sleep(...)`. A restart in that window left
+// the round in phase='transition' forever with no one to advance it.
+// Persist the absolute resume-at timestamp so the boot path can schedule
+// the finalize step that endRound would have run.
+export async function setPostResolveResumeAt(code: string, ts: number): Promise<void> {
+  await redis.hset(KEYS.round(code), 'postResolveResumeAt', String(ts))
+  await redis.expire(KEYS.round(code), ROOM_TTL_SECONDS)
+}
+
+export async function getPostResolveResumeAt(code: string): Promise<number | null> {
+  const val = await redis.hget(KEYS.round(code), 'postResolveResumeAt')
+  return val ? Number(val) : null
+}
+
+export async function clearPostResolveResumeAt(code: string): Promise<void> {
+  await redis.hdel(KEYS.round(code), 'postResolveResumeAt')
+}
+
 // S2-1: persist the authoritative phase so a disconnect handler can tell
 // whether a round is mid-flight (and which czar owns it) without having
 // to re-derive it the way buildSnapshot does.

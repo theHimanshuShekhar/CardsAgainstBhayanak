@@ -13,22 +13,38 @@ export const Route = createFileRoute('/games/$code/end')({
 })
 
 type LastGameOver = {
+  code: string
   finalScores: PlayerScore[]
   winnerId: string
   mode: GameOverMode
   totalRounds: number
 }
 
-function readLastGameOver(): LastGameOver | null {
+// S3-NEW-E: reject (and clear) a payload whose roomCode doesn't match the
+// /end route — sessionStorage outlives navigation, so a stale entry from
+// a previous game would otherwise leak into a different room's end screen.
+function readLastGameOver(code: string): LastGameOver | null {
   if (typeof window === 'undefined') return null
   try {
     const raw = sessionStorage.getItem('cab_last_game_over')
     if (!raw) return null
-    const parsed = JSON.parse(raw) as LastGameOver
-    if (!Array.isArray(parsed.finalScores)) return null
-    return parsed
+    const parsed = JSON.parse(raw) as Partial<LastGameOver>
+    if (!Array.isArray(parsed.finalScores) || parsed.code !== code) {
+      sessionStorage.removeItem('cab_last_game_over')
+      return null
+    }
+    return parsed as LastGameOver
   } catch {
     return null
+  }
+}
+
+function clearLastGameOver(): void {
+  if (typeof window === 'undefined') return
+  try {
+    sessionStorage.removeItem('cab_last_game_over')
+  } catch {
+    // sessionStorage write-disabled (private mode quirks); not fatal.
   }
 }
 
@@ -36,7 +52,7 @@ function EndScreen() {
   const navigate = useNavigate()
   const { code } = Route.useParams()
   const { session, setSession } = useSession()
-  const [result] = useState<LastGameOver | null>(() => readLastGameOver())
+  const [result] = useState<LastGameOver | null>(() => readLastGameOver(code))
 
   // #3: the end screen joins the room socket purely as a redirect hub —
   // when the host resets, every client (host included) routes through
@@ -49,24 +65,31 @@ function EndScreen() {
   useEffect(() => {
     return on((event) => {
       if (event.type === 'game_reset') {
+        // S3-NEW-E: rematch/back-to-lobby leaves /end — the cached result
+        // is now stale for the next game in the same tab.
+        clearLastGameOver()
         void navigate({ to: '/games/$code/lobby', params: { code } })
         return
       }
       if (event.type === 'state_snapshot') {
         // A rematch was already live by the time this socket connected.
+        clearLastGameOver()
         void navigate({ to: '/games/$code/session', params: { code } })
         return
       }
       if (event.type === 'lobby_snapshot') {
         if (event.gameStatus === 'active' || event.gameStatus === 'paused') {
+          clearLastGameOver()
           void navigate({ to: '/games/$code/session', params: { code } })
           return
         }
         if (event.gameStatus === 'lobby') {
+          clearLastGameOver()
           void navigate({ to: '/games/$code/lobby', params: { code } })
           return
         }
         if (event.gameStatus === 'abandoned') {
+          clearLastGameOver()
           setSession(null)
           void navigate({ to: '/' })
           return
@@ -75,6 +98,7 @@ function EndScreen() {
         setPlayers(event.players)
       }
       if (event.type === 'auth_error') {
+        clearLastGameOver()
         setSession(null)
         void navigate({ to: '/' })
       }
@@ -112,12 +136,14 @@ function EndScreen() {
 
   const handleGoHome = () => {
     captureEvent('cab_go_home_clicked', { previousRoomCode: code })
+    clearLastGameOver()
     setSession(null)
     void navigate({ to: '/' })
   }
 
   const handlePlayAgain = () => {
     captureEvent('cab_play_again_clicked', { previousRoomCode: code })
+    clearLastGameOver()
     void navigate({ to: '/games/create' })
   }
 
