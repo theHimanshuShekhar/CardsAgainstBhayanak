@@ -6,7 +6,12 @@ import * as state from '~/lib/game-state'
 import { generateRoomCode } from '~/lib/code-gen.server'
 import { signSessionToken } from '~/lib/session-token'
 import { enforceRateLimit } from '~/lib/rate-limit'
-import { CreateGameSchema, errorResponse, getClientIp } from '~/lib/api-helpers'
+import {
+  CreateGameSchema,
+  conflictingModalRules,
+  errorResponse,
+  getClientIp,
+} from '~/lib/api-helpers'
 import { captureServerEvent } from '~/lib/posthog-server'
 import { apiLogger } from '~/lib/logger'
 import { eq, count } from 'drizzle-orm'
@@ -49,13 +54,9 @@ export const Route = createFileRoute('/api/games/')({
             parsed.error.flatten(),
           )
 
-        // S2-7: modal rules are mutually exclusive (the UI enforces this with
-        // a radio group, but the server must too — a crafted request bypasses
-        // the client). This is the only endpoint that accepts a GameConfig.
-        const MODAL_RULE_IDS = ['godmode', 'survival', 'serious_business'] as const
-        const activeModal = parsed.data.config.rules.filter((r) =>
-          (MODAL_RULE_IDS as readonly string[]).includes(r),
-        )
+        // S2-7: modal rules are mutually exclusive — re-checked server-side
+        // (shared with the config-patch endpoint via conflictingModalRules).
+        const activeModal = conflictingModalRules(parsed.data.config.rules)
         if (activeModal.length > 1)
           return errorResponse(
             400,

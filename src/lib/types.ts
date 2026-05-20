@@ -75,6 +75,14 @@ export type SessionState = {
   scores: PlayerScore[]
   revealIndex: number
   winnerId: string | null
+  // Picking-phase progress (server-authoritative); reaches submitted ===
+  // expected exactly when the round resolves.
+  submitted: number
+  expected: number
+  // Epoch ms when the round timer fires; null when timer is Off. Used by
+  // the client purely for a display-only countdown — the server remains
+  // the sole authority on phase transitions.
+  roundTimerExpiresAt: number | null
   eliminationTurnPlayerId?: string
   voteTally?: Record<string, number>
   ranking?: Submission[]
@@ -110,6 +118,10 @@ export type GameConfig = {
 // ── Game-over outcome ─────────────────────────────────────────────
 
 export type GameOverMode = 'normal' | 'happy_ending' | 'rando_won' | 'deck_exhausted' | 'abandoned'
+
+// Post-game host action: replay the same room. 'rematch' goes straight
+// into a fresh game; 'lobby' returns everyone to the lobby to reconfigure.
+export type ResetMode = 'rematch' | 'lobby'
 
 // ── Error codes ───────────────────────────────────────────────────
 
@@ -181,11 +193,20 @@ export type ServerMessage =
   | { type: 'player_left'; playerId: string }
   | { type: 'host_changed'; hostId: string }
   | { type: 'game_started'; firstRound: number }
-  | { type: 'round_started'; round: number; prompt: BlackCard; czarId: string | null; hand?: Hand }
-  | { type: 'player_played'; playerId: string }
+  | {
+      type: 'round_started'
+      round: number
+      prompt: BlackCard
+      czarId: string | null
+      hand?: Hand
+      submitted: number
+      expected: number
+      roundTimerExpiresAt: number | null
+    }
+  | { type: 'player_played'; playerId: string; submitted: number; expected: number }
   | { type: 'hand_update'; playerId: string; hand: Hand }
   | { type: 'player_gambled'; playerId: string }
-  | { type: 'player_skipped'; playerId: string; round: number }
+  | { type: 'player_skipped'; playerId: string; round: number; submitted: number; expected: number }
   | { type: 'reveal_start' }
   | { type: 'card_revealed'; submissionIndex: number; fills: Card[] }
   | { type: 'round_won'; winnerId: string; submissionId: string; scores: PlayerScore[] }
@@ -196,5 +217,6 @@ export type ServerMessage =
   | { type: 'round_voided'; round: number; reason: string }
   | { type: 'round_end'; activatedPlayers: string[]; handsRefilled: Record<string, Hand> }
   | { type: 'game_over'; finalScores: PlayerScore[]; winnerId: string; mode: GameOverMode }
+  | { type: 'game_reset'; mode: ResetMode }
   | { type: 'error'; code: ErrorCode; message: string }
   | { type: 'pong' }

@@ -823,7 +823,7 @@ game:{code}:deck:black     list of card IDs (shuffled)
 game:{code}:deck:white     list of card IDs (shuffled)
 game:{code}:discard:white  list (for reshuffle when deck:white runs low)
 game:{code}:discard:black  list (informational; no reshuffle)
-game:{code}:hand:{id}      set of white card IDs (for player {id})
+game:{code}:hand:{id}      list of white card IDs (for player {id}; ordered, refills append to tail)
 game:{code}:grace:{id}     string with PX expiry = GRACE_WINDOW_MS; set on disconnect
 game:{code}:channel        pub/sub channel
 ```

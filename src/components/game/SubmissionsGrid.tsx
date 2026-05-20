@@ -7,6 +7,10 @@ type Props = {
   phase: 'judging' | 'reveal'
   revealIndex: number
   winnerId: string | null
+  // Winner's display handle, resolved server-side from scores. The
+  // client never learns submission→playerId (privacy), so this is the
+  // only place the winning player's name is available.
+  winnerName: string | null
   isCzar: boolean
   onStartReveal: () => void
   onPickWinner: (submissionId: string) => void
@@ -17,6 +21,7 @@ export function SubmissionsGrid({
   phase,
   revealIndex,
   winnerId,
+  winnerName,
   isCzar,
   onStartReveal,
   onPickWinner,
@@ -75,11 +80,11 @@ export function SubmissionsGrid({
                         isCzar && winnerId == null ? () => onPickWinner(s.submissionId) : undefined
                       }
                     />
-                    {isWinner && fi === 0 && s.playerId && (
+                    {isWinner && fi === 0 && (
                       <div className="winner-badge">
                         <div className="winner-by">
-                          <Avatar name={s.playerId} size="sm" />
-                          <span>+1 {s.playerId}</span>
+                          <Avatar name={winnerName ?? 'Winner'} size="sm" />
+                          <span>+1 {winnerName ?? 'Winner'}</span>
                         </div>
                       </div>
                     )}

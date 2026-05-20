@@ -28,6 +28,16 @@ function SessionScreen() {
   const [submissions, setSubmissions] = useState<Submission[]>([])
   const [revealIndex, setRevealIndex] = useState(-1)
   const [winnerId, setWinnerId] = useState<string | null>(null)
+  // Winner's handle for the result badge. Resolved from scores by the
+  // winning playerId — the grid highlights by submissionId, but the
+  // client never maps submission→playerId, so the name must come from
+  // round_won.winnerId / the snapshot's winnerId (both playerIds).
+  const [winnerName, setWinnerName] = useState<string | null>(null)
+  const [submitted, setSubmitted] = useState(0)
+  const [expected, setExpected] = useState(0)
+  // Server-authoritative round-timer expiry (epoch ms; null when timer
+  // Off). Drives a display-only countdown — never a client phase timer.
+  const [timerExpiresAt, setTimerExpiresAt] = useState<number | null>(null)
   // Read inside the socket handler without putting `round` in the effect
   // deps — re-subscribing mid-game drops WS frames in the cleanup→setup gap.
   const roundRef = useRef(round)
@@ -56,6 +66,12 @@ function SessionScreen() {
         setSubmissions(s.submissions)
         setRevealIndex(s.revealIndex)
         setWinnerId(s.winnerId)
+        // Snapshot winnerId is a playerId (server's getRoundWinner);
+        // resolve its handle from the snapshot scores.
+        setWinnerName(s.scores.find((x) => x.playerId === s.winnerId)?.username ?? null)
+        setSubmitted(s.submitted)
+        setExpected(s.expected)
+        setTimerExpiresAt(s.roundTimerExpiresAt)
         if (s.hand) setHand(s.hand)
         setPhase(s.phase === 'picking' && s.czarId === myId ? 'waiting' : s.phase)
       }
@@ -67,15 +83,21 @@ function SessionScreen() {
         setSubmissions([])
         setRevealIndex(-1)
         setWinnerId(null)
+        setWinnerName(null)
+        setSubmitted(event.submitted)
+        setExpected(event.expected)
+        setTimerExpiresAt(event.roundTimerExpiresAt)
         if (event.hand) setHand(event.hand)
         setPhase(event.czarId === myId ? 'waiting' : 'picking')
       }
       if (event.type === 'hand_update' && event.playerId === myId) {
         setHand(event.hand)
       }
-      if (event.type === 'player_played') {
-        // another player submitted — add a placeholder submission for progress tracking
-        setSubmissions((prev) => [...prev, { submissionId: event.playerId, fills: [] }])
+      if (event.type === 'player_played' || event.type === 'player_skipped') {
+        // Server-authoritative progress: reaches submitted === expected
+        // exactly when the round resolves (skips shrink expected).
+        setSubmitted(event.submitted)
+        setExpected(event.expected)
       }
       if (event.type === 'reveal_start') {
         setPhase('reveal')
@@ -104,6 +126,9 @@ function SessionScreen() {
         // used to race, so the winner never showed).
         setWinnerId(event.submissionId)
         setScores(event.scores)
+        // event.winnerId is the winning playerId; resolve its handle
+        // from the same scores payload for the result badge (#1).
+        setWinnerName(event.scores.find((x) => x.playerId === event.winnerId)?.username ?? null)
       }
       if (event.type === 'round_end') {
         const myHand = event.handsRefilled[myId]
@@ -136,7 +161,11 @@ function SessionScreen() {
       if (!prompt) return
       setSelected((prev) => {
         if (prev.includes(cardId)) return prev.filter((id) => id !== cardId)
-        if (prev.length >= prompt.pick) return [...prev.slice(1), cardId]
+        // Quota full: ignore taps on new cards (#6). Evicting pick #1 to
+        // append the tap silently renumbered every remaining pick. The
+        // player must explicitly deselect one first; HandDock renumbers
+        // correctly via selected.indexOf on deselect/reselect.
+        if (prev.length >= prompt.pick) return prev
         return [...prev, cardId]
       })
     },
@@ -192,7 +221,9 @@ function SessionScreen() {
                   prompt={prompt}
                   phase={phase}
                   czarName={czarName}
-                  submissions={submissions}
+                  submitted={submitted}
+                  expected={expected}
+                  roundTimerExpiresAt={timerExpiresAt}
                 />
               </div>
             ) : (
@@ -201,7 +232,9 @@ function SessionScreen() {
                   prompt={prompt}
                   phase={phase}
                   czarName={czarName}
-                  submissions={submissions}
+                  submitted={submitted}
+                  expected={expected}
+                  roundTimerExpiresAt={timerExpiresAt}
                 />
                 {(phase === 'judging' || phase === 'reveal') && (
                   <SubmissionsGrid
@@ -209,6 +242,7 @@ function SessionScreen() {
                     phase={phase as 'judging' | 'reveal'}
                     revealIndex={revealIndex}
                     winnerId={winnerId}
+                    winnerName={winnerName}
                     isCzar={isCzar}
                     onStartReveal={handleStartReveal}
                     onPickWinner={handlePickWinner}

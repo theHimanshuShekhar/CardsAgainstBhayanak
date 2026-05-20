@@ -548,7 +548,13 @@ button {
   border-radius: 18px;
 }
 .card-xl .card-text {
-  font-size: 30px;
+  /* #4: fluid between phone and desktop. Flat 30px overflowed the fixed
+     360px card on tablet / narrow-desktop (≈720–1100px), where no
+     intermediate breakpoint scaled it. clamp() caps at the original
+     30px on wide screens (≥~1155px, no desktop regression) and shrinks
+     proportionally below that; the ≤720 / ≤420 media rules still
+     override for phone. Scoped to the prompt card only. */
+  font-size: clamp(20px, 2.6vw, 30px);
   line-height: 1.1;
   letter-spacing: -0.028em;
 }
@@ -1487,6 +1493,23 @@ button {
   width: 100%;
   max-width: 520px;
   margin: 0 auto;
+  position: relative;
+}
+/* Absolutely positioned so the prompt card keeps its original resting Y
+   (a taller flex column would push it down behind the sticky hand dock —
+   see responsive-layout.spec). Anchored top-right, clear of the centred
+   eyebrow text and the prompt's centre line. */
+.stage-timer {
+  position: absolute;
+  top: -6px;
+  right: 0;
+  font: 800 40px/1 var(--font-mono);
+  letter-spacing: 0.04em;
+  color: var(--white);
+  font-variant-numeric: tabular-nums;
+}
+.stage-timer-urgent {
+  animation: blink 1s steps(1, end) infinite;
 }
 .pick-status {
   margin-top: 18px;
@@ -1520,9 +1543,6 @@ button {
   background: var(--white);
   color: var(--black);
   border: 1.5px solid var(--white);
-}
-.pick-pip-letter {
-  pointer-events: none;
 }
 .pick-progress-label {
   margin-left: 6px;

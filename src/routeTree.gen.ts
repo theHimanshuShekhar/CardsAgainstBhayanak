@@ -23,8 +23,10 @@ import { Route as GamesCodeLobbyRouteImport } from './routes/games/$code/lobby'
 import { Route as GamesCodeEndRouteImport } from './routes/games/$code/end'
 import { Route as ApiGamesCodeWsRouteImport } from './routes/api/games/$code/ws'
 import { Route as ApiGamesCodeStartRouteImport } from './routes/api/games/$code/start'
+import { Route as ApiGamesCodeResetRouteImport } from './routes/api/games/$code/reset'
 import { Route as ApiGamesCodeLeaveRouteImport } from './routes/api/games/$code/leave'
 import { Route as ApiGamesCodeJoinRouteImport } from './routes/api/games/$code/join'
+import { Route as ApiGamesCodeConfigRouteImport } from './routes/api/games/$code/config'
 
 const StatsRoute = StatsRouteImport.update({
   id: '/stats',
@@ -96,6 +98,11 @@ const ApiGamesCodeStartRoute = ApiGamesCodeStartRouteImport.update({
   path: '/api/games/$code/start',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiGamesCodeResetRoute = ApiGamesCodeResetRouteImport.update({
+  id: '/api/games/$code/reset',
+  path: '/api/games/$code/reset',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiGamesCodeLeaveRoute = ApiGamesCodeLeaveRouteImport.update({
   id: '/api/games/$code/leave',
   path: '/api/games/$code/leave',
@@ -104,6 +111,11 @@ const ApiGamesCodeLeaveRoute = ApiGamesCodeLeaveRouteImport.update({
 const ApiGamesCodeJoinRoute = ApiGamesCodeJoinRouteImport.update({
   id: '/api/games/$code/join',
   path: '/api/games/$code/join',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiGamesCodeConfigRoute = ApiGamesCodeConfigRouteImport.update({
+  id: '/api/games/$code/config',
+  path: '/api/games/$code/config',
   getParentRoute: () => rootRouteImport,
 } as any)
 
@@ -120,8 +132,10 @@ export interface FileRoutesByFullPath {
   '/games/$code/lobby': typeof GamesCodeLobbyRoute
   '/games/$code/session': typeof GamesCodeSessionRoute
   '/api/games/': typeof ApiGamesIndexRoute
+  '/api/games/$code/config': typeof ApiGamesCodeConfigRoute
   '/api/games/$code/join': typeof ApiGamesCodeJoinRoute
   '/api/games/$code/leave': typeof ApiGamesCodeLeaveRoute
+  '/api/games/$code/reset': typeof ApiGamesCodeResetRoute
   '/api/games/$code/start': typeof ApiGamesCodeStartRoute
   '/api/games/$code/ws': typeof ApiGamesCodeWsRoute
 }
@@ -138,8 +152,10 @@ export interface FileRoutesByTo {
   '/games/$code/lobby': typeof GamesCodeLobbyRoute
   '/games/$code/session': typeof GamesCodeSessionRoute
   '/api/games': typeof ApiGamesIndexRoute
+  '/api/games/$code/config': typeof ApiGamesCodeConfigRoute
   '/api/games/$code/join': typeof ApiGamesCodeJoinRoute
   '/api/games/$code/leave': typeof ApiGamesCodeLeaveRoute
+  '/api/games/$code/reset': typeof ApiGamesCodeResetRoute
   '/api/games/$code/start': typeof ApiGamesCodeStartRoute
   '/api/games/$code/ws': typeof ApiGamesCodeWsRoute
 }
@@ -157,8 +173,10 @@ export interface FileRoutesById {
   '/games/$code/lobby': typeof GamesCodeLobbyRoute
   '/games/$code/session': typeof GamesCodeSessionRoute
   '/api/games/': typeof ApiGamesIndexRoute
+  '/api/games/$code/config': typeof ApiGamesCodeConfigRoute
   '/api/games/$code/join': typeof ApiGamesCodeJoinRoute
   '/api/games/$code/leave': typeof ApiGamesCodeLeaveRoute
+  '/api/games/$code/reset': typeof ApiGamesCodeResetRoute
   '/api/games/$code/start': typeof ApiGamesCodeStartRoute
   '/api/games/$code/ws': typeof ApiGamesCodeWsRoute
 }
@@ -177,8 +195,10 @@ export interface FileRouteTypes {
     | '/games/$code/lobby'
     | '/games/$code/session'
     | '/api/games/'
+    | '/api/games/$code/config'
     | '/api/games/$code/join'
     | '/api/games/$code/leave'
+    | '/api/games/$code/reset'
     | '/api/games/$code/start'
     | '/api/games/$code/ws'
   fileRoutesByTo: FileRoutesByTo
@@ -195,8 +215,10 @@ export interface FileRouteTypes {
     | '/games/$code/lobby'
     | '/games/$code/session'
     | '/api/games'
+    | '/api/games/$code/config'
     | '/api/games/$code/join'
     | '/api/games/$code/leave'
+    | '/api/games/$code/reset'
     | '/api/games/$code/start'
     | '/api/games/$code/ws'
   id:
@@ -213,8 +235,10 @@ export interface FileRouteTypes {
     | '/games/$code/lobby'
     | '/games/$code/session'
     | '/api/games/'
+    | '/api/games/$code/config'
     | '/api/games/$code/join'
     | '/api/games/$code/leave'
+    | '/api/games/$code/reset'
     | '/api/games/$code/start'
     | '/api/games/$code/ws'
   fileRoutesById: FileRoutesById
@@ -232,8 +256,10 @@ export interface RootRouteChildren {
   GamesCodeLobbyRoute: typeof GamesCodeLobbyRoute
   GamesCodeSessionRoute: typeof GamesCodeSessionRoute
   ApiGamesIndexRoute: typeof ApiGamesIndexRoute
+  ApiGamesCodeConfigRoute: typeof ApiGamesCodeConfigRoute
   ApiGamesCodeJoinRoute: typeof ApiGamesCodeJoinRoute
   ApiGamesCodeLeaveRoute: typeof ApiGamesCodeLeaveRoute
+  ApiGamesCodeResetRoute: typeof ApiGamesCodeResetRoute
   ApiGamesCodeStartRoute: typeof ApiGamesCodeStartRoute
   ApiGamesCodeWsRoute: typeof ApiGamesCodeWsRoute
 }
@@ -338,6 +364,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiGamesCodeStartRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/games/$code/reset': {
+      id: '/api/games/$code/reset'
+      path: '/api/games/$code/reset'
+      fullPath: '/api/games/$code/reset'
+      preLoaderRoute: typeof ApiGamesCodeResetRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/games/$code/leave': {
       id: '/api/games/$code/leave'
       path: '/api/games/$code/leave'
@@ -350,6 +383,13 @@ declare module '@tanstack/react-router' {
       path: '/api/games/$code/join'
       fullPath: '/api/games/$code/join'
       preLoaderRoute: typeof ApiGamesCodeJoinRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/games/$code/config': {
+      id: '/api/games/$code/config'
+      path: '/api/games/$code/config'
+      fullPath: '/api/games/$code/config'
+      preLoaderRoute: typeof ApiGamesCodeConfigRouteImport
       parentRoute: typeof rootRouteImport
     }
   }
@@ -368,8 +408,10 @@ const rootRouteChildren: RootRouteChildren = {
   GamesCodeLobbyRoute: GamesCodeLobbyRoute,
   GamesCodeSessionRoute: GamesCodeSessionRoute,
   ApiGamesIndexRoute: ApiGamesIndexRoute,
+  ApiGamesCodeConfigRoute: ApiGamesCodeConfigRoute,
   ApiGamesCodeJoinRoute: ApiGamesCodeJoinRoute,
   ApiGamesCodeLeaveRoute: ApiGamesCodeLeaveRoute,
+  ApiGamesCodeResetRoute: ApiGamesCodeResetRoute,
   ApiGamesCodeStartRoute: ApiGamesCodeStartRoute,
   ApiGamesCodeWsRoute: ApiGamesCodeWsRoute,
 }

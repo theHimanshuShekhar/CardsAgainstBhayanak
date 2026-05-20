@@ -40,6 +40,16 @@ export const GameConfigSchema = z.object({
   ),
 })
 
+// Modal rules are mutually exclusive (≤ 1 active). The UI enforces this
+// with a radio group, but every endpoint that accepts a GameConfig must
+// re-check it server-side — a crafted request bypasses the client.
+// Shared by create and config-patch so they cannot diverge.
+const MODAL_RULE_IDS = ['godmode', 'survival', 'serious_business'] as const
+
+export function conflictingModalRules(rules: readonly string[]): string[] {
+  return rules.filter((r) => (MODAL_RULE_IDS as readonly string[]).includes(r))
+}
+
 export const CreateGameSchema = z.object({
   username: z.string().min(2).max(20).trim(),
   anonId: z.string().min(1),

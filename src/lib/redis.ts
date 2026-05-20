@@ -1,4 +1,5 @@
 import Redis from 'ioredis'
+import { logger } from '~/lib/logger'
 
 const url = process.env['REDIS_URL']
 if (!url) throw new Error('REDIS_URL not set')
@@ -9,7 +10,14 @@ const subscribers = new Map<string, Redis>()
 export function getSubscriber(channel: string): Redis {
   let sub = subscribers.get(channel)
   if (!sub) {
-    sub = new Redis(url!, { maxRetriesPerRequest: 3 })
+    // enableReadyCheck:false — a dedicated subscriber connection that
+    // reconnects would otherwise run ioredis's ready-check (an INFO
+    // command), which a socket already in subscriber mode rejects with
+    // "Connection in subscriber mode" → unhandled rejection → process
+    // crash. The error listener keeps a transient blip from being a fatal
+    // EventEmitter 'error' (ioredis re-subscribes on reconnect).
+    sub = new Redis(url!, { maxRetriesPerRequest: 3, enableReadyCheck: false })
+    sub.on('error', (err) => logger.error({ mod: 'cab.redis', channel, err }, 'subscriber error'))
     subscribers.set(channel, sub)
   }
   return sub

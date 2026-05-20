@@ -1,11 +1,12 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Topbar } from '~/components/ui/Topbar'
 import { Avatar } from '~/components/ui/Avatar'
 import { Scoreboard } from '~/components/game/Scoreboard'
 import { useSession } from '~/hooks/useSession'
+import { useGameSocket } from '~/hooks/useGameSocket'
 import { captureEvent } from '~/lib/posthog-client'
-import type { GameOverMode, PlayerScore } from '~/lib/types'
+import type { GameOverMode, GamePlayer, PlayerScore, ResetMode } from '~/lib/types'
 
 export const Route = createFileRoute('/games/$code/end')({
   component: EndScreen,
@@ -34,8 +35,80 @@ function readLastGameOver(): LastGameOver | null {
 function EndScreen() {
   const navigate = useNavigate()
   const { code } = Route.useParams()
-  const { setSession } = useSession()
+  const { session, setSession } = useSession()
   const [result] = useState<LastGameOver | null>(() => readLastGameOver())
+
+  // #3: the end screen joins the room socket purely as a redirect hub —
+  // when the host resets, every client (host included) routes through
+  // the lobby, which already forwards to /session once a rematch starts.
+  const [players, setPlayers] = useState<GamePlayer[]>([])
+  const [resetting, setResetting] = useState<ResetMode | null>(null)
+  const [resetError, setResetError] = useState<string | null>(null)
+  const { on } = useGameSocket(code, session?.sessionToken ?? null, session?.anonId ?? '')
+
+  useEffect(() => {
+    return on((event) => {
+      if (event.type === 'game_reset') {
+        void navigate({ to: '/games/$code/lobby', params: { code } })
+        return
+      }
+      if (event.type === 'state_snapshot') {
+        // A rematch was already live by the time this socket connected.
+        void navigate({ to: '/games/$code/session', params: { code } })
+        return
+      }
+      if (event.type === 'lobby_snapshot') {
+        if (event.gameStatus === 'active' || event.gameStatus === 'paused') {
+          void navigate({ to: '/games/$code/session', params: { code } })
+          return
+        }
+        if (event.gameStatus === 'lobby') {
+          void navigate({ to: '/games/$code/lobby', params: { code } })
+          return
+        }
+        if (event.gameStatus === 'abandoned') {
+          setSession(null)
+          void navigate({ to: '/' })
+          return
+        }
+        // Still 'ended' — only the roster matters here (host detection).
+        setPlayers(event.players)
+      }
+      if (event.type === 'auth_error') {
+        setSession(null)
+        void navigate({ to: '/' })
+      }
+    })
+  }, [on, code, navigate, setSession])
+
+  const isHost =
+    session?.playerId != null && players.find((p) => p.id === session.playerId)?.isHost === true
+
+  const handleReset = async (mode: ResetMode) => {
+    if (!session || resetting) return
+    setResetting(mode)
+    setResetError(null)
+    captureEvent('cab_game_reset_clicked', { roomCode: code, mode })
+    try {
+      const res = await fetch(`/api/games/${code}/reset`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${session.sessionToken}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ mode }),
+      })
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { message?: string }
+        setResetError(body.message ?? 'Could not reset the game')
+        setResetting(null)
+      }
+      // Success: the game_reset WS event drives navigation.
+    } catch {
+      setResetError('Network error')
+      setResetting(null)
+    }
+  }
 
   const handleGoHome = () => {
     captureEvent('cab_go_home_clicked', { previousRoomCode: code })
@@ -112,9 +185,40 @@ function EndScreen() {
           </>
         )}
 
-        <div style={{ display: 'flex', gap: 12, justifyContent: 'center', marginTop: 32 }}>
-          <button className="btn btn-primary" onClick={handlePlayAgain}>
-            Play again
+        {isHost ? (
+          <div style={{ display: 'flex', gap: 12, justifyContent: 'center', marginTop: 32 }}>
+            <button
+              className="btn btn-primary"
+              disabled={resetting != null}
+              onClick={() => void handleReset('rematch')}
+            >
+              {resetting === 'rematch' ? 'Starting…' : 'Rematch'}
+            </button>
+            <button
+              className="btn btn-dark"
+              disabled={resetting != null}
+              onClick={() => void handleReset('lobby')}
+            >
+              {resetting === 'lobby' ? 'Returning…' : 'Back to lobby'}
+            </button>
+          </div>
+        ) : (
+          <div style={{ marginTop: 32 }}>
+            <button className="btn btn-primary" disabled>
+              Waiting for the host…
+            </button>
+          </div>
+        )}
+
+        {resetError && (
+          <div className="muted" style={{ fontSize: 13, color: 'red', marginTop: 12 }}>
+            {resetError}
+          </div>
+        )}
+
+        <div style={{ display: 'flex', gap: 12, justifyContent: 'center', marginTop: 16 }}>
+          <button className="btn btn-ghost" onClick={handlePlayAgain}>
+            New room
           </button>
           <button className="btn btn-ghost" onClick={handleGoHome}>
             Go home

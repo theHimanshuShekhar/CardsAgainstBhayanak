@@ -324,7 +324,7 @@ game:{code}:deck:black     list (shuffled)
 game:{code}:deck:white     list (shuffled)
 game:{code}:discard:white  list (reshuffled into deck when low)
 game:{code}:discard:black  list (informational; no reshuffle)
-game:{code}:hand:{id}      set of white card IDs
+game:{code}:hand:{id}      list of white card IDs (ordered; refills append to tail)
 game:{code}:grace:{id}     string with PX expiry = GRACE_WINDOW_MS
 game:{code}:channel        pub/sub channel
 ```
