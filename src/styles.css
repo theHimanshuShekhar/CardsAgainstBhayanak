@@ -954,8 +954,20 @@ button {
   animation: home-card-cycle-in 0.45s ease both;
 }
 @media (prefers-reduced-motion: reduce) {
-  .home-card-cycle {
-    animation: none;
+  /* S3-NEW-D: a single broad reduce block covers every named-animation
+     class we ship. New animated components inherit this for free as long
+     as they animate via the standard `animation` shorthand (not transitions
+     or scripted JS). `transition` is left intact — reduced-motion users
+     still want instant-feedback hovers and focus rings to "snap". */
+  .dot.live,
+  .fade-in > *,
+  .deal,
+  .flip-reveal,
+  .home-card-cycle,
+  .home-marquee-track,
+  .stage-timer-urgent,
+  .loading-dots span {
+    animation: none !important;
   }
 }
 

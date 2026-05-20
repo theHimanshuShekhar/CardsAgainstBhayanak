@@ -92,6 +92,14 @@ export const gameSessions = pgTable(
     code: char('code', { length: 6 }).notNull().unique(),
     status: sessionStatusEnum('status').notNull().default('lobby'),
     config: jsonb('config').notNull(),
+    // S3-NEW-F: hostPlayerId and winnerPlayerId intentionally lack
+    // `.references(() => gamePlayers.id)` — gamePlayers.sessionId already
+    // FKs to gameSessions.id, so a back-reference here would form a cycle
+    // that breaks Drizzle's table-create order and (more importantly)
+    // the create-game flow which inserts the session row first (with
+    // hostPlayerId = NULL) and only then inserts the host player. The
+    // app layer is the integrity guarantor for these two columns; the
+    // sweeper / endGame paths preserve it.
     hostPlayerId: text('host_player_id'),
     winnerPlayerId: text('winner_player_id'),
     endMode: endModeEnum('end_mode'),
