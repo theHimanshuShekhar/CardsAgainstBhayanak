@@ -79,6 +79,10 @@ export type SessionState = {
   // expected exactly when the round resolves.
   submitted: number
   expected: number
+  // Epoch ms when the round timer fires; null when timer is Off. Used by
+  // the client purely for a display-only countdown — the server remains
+  // the sole authority on phase transitions.
+  roundTimerExpiresAt: number | null
   eliminationTurnPlayerId?: string
   voteTally?: Record<string, number>
   ranking?: Submission[]
@@ -114,6 +118,10 @@ export type GameConfig = {
 // ── Game-over outcome ─────────────────────────────────────────────
 
 export type GameOverMode = 'normal' | 'happy_ending' | 'rando_won' | 'deck_exhausted' | 'abandoned'
+
+// Post-game host action: replay the same room. 'rematch' goes straight
+// into a fresh game; 'lobby' returns everyone to the lobby to reconfigure.
+export type ResetMode = 'rematch' | 'lobby'
 
 // ── Error codes ───────────────────────────────────────────────────
 
@@ -193,6 +201,7 @@ export type ServerMessage =
       hand?: Hand
       submitted: number
       expected: number
+      roundTimerExpiresAt: number | null
     }
   | { type: 'player_played'; playerId: string; submitted: number; expected: number }
   | { type: 'hand_update'; playerId: string; hand: Hand }
@@ -208,5 +217,6 @@ export type ServerMessage =
   | { type: 'round_voided'; round: number; reason: string }
   | { type: 'round_end'; activatedPlayers: string[]; handsRefilled: Record<string, Hand> }
   | { type: 'game_over'; finalScores: PlayerScore[]; winnerId: string; mode: GameOverMode }
+  | { type: 'game_reset'; mode: ResetMode }
   | { type: 'error'; code: ErrorCode; message: string }
   | { type: 'pong' }

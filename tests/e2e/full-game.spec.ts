@@ -19,6 +19,9 @@ import {
   playSpectatorReject,
   playDroppedAuth,
   playLobbySnapshot,
+  playResetRematch,
+  playResetLobby,
+  playStageTimer,
 } from '../protocol'
 
 const BASE = process.env['CAB_E2E_BASE'] ?? 'http://localhost:3000'
@@ -129,6 +132,58 @@ test('S2-5: lobby gets roster + config, then state_snapshot post-start (protocol
     r.postStartIsStateSnapshot,
     'after start, rejoin yields state_snapshot not lobby_snapshot',
   ).toBe(true)
+})
+
+// #3: Rematch resets a finished game straight into a fresh one. Host-only
+// (403 for non-host), the 'ended' precondition (the second reset 409s once
+// the game is active again), a game_reset broadcast, and the new game
+// restarting at round 1 with every carried score zeroed.
+test('#3: rematch resets a finished game to a fresh round 1 (protocol)', async () => {
+  test.setTimeout(90_000)
+  const r = await playResetRematch(BASE)
+  expect(r.gameOverReached, 'fixture plays through to game_over').toBe(true)
+  expect(r.nonHostResetStatus, 'non-host reset is rejected (host_only)').toBe(403)
+  expect(r.hostResetStatus, 'host reset accepted').toBe(204)
+  expect(r.gameResetSeen, 'peers receive game_reset broadcast').toBe(true)
+  expect(r.secondResetStatus, 'reset on an active game is rejected (invalid_state)').toBe(409)
+  expect(r.rematchRound, 'rematch restarts at round 1').toBe(1)
+  expect(r.rematchAllScoresZero, 'every carried score is zeroed').toBe(true)
+})
+
+// #3: Back to lobby resets a finished game to the lobby, where the host
+// edits the config (PATCH, host-only) and starts a brand-new game. The
+// lobby_snapshot transition, host-only config patch (403 non-host), the
+// config change propagating, and a clean re-start at round 1.
+test('#3: back-to-lobby reset + host config edit + restart (protocol)', async () => {
+  test.setTimeout(90_000)
+  const r = await playResetLobby(BASE)
+  expect(r.hostResetStatus, 'host lobby-reset accepted').toBe(204)
+  expect(r.lobbySnapshotStatus, 'reset broadcasts a lobby_snapshot').toBe('lobby')
+  expect(r.nonHostPatchStatus, 'non-host config PATCH is rejected (host_only)').toBe(403)
+  expect(r.patchStatus, 'host config PATCH accepted').toBe(204)
+  expect(r.patchedRoundsToWin, 'patched config propagates via lobby_snapshot').toBe(9)
+  expect(r.restartedRound, 're-started game begins at round 1').toBe(1)
+})
+
+// #2: the round timer stays server-authoritative; round_started only
+// gains a display hint. A '30s' game carries a future epoch that a
+// rejoin's state_snapshot restores; a 'Off' game carries null (nothing
+// for the client countdown to render).
+test('#2: round_started carries a display-only timer expiry (protocol)', async () => {
+  test.setTimeout(60_000)
+  const r = await playStageTimer(BASE)
+  expect(r.timedExpiresAt, '30s game: round_started carries an expiry').not.toBeNull()
+  expect(r.timedExpiresAt!, '30s expiry is a future epoch ~30s out').toBeGreaterThan(
+    r.timedCapturedAt,
+  )
+  expect(
+    r.timedExpiresAt! - r.timedCapturedAt,
+    '30s expiry is within a sane window of 30s',
+  ).toBeLessThan(45_000)
+  expect(r.snapshotExpiresAt, 'rejoin state_snapshot restores the same authoritative expiry').toBe(
+    r.timedExpiresAt,
+  )
+  expect(r.offExpiresAt, "'Off' game carries no timer expiry").toBeNull()
 })
 
 // UI-driven golden path. The blockers in the old skip note (create

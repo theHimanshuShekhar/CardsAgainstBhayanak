@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { PromptCard } from '~/components/ui/Card'
 import type { BlackCard, GamePhase } from '~/lib/types'
 
@@ -10,9 +11,43 @@ type Props = {
   // round resolves.
   submitted: number
   expected: number
+  // Epoch ms the round timer fires; null when timer Off. Display only —
+  // the server alone skips the round (CLAUDE.md: server-controlled phase
+  // timing). This countdown never sends or drives a phase change.
+  roundTimerExpiresAt: number | null
 }
 
-export function PromptStage({ prompt, phase, czarName, submitted, expected }: Props) {
+// Display-only countdown. Re-renders once a second off the wall clock and
+// reads the server's absolute expiry, so a refresh / clock skew resolves
+// to the truth instead of drifting like a local "seconds left" timer.
+function StageTimer({ expiresAt }: { expiresAt: number }) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [expiresAt])
+
+  const remaining = Math.max(0, expiresAt - now)
+  const secs = Math.ceil(remaining / 1000)
+  const mm = Math.floor(secs / 60)
+  const ss = secs % 60
+  const urgent = remaining < 10_000
+
+  return (
+    <div className={`stage-timer${urgent ? ' stage-timer-urgent' : ''}`}>
+      {mm}:{String(ss).padStart(2, '0')}
+    </div>
+  )
+}
+
+export function PromptStage({
+  prompt,
+  phase,
+  czarName,
+  submitted,
+  expected,
+  roundTimerExpiresAt,
+}: Props) {
   const isWaiting = phase === 'waiting'
   const isPicking = phase === 'picking'
 
@@ -21,6 +56,11 @@ export function PromptStage({ prompt, phase, czarName, submitted, expected }: Pr
       <div className="eyebrow" style={{ marginBottom: 12 }}>
         The prompt · {czarName} is judging
       </div>
+
+      {(isPicking || isWaiting) && roundTimerExpiresAt !== null && (
+        <StageTimer expiresAt={roundTimerExpiresAt} />
+      )}
+
       <PromptCard card={prompt} size="xl" />
 
       {(isPicking || isWaiting) && (

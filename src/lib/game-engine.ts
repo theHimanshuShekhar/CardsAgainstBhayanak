@@ -15,6 +15,7 @@ import type {
   BlackCard,
   GamePlayer,
   PlayerScore,
+  ResetMode,
 } from './types'
 import { createId } from '@paralleldrive/cuid2'
 
@@ -42,11 +43,30 @@ export function toPlayerScores(players: GamePlayer[], czarId: string | null): Pl
     }))
 }
 
+// #8: collapse cross-pack duplicate cards. Keys on the normalized text
+// (trimmed, lowercased) and keeps the first occurrence's id; order is
+// otherwise preserved (the caller shuffles afterward).
+export function dedupeCardIdsByText<T extends { id: string; text: string }>(rows: T[]): string[] {
+  const seen = new Set<string>()
+  const ids: string[] = []
+  for (const r of rows) {
+    const key = r.text.trim().toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    ids.push(r.id)
+  }
+  return ids
+}
+
 export async function buildDecks(code: string, packIds: string[]): Promise<void> {
   const black = await db.select().from(blackCards).where(inArray(blackCards.packId, packIds))
   const white = await db.select().from(whiteCards).where(inArray(whiteCards.packId, packIds))
-  const blackIds = shuffle(black.map((b) => b.id))
-  const whiteIds = shuffle(white.map((w) => w.id))
+  // #8: the same prompt/answer sourced from multiple RAH packs is stored
+  // as distinct (pack_id, text) rows, so a multi-pack game would deal
+  // visibly duplicate cards. Dedupe each list by normalized text before
+  // the existing shuffle.
+  const blackIds = shuffle(dedupeCardIdsByText(black))
+  const whiteIds = shuffle(dedupeCardIdsByText(white))
   await state.pushDeck(code, 'black', blackIds)
   await state.pushDeck(code, 'white', whiteIds)
   engineLogger.info({ code, black: blackIds.length, white: whiteIds.length }, 'decks built')
@@ -201,6 +221,16 @@ export async function startRound(
     })
     .onConflictDoNothing()
 
+  // Arm the round timer before announcing the round so round_started can
+  // carry the authoritative expiry for the client's display-only countdown.
+  let roundTimerExpiresAt: number | null = null
+  if (config.timer !== 'Off') {
+    const ms = TIMER_MS[config.timer]
+    roundTimerExpiresAt = Date.now() + ms
+    await state.setRoundTimerExpiresAt(code, roundTimerExpiresAt)
+    setTimeout(() => void expireRoundTimer(code, round, czarId), ms)
+  }
+
   const startProgress = await submissionProgress(code)
   await state.publishEvent(code, {
     type: 'round_started',
@@ -209,6 +239,7 @@ export async function startRound(
     czarId,
     submitted: startProgress.submitted,
     expected: startProgress.expected,
+    roundTimerExpiresAt,
   })
   captureServerEvent(await distinctIdForHost(code), 'cab_round_started', {
     roomCode: code,
@@ -227,13 +258,6 @@ export async function startRound(
       .filter((p) => p.status === 'active' && !p.isRando && p.id !== czarId)
       .map((p) => p.id)
     await applyPackingHeat(code, eligible)
-  }
-
-  if (config.timer !== 'Off') {
-    const ms = TIMER_MS[config.timer]
-    const expiresAt = Date.now() + ms
-    await state.setRoundTimerExpiresAt(code, expiresAt)
-    setTimeout(() => void expireRoundTimer(code, round, czarId), ms)
   }
 
   engineLogger.info({ code, round, czarId, blackCardId: black.id }, 'round started')
@@ -764,6 +788,109 @@ export async function endGame(code: string, mode: GameOverMode, winnerId?: strin
     finalScores,
   })
   engineLogger.info({ code, mode, winnerId }, 'game over')
+}
+
+// #3 (Phase 2): replay the same room after game_over. Reuses the room
+// code and keeps players (and their handles); wipes all per-round Redis
+// state, zeroes carried players, and either drops back to the lobby
+// (`lobby`) or starts a fresh game immediately (`rematch`). The session
+// must be `ended` — the endpoint enforces that and host-only.
+export async function resetGame(code: string, mode: ResetMode): Promise<void> {
+  const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
+  if (!session) throw new Error('session not found')
+
+  // Snapshot the roster before mutation so every hand key (incl. Rando's)
+  // is cleared regardless of which players are carried.
+  const before = await state.getAllPlayers(code)
+
+  // Wipe all per-round Redis state. The room hash and players hash
+  // survive; the round hash, decks, discards, czarOrder and every hand
+  // are rebuilt fresh by startGame (rematch) or left empty (lobby).
+  const pipeline = redis.multi()
+  pipeline.del(KEYS.round(code))
+  pipeline.del(KEYS.deckBlack(code))
+  pipeline.del(KEYS.deckWhite(code))
+  pipeline.del(KEYS.discardWhite(code))
+  pipeline.del(KEYS.discardBlack(code))
+  pipeline.del(KEYS.czarOrder(code))
+  for (const p of before) pipeline.del(KEYS.hand(code, p.id))
+  // Round/phase bookkeeping lives on the room hash; reset it to a
+  // pre-game state (startGame re-stamps czarStartOffset for rematch).
+  pipeline.hset(KEYS.game(code), { currentRound: '0', czarIndex: '-1' })
+  pipeline.hdel(KEYS.game(code), 'czarStartOffset', 'happyEndingArmed', 'happyEndingFinal')
+  await pipeline.exec()
+
+  // Drop the prior game's round history. buildSnapshot derives the live
+  // round from max(gameRounds.roundNum), and startRound inserts with
+  // onConflictDoNothing on unique(session_id, round_num) — leaving the old
+  // rows would pin the snapshot to the final round and silently no-op the
+  // new round 1. A reset is a fresh game, so the history goes.
+  await db.delete(gameRounds).where(eq(gameRounds.sessionId, session.id))
+
+  // Drop the prior Rando row(s) — startGame re-creates Rando if the rule
+  // is still configured (partial-unique on is_rando per session).
+  await db
+    .delete(gamePlayers)
+    .where(and(eq(gamePlayers.sessionId, session.id), eq(gamePlayers.isRando, true)))
+
+  for (const p of before) {
+    // Not carried: Rando (re-created by startGame) and terminally
+    // dropped players (no live socket / cleared session — they re-join
+    // by code into the new lobby). Remove from the live roster.
+    if (p.isRando || p.status === 'dropped') {
+      await redis.hdel(KEYS.players(code), p.id)
+      continue
+    }
+    // Carried: zero the score and clear per-game flags. A `grace` player
+    // is treated as present again; clear any pending grace key so a
+    // stale grace-expiry drop can't fire mid-rematch.
+    await state.clearGrace(code, p.id)
+    await state.updatePlayer(code, p.id, {
+      score: 0,
+      status: 'active',
+      discardsUsed: 0,
+      hasGambled: false,
+    })
+    await db
+      .update(gamePlayers)
+      .set({ score: 0, status: 'active', discardsUsed: 0 })
+      .where(eq(gamePlayers.id, p.id))
+  }
+
+  // The game is replayable from a clean slate — clear the ended outcome.
+  await db
+    .update(gameSessions)
+    .set({
+      status: mode === 'lobby' ? 'lobby' : 'active',
+      endedAt: null,
+      endMode: null,
+      winnerPlayerId: null,
+    })
+    .where(eq(gameSessions.id, session.id))
+
+  if (mode === 'lobby') {
+    await redis.hset(KEYS.game(code), 'status', 'lobby')
+    const players = await state.getAllPlayers(code)
+    await state.publishEvent(code, {
+      type: 'lobby_snapshot',
+      players,
+      config: session.config as GameConfig,
+      gameStatus: 'lobby',
+    })
+    await state.publishEvent(code, { type: 'game_reset', mode })
+    engineLogger.info({ code }, 'game reset to lobby')
+    return
+  }
+
+  // Rematch: tell every end-screen client to route through the lobby
+  // hub first, then start a brand-new game. startGame rebuilds decks /
+  // czarOrder / hands and flips the room status to active; the late
+  // reconnect is hydrated by rejoin → state_snapshot (existing path).
+  await state.publishEvent(code, { type: 'game_reset', mode })
+  await startGame(code)
+  await state.publishEvent(code, { type: 'game_started', firstRound: 1 })
+  await startRound(code, 1)
+  engineLogger.info({ code }, 'game reset — rematch started')
 }
 
 // S2-1: return every submitted white card to its submitter's hand and

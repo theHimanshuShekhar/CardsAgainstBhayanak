@@ -50,9 +50,19 @@ test('S2-5: lobby renders roster + config from lobby_snapshot', async ({ page })
   })
   await expect(page.locator('.player-host')).toBeVisible()
 
-  // Config sheet shows the real values, not the "—" placeholder.
-  const cfg = page.locator('.sheet', { hasText: 'Game config' })
-  await expect(cfg.locator('.summary-row', { hasText: 'Score to win' })).toContainText('5')
-  await expect(cfg.locator('.summary-row', { hasText: 'Max players' })).toContainText('8')
-  await expect(cfg.locator('.summary-row', { hasText: 'Timer' })).toContainText('90s')
+  // #3: the host now edits config inline via GameConfigEditor (not the
+  // read-only "—" summary). The lobby_snapshot config must seed the
+  // editor's live controls with the real values.
+  const rounds = page.locator('.opt-row', {
+    has: page.locator('.opt-name', { hasText: 'Rounds to win' }),
+  })
+  await expect(rounds.locator('.stepper-val')).toContainText('5')
+  const maxP = page.locator('.opt-row', {
+    has: page.locator('.opt-name', { hasText: 'Max players' }),
+  })
+  await expect(maxP.locator('.stepper-val')).toContainText('8')
+  const timer = page.locator('.opt-row', {
+    has: page.locator('.opt-name', { hasText: 'Round timer' }),
+  })
+  await expect(timer.locator('.seg-btn.active')).toHaveText('90s')
 })

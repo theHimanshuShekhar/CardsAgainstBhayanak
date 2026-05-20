@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { seedRng } from './rng'
-import { chooseFirstCzar, toPlayerScores } from './game-engine'
+import { chooseFirstCzar, toPlayerScores, dedupeCardIdsByText } from './game-engine'
 import type { GamePlayer } from './types'
 
 describe('game-engine', () => {
@@ -77,6 +77,35 @@ describe('game-engine', () => {
       const scores = toPlayerScores(players, 'p2')
       expect(scores.find((s) => s.playerId === 'p2')?.isJudge).toBe(true)
       expect(scores.find((s) => s.playerId === 'p1')?.isJudge).toBe(false)
+    })
+  })
+
+  describe('dedupeCardIdsByText (#8: cross-pack duplicates)', () => {
+    it('collapses same text from different packs, normalizing case + whitespace', () => {
+      // The same prompt sourced from two RAH packs → distinct rows. After
+      // dedupe no two surviving texts collide case-insensitively on trim.
+      const rows = [
+        { id: 'base-1', text: 'Why am I sticky?' },
+        { id: 'pack2-1', text: '  why am i sticky?  ' },
+        { id: 'base-2', text: 'A windmill full of corpses.' },
+        { id: 'pack2-2', text: 'A WINDMILL FULL OF CORPSES.' },
+        { id: 'base-3', text: 'Unique answer.' },
+      ]
+      const ids = dedupeCardIdsByText(rows)
+      // First occurrence wins; later duplicates dropped.
+      expect(ids).toEqual(['base-1', 'base-2', 'base-3'])
+      const byId = new Map(rows.map((r) => [r.id, r.text]))
+      const keys = ids.map((id) => byId.get(id)!.trim().toLowerCase())
+      expect(new Set(keys).size).toBe(keys.length)
+    })
+
+    it('preserves order and keeps genuinely distinct cards', () => {
+      const rows = [
+        { id: 'a', text: 'Card A' },
+        { id: 'b', text: 'Card B' },
+        { id: 'c', text: 'Card C' },
+      ]
+      expect(dedupeCardIdsByText(rows)).toEqual(['a', 'b', 'c'])
     })
   })
 })

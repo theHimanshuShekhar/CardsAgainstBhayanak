@@ -35,6 +35,9 @@ function SessionScreen() {
   const [winnerName, setWinnerName] = useState<string | null>(null)
   const [submitted, setSubmitted] = useState(0)
   const [expected, setExpected] = useState(0)
+  // Server-authoritative round-timer expiry (epoch ms; null when timer
+  // Off). Drives a display-only countdown — never a client phase timer.
+  const [timerExpiresAt, setTimerExpiresAt] = useState<number | null>(null)
   // Read inside the socket handler without putting `round` in the effect
   // deps — re-subscribing mid-game drops WS frames in the cleanup→setup gap.
   const roundRef = useRef(round)
@@ -68,6 +71,7 @@ function SessionScreen() {
         setWinnerName(s.scores.find((x) => x.playerId === s.winnerId)?.username ?? null)
         setSubmitted(s.submitted)
         setExpected(s.expected)
+        setTimerExpiresAt(s.roundTimerExpiresAt)
         if (s.hand) setHand(s.hand)
         setPhase(s.phase === 'picking' && s.czarId === myId ? 'waiting' : s.phase)
       }
@@ -82,6 +86,7 @@ function SessionScreen() {
         setWinnerName(null)
         setSubmitted(event.submitted)
         setExpected(event.expected)
+        setTimerExpiresAt(event.roundTimerExpiresAt)
         if (event.hand) setHand(event.hand)
         setPhase(event.czarId === myId ? 'waiting' : 'picking')
       }
@@ -218,6 +223,7 @@ function SessionScreen() {
                   czarName={czarName}
                   submitted={submitted}
                   expected={expected}
+                  roundTimerExpiresAt={timerExpiresAt}
                 />
               </div>
             ) : (
@@ -228,6 +234,7 @@ function SessionScreen() {
                   czarName={czarName}
                   submitted={submitted}
                   expected={expected}
+                  roundTimerExpiresAt={timerExpiresAt}
                 />
                 {(phase === 'judging' || phase === 'reveal') && (
                   <SubmissionsGrid

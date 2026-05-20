@@ -2,11 +2,12 @@ import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { Topbar } from '~/components/ui/Topbar'
 import { Avatar } from '~/components/ui/Avatar'
+import { GameConfigEditor } from '~/components/game/GameConfigEditor'
 import { formatRoomCode } from '~/lib/code-gen'
 import { useSession } from '~/hooks/useSession'
 import { useGameSocket } from '~/hooks/useGameSocket'
 import { captureEvent } from '~/lib/posthog-client'
-import type { GameConfig, GamePlayer } from '~/lib/types'
+import type { GameConfig, GamePlayer, Pack } from '~/lib/types'
 
 export const Route = createFileRoute('/games/$code/lobby')({
   component: LobbyScreen,
@@ -20,6 +21,8 @@ function LobbyScreen() {
 
   const [players, setPlayers] = useState<GamePlayer[]>([])
   const [config, setConfig] = useState<GameConfig | null>(null)
+  const [packs, setPacks] = useState<Pack[]>([])
+  const [configError, setConfigError] = useState<string | null>(null)
   const [starting, setStarting] = useState(false)
   const [startError, setStartError] = useState<string | null>(null)
 
@@ -72,6 +75,45 @@ function LobbyScreen() {
   const isHost = session?.playerId != null && players.find((p) => p.id === session.playerId)?.isHost
   const canStart =
     isHost && players.filter((p) => p.role === 'player' && p.status === 'active').length >= 3
+
+  // #3: the host can edit the config in the lobby — the editor needs the
+  // pack catalogue (same source as the create screen). Only the host
+  // fetches it; non-hosts keep the read-only summary.
+  useEffect(() => {
+    if (!isHost) return
+    let cancelled = false
+    fetch('/api/packs')
+      .then((r) => r.json() as Promise<{ packs: Pack[] }>)
+      .then((data) => {
+        if (!cancelled) setPacks(data.packs)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [isHost])
+
+  async function updateConfig(next: GameConfig) {
+    if (!session) return
+    setConfig(next) // optimistic; the broadcast lobby_snapshot re-syncs everyone
+    setConfigError(null)
+    try {
+      const res = await fetch(`/api/games/${code}/config`, {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${session.sessionToken}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ config: next }),
+      })
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { message?: string }
+        setConfigError(body.message ?? 'Could not save config')
+      }
+    } catch {
+      setConfigError('Network error saving config')
+    }
+  }
 
   async function handleStart() {
     if (!canStart || starting || !session) return
@@ -176,23 +218,38 @@ function LobbyScreen() {
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-            <div className="sheet">
-              <div className="eyebrow" style={{ marginBottom: 10 }}>
-                Game config
+            {isHost && config ? (
+              <>
+                <GameConfigEditor
+                  value={config}
+                  onChange={(c) => void updateConfig(c)}
+                  packs={packs}
+                />
+                {configError && (
+                  <div className="muted" style={{ fontSize: 13, color: 'red' }}>
+                    {configError}
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="sheet">
+                <div className="eyebrow" style={{ marginBottom: 10 }}>
+                  Game config
+                </div>
+                <div className="summary-row">
+                  <span>Score to win</span>
+                  <b>{config ? config.roundsToWin : '—'}</b>
+                </div>
+                <div className="summary-row">
+                  <span>Max players</span>
+                  <b>{config ? config.maxPlayers : '—'}</b>
+                </div>
+                <div className="summary-row">
+                  <span>Timer</span>
+                  <b>{config ? config.timer : '—'}</b>
+                </div>
               </div>
-              <div className="summary-row">
-                <span>Score to win</span>
-                <b>{config ? config.roundsToWin : '—'}</b>
-              </div>
-              <div className="summary-row">
-                <span>Max players</span>
-                <b>{config ? config.maxPlayers : '—'}</b>
-              </div>
-              <div className="summary-row">
-                <span>Timer</span>
-                <b>{config ? config.timer : '—'}</b>
-              </div>
-            </div>
+            )}
             {startError && (
               <div className="muted" style={{ fontSize: 13, color: 'red' }}>
                 {startError}

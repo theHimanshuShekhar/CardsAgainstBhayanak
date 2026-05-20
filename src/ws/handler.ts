@@ -126,6 +126,7 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
   // elimination turn / Serious Business ranking) is restored instead of
   // being lost. clearRoundResolution wipes these at the next startRound.
   const { submitted, expected } = await engine.submissionProgress(code)
+  const roundTimerExpiresAt = await state.getRoundTimerExpiresAt(code)
   const winnerId = await state.getRoundWinner(code)
   const eliminationTurnPlayerId = config.rules.includes('survival')
     ? ((await state.getEliminationTurn(code)) ?? undefined)
@@ -146,6 +147,7 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
     winnerId,
     submitted,
     expected,
+    roundTimerExpiresAt,
     ...(voteTally ? { voteTally } : {}),
     ...(eliminationTurnPlayerId ? { eliminationTurnPlayerId } : {}),
     ...(ranking ? { ranking } : {}),

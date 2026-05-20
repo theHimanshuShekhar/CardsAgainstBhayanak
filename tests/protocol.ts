@@ -14,6 +14,13 @@ async function post(base: string, path: string, body: unknown, token?: string) {
   return { status: r.status, json: (await r.json().catch(() => ({}))) as any }
 }
 
+async function patch(base: string, path: string, body: unknown, token?: string) {
+  const headers: Record<string, string> = { 'content-type': 'application/json' }
+  if (token) headers['authorization'] = 'Bearer ' + token
+  const r = await fetch(base + path, { method: 'PATCH', headers, body: JSON.stringify(body) })
+  return { status: r.status, json: (await r.json().catch(() => ({}))) as any }
+}
+
 function connect(base: string, code: string, token: string, name: string): Promise<Peer> {
   const wsBase = base.replace(/^http/, 'ws')
   return new Promise((resolve, reject) => {
@@ -891,5 +898,296 @@ export async function playLobbySnapshot(base: string): Promise<LobbySnapshotResu
     configMaxPlayers: lobby?.config?.maxPlayers ?? 0,
     configTimer: lobby?.config?.timer ?? '',
     postStartIsStateSnapshot: postStart === 'state_snapshot',
+  }
+}
+
+// #3 (Phase 2): drive a 3-player game (roundsToWin: 3, the schema floor)
+// through full rounds until game_over, leaving every peer connected so
+// the post-reset broadcasts can be observed. Shared by the rematch +
+// lobby reset drivers. Czar picks submission '0' each round; the engine
+// shuffles submission order so a winner reaches 3 within a few rounds.
+async function _playToGameOver(base: string): Promise<{
+  code: string
+  basePackId: string
+  peers: Record<string, Peer>
+  idByName: Record<string, string>
+  hostToken: string
+  p2Token: string
+  gameOver: any
+}> {
+  const packsRes = await fetch(base + '/api/packs')
+  const packsJson = (await packsRes.json()) as { packs: { id: string; name: string }[] }
+  const base0 = packsJson.packs.find((p) => /base/i.test(p.name)) ?? packsJson.packs[0]
+  if (!base0) throw new Error('no packs seeded')
+
+  const cfg = {
+    maxPlayers: 10,
+    roundsToWin: 3,
+    timer: 'Off' as const,
+    packs: [base0.id],
+    rules: [],
+  }
+  const c = await post(base, '/api/games', { username: 'host', anonId: 'a-host', config: cfg })
+  if (c.status !== 201 && c.status !== 200) throw new Error(`create ${c.status}`)
+  const code = c.json.roomCode as string
+
+  const joins = []
+  for (let i = 2; i <= 3; i++) {
+    joins.push(
+      await post(base, `/api/games/${code}/join`, {
+        username: `p${i}`,
+        anonId: `a-p${i}`,
+        role: 'player',
+      }),
+    )
+  }
+
+  const peers: Record<string, Peer> = {}
+  peers.host = await connect(base, code, c.json.sessionToken, 'host')
+  const idByName: Record<string, string> = { host: c.json.playerId }
+  for (let i = 0; i < joins.length; i++) {
+    const name = `p${i + 2}`
+    peers[name] = await connect(base, code, joins[i]!.json.sessionToken, name)
+    idByName[name] = joins[i]!.json.playerId
+  }
+
+  const s = await post(base, `/api/games/${code}/start`, {}, c.json.sessionToken)
+  if (s.status !== 204) throw new Error(`start ${s.status}`)
+  await sleep(800)
+
+  let gameOver: any = null
+  for (let round = 1; round <= 25 && !gameOver; round++) {
+    // state_snapshot is the only thing that refreshes peer.snapshot, so
+    // re-rejoin each round to read the current czar / prompt / hand.
+    for (const p of Object.values(peers)) {
+      p.snapshot = null
+      send(p, { type: 'rejoin' })
+    }
+    let snap: any = null
+    for (let i = 0; i < 60 && !snap; i++) {
+      await sleep(100)
+      snap = Object.values(peers).find((p) => p.snapshot)?.snapshot
+    }
+    if (!snap) throw new Error(`no snapshot round ${round}`)
+    const czarId = snap.czarId
+    const pick = snap.prompt.pick as number
+
+    for (const [name, id] of Object.entries(idByName)) {
+      if (id === czarId) continue
+      const hand = peers[name]!.snapshot?.hand ?? []
+      send(peers[name]!, { type: 'play', cardIds: hand.slice(0, pick).map((cc: any) => cc.id) })
+    }
+
+    const czarName = Object.entries(idByName).find(([, id]) => id === czarId)![0]
+    const czar = peers[czarName]!
+    await waitForNth(czar, 'reveal_start', round, 14_000)
+    await sleep(700 * 4 + 900)
+    send(czar, { type: 'pick', submissionId: '0' })
+
+    const observer = Object.values(peers).find((p) => idByName[p.name] !== czarId)!
+    // The game either ends here (game_over, no further round) or advances
+    // (the next round_started fires after the result-pause). Racing the
+    // two is unambiguous — exactly one occurs.
+    gameOver = await Promise.race([
+      waitFor(observer, 'game_over', 16_000).catch(() => null),
+      waitForNth(observer, 'round_started', round + 1, 16_000)
+        .then(() => null)
+        .catch(() => null),
+    ])
+  }
+  if (!gameOver) throw new Error('never reached game_over')
+
+  return {
+    code,
+    basePackId: base0.id,
+    peers,
+    idByName,
+    hostToken: c.json.sessionToken as string,
+    p2Token: joins[0]!.json.sessionToken as string,
+    gameOver,
+  }
+}
+
+export type ResetRematchResult = {
+  gameOverReached: boolean
+  nonHostResetStatus: number // 403
+  hostResetStatus: number // 204
+  gameResetSeen: boolean
+  secondResetStatus: number // 409 — not 'ended' anymore
+  rematchRound: number // 1
+  rematchAllScoresZero: boolean
+}
+
+// Rematch: host resets a finished game straight into a fresh one. Asserts
+// host-only (403), the 'ended' precondition (409 on the double reset once
+// it is active again), the game_reset broadcast, and that the new game
+// starts at round 1 with every carried score zeroed.
+export async function playResetRematch(base: string): Promise<ResetRematchResult> {
+  const g = await _playToGameOver(base)
+  const anyPeer = g.peers.host!
+
+  const nonHost = await post(base, `/api/games/${g.code}/reset`, { mode: 'rematch' }, g.p2Token)
+  const hostReset = await post(base, `/api/games/${g.code}/reset`, { mode: 'rematch' }, g.hostToken)
+  const gameResetSeen = await waitFor(anyPeer, 'game_reset', 8_000)
+    .then(() => true)
+    .catch(() => false)
+  // Status is 'active' again — a second reset must be rejected.
+  const second = await post(base, `/api/games/${g.code}/reset`, { mode: 'rematch' }, g.hostToken)
+
+  for (const p of Object.values(g.peers)) {
+    p.snapshot = null
+    send(p, { type: 'rejoin' })
+  }
+  await sleep(1500)
+  const snap = Object.values(g.peers).find((p) => p.snapshot)?.snapshot
+
+  for (const p of Object.values(g.peers)) p.ws.close()
+
+  return {
+    gameOverReached: g.gameOver?.type === 'game_over',
+    nonHostResetStatus: nonHost.status,
+    hostResetStatus: hostReset.status,
+    gameResetSeen,
+    secondResetStatus: second.status,
+    rematchRound: snap?.round ?? -1,
+    rematchAllScoresZero: !!snap && (snap.scores as any[]).every((x) => x.score === 0),
+  }
+}
+
+export type ResetLobbyResult = {
+  hostResetStatus: number // 204
+  lobbySnapshotStatus: string // 'lobby'
+  nonHostPatchStatus: number // 403
+  patchStatus: number // 204
+  patchedRoundsToWin: number // echoed back via lobby_snapshot
+  restartedRound: number // 1
+}
+
+// Back to lobby: host resets a finished game to the lobby, edits the
+// config (PATCH, host-only), and starts a brand-new game. Asserts the
+// lobby_snapshot transition, host-only config patch (403 for non-host),
+// the config change propagating, and a clean re-start at round 1.
+export async function playResetLobby(base: string): Promise<ResetLobbyResult> {
+  const g = await _playToGameOver(base)
+  const anyPeer = g.peers.host!
+
+  const hostReset = await post(base, `/api/games/${g.code}/reset`, { mode: 'lobby' }, g.hostToken)
+  const lobbySnap = await waitFor(anyPeer, 'lobby_snapshot', 8_000).catch(() => null)
+
+  const newCfg = {
+    maxPlayers: 8,
+    roundsToWin: 9,
+    timer: '60s' as const,
+    packs: [g.basePackId],
+    rules: ['rando'],
+  }
+  const nonHostPatch = await patch(
+    base,
+    `/api/games/${g.code}/config`,
+    { config: newCfg },
+    g.p2Token,
+  )
+  const hostPatch = await patch(
+    base,
+    `/api/games/${g.code}/config`,
+    { config: newCfg },
+    g.hostToken,
+  )
+
+  // Wait for the broadcast that echoes the patched config back.
+  let patchedRoundsToWin = 0
+  for (let i = 0; i < 50; i++) {
+    const ls = [...anyPeer.events].reverse().find((e) => e.type === 'lobby_snapshot')
+    if (ls?.config?.roundsToWin === 9) {
+      patchedRoundsToWin = 9
+      break
+    }
+    await sleep(100)
+  }
+
+  const restart = await post(base, `/api/games/${g.code}/start`, {}, g.hostToken)
+  const rs =
+    restart.status === 204
+      ? await waitFor(anyPeer, 'round_started', 10_000).catch(() => null)
+      : null
+
+  for (const p of Object.values(g.peers)) p.ws.close()
+
+  return {
+    hostResetStatus: hostReset.status,
+    lobbySnapshotStatus: lobbySnap?.gameStatus ?? '',
+    nonHostPatchStatus: nonHostPatch.status,
+    patchStatus: hostPatch.status,
+    patchedRoundsToWin,
+    restartedRound: rs?.round ?? -1,
+  }
+}
+
+export type StageTimerResult = {
+  // 30s game: round_started carries a future epoch; rejoin snapshot
+  // carries the same authoritative expiry.
+  timedExpiresAt: number | null
+  timedCapturedAt: number
+  snapshotExpiresAt: number | null
+  // Off game: no timer → null.
+  offExpiresAt: number | null
+}
+
+// #2 (Phase 2): the round timer is server-authoritative; the protocol
+// only adds a display hint. Asserts round_started.roundTimerExpiresAt is
+// a future epoch for a '30s' game and survives a rejoin (state_snapshot),
+// and is null for a 'Off' game (no client-run countdown to drive).
+export async function playStageTimer(base: string): Promise<StageTimerResult> {
+  const packsJson = (await (await fetch(base + '/api/packs')).json()) as {
+    packs: { id: string; name: string }[]
+  }
+  const base0 = packsJson.packs.find((p) => /base/i.test(p.name)) ?? packsJson.packs[0]
+  if (!base0) throw new Error('no packs seeded')
+
+  async function run(timer: '30s' | 'Off') {
+    const cfg = { maxPlayers: 10, roundsToWin: 5, timer, packs: [base0!.id], rules: [] as string[] }
+    const c = await post(base, '/api/games', { username: 'host', anonId: 'a-host', config: cfg })
+    if (c.status !== 201 && c.status !== 200) throw new Error(`create ${c.status}`)
+    const code = c.json.roomCode as string
+    const joins: any[] = []
+    for (let i = 2; i <= 3; i++) {
+      joins.push(
+        await post(base, `/api/games/${code}/join`, {
+          username: `p${i}`,
+          anonId: `a-p${i}`,
+          role: 'player',
+        }),
+      )
+    }
+    const host = await connect(base, code, c.json.sessionToken, 'host')
+    const p2 = await connect(base, code, joins[0].json.sessionToken as string, 'p2')
+    const p3 = await connect(base, code, joins[1].json.sessionToken as string, 'p3')
+    const s = await post(base, `/api/games/${code}/start`, {}, c.json.sessionToken)
+    if (s.status !== 204) throw new Error(`start ${s.status}`)
+    const rs = await waitFor(host, 'round_started', 10_000)
+    const capturedAt = Date.now()
+    // A fresh rejoin must restore the same authoritative expiry.
+    p2.snapshot = null
+    send(p2, { type: 'rejoin' })
+    await waitFor(p2, 'state_snapshot', 8_000).catch(() => null)
+    const snapExpiry = (p2.snapshot?.roundTimerExpiresAt ?? null) as number | null
+    for (const x of [host, p2, p3]) {
+      try {
+        x.ws.close()
+      } catch {
+        /* already closing */
+      }
+    }
+    return { expiresAt: (rs.roundTimerExpiresAt ?? null) as number | null, capturedAt, snapExpiry }
+  }
+
+  const timed = await run('30s')
+  const off = await run('Off')
+
+  return {
+    timedExpiresAt: timed.expiresAt,
+    timedCapturedAt: timed.capturedAt,
+    snapshotExpiresAt: timed.snapExpiry,
+    offExpiresAt: off.expiresAt,
   }
 }

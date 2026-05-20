@@ -1493,6 +1493,23 @@ button {
   width: 100%;
   max-width: 520px;
   margin: 0 auto;
+  position: relative;
+}
+/* Absolutely positioned so the prompt card keeps its original resting Y
+   (a taller flex column would push it down behind the sticky hand dock —
+   see responsive-layout.spec). Anchored top-right, clear of the centred
+   eyebrow text and the prompt's centre line. */
+.stage-timer {
+  position: absolute;
+  top: -6px;
+  right: 0;
+  font: 800 40px/1 var(--font-mono);
+  letter-spacing: 0.04em;
+  color: var(--white);
+  font-variant-numeric: tabular-nums;
+}
+.stage-timer-urgent {
+  animation: blink 1s steps(1, end) infinite;
 }
 .pick-status {
   margin-top: 18px;

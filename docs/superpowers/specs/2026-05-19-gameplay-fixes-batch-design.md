@@ -169,39 +169,145 @@ sub.subscribe(...)`, then the listener attached — so concurrently-
 
 ---
 
-## Phase 2 — Features (outline; detailed at Phase 2 kickoff)
+## Phase 2 — Features (detailed; Phase 1 shipped & reviewed in `afefc89`)
 
-Designed in full only after Phase 1 is shipped and reviewed.
-
-### #2 · Prominent stage timer
-
-Server already persists `roundTimerExpiresAt`. Add
-`roundTimerExpiresAt: number | null` to `round_started` and `SessionState`
-(and the snapshot). Client renders a large countdown beside the prompt,
-derived purely from the server timestamp (display-only local interval — no
-client-run phase logic, per the server-controlled-timing non-negotiable),
-with an urgency cue under ~10s, hidden entirely when `config.timer === 'Off'`.
-
-### #3 · Rematch + Back to lobby
-
-End screen gets two host actions:
-
-- **Rematch** — same room code, same config, scores → 0, straight into a new
-  game.
-- **Back to lobby** — same room code, everyone returns to the lobby, host
-  reconfigures (packs / rules / points / timer), then Start.
-
-Non-host players are moved via WS ("waiting for host…"). Requires a server
-reset action that reuses the room code, rebuilds decks, resets scores, and
-keeps players and their handles. Full design (endpoint/WS shape, state
-transitions, edge cases) produced at Phase 2 start.
+Three features. #8 is a one-function change; #2 threads an existing
+server timestamp to a display-only client countdown; #3 is the largest —
+a server reset action plus an end-screen WS connection and an in-lobby
+config editor. All scope-critical decisions were locked with the user:
+**#3 = full in-lobby editing**, **#8 = dedupe black + white, normalized**.
 
 ### #8 · Duplicate prompts across packs
 
-`buildDecks` (`src/lib/game-engine.ts:45-50`) selects cards by `packId`; the
-same prompt text sourced from multiple RAH packs yields duplicate-looking
-prompts. Fix: dedupe the deck by card **text** when building it. The spec's
-`deck_exhausted → game_over` behaviour is unchanged.
+- **Where:** `buildDecks` — `src/lib/game-engine.ts:45-53`.
+- **Cause:** the same prompt/answer text sourced from multiple RAH packs
+  is stored as distinct `(pack_id, text)` rows; selecting by `packId`
+  yields visibly duplicate cards in one game.
+- **Fix (locked: black + white, normalized):** after fetching the
+  `black` / `white` rows, dedupe **each** list by
+  `key = text.trim().toLowerCase()`, keeping the first occurrence, then
+  shuffle the surviving IDs as today. ~6 lines, one function.
+- **Surface:** none. No protocol, schema, type, or client change.
+- **Unchanged:** the spec's `deck_exhausted → game_over` (current leader
+  wins) is untouched — a smaller deduped deck just reaches exhaustion
+  sooner if a game runs that long.
+- **Verify:** unit test on `buildDecks` output — no two black (and no two
+  white) card texts collide case-insensitively after trim, for a
+  multi-pack config that is known to contain cross-pack duplicates.
+
+### #2 · Prominent stage timer
+
+- **Server already has the truth.** `state.setRoundTimerExpiresAt` is
+  stamped in `startRound` when `config.timer !== 'Off'`
+  (`game-engine.ts:232-237`); `getRoundTimerExpiresAt` reads it back. The
+  authoritative expiry/skip stays entirely server-side
+  (`expireRoundTimer`) — **no client phase logic** (non-negotiable).
+- **Protocol delta (display-only):**
+  - `round_started` event gains `roundTimerExpiresAt: number | null`
+    (epoch ms; `null` when `timer === 'Off'`). Published from `startRound`
+    where the expiry is already computed.
+  - `SessionState` gains `roundTimerExpiresAt: number | null`, populated
+    in `buildSnapshot` from `getRoundTimerExpiresAt` (→ `null` if absent /
+    timer Off) so a reconnecting client resumes a correct countdown.
+  - Types updated in `src/lib/types.ts`; both producers + client together.
+- **Client:** `session.tsx` tracks `roundTimerExpiresAt`, set from
+  `round_started` and `state_snapshot`, cleared (`null`) on each new
+  `round_started`. Passed to `PromptStage`, which renders a large
+  countdown beside the prompt: a display-only `setInterval(…, 1000)`
+  computing `remaining = max(0, expiresAt - Date.now())`, an urgency
+  class under ~10 000 ms, the interval cleared on unmount / when
+  `expiresAt` is `null`. When `null`, the timer is not rendered at all.
+- **Why timestamp not seconds:** absolute server epoch survives a refresh
+  and clock-skews gracefully; a "seconds left" countdown would drift and
+  would be a client-run timer in disguise.
+- **Verify:** protocol E2E asserts `round_started.roundTimerExpiresAt` is
+  a future epoch for a `30s` game and `null` for an `Off` game; the
+  snapshot carries it on rejoin. Component check for the countdown +
+  urgency cue + hidden-when-null.
+
+### #3 · Rematch + Back to lobby _(largest change)_
+
+End screen gets two **host-only** actions; non-host players are carried
+automatically over WS. Same room code throughout; players keep their
+handles (`cab_session` already persists through `game_over` per spec).
+
+**Server — `engine.resetGame(code, mode: 'rematch' | 'lobby')`:**
+
+- Clears all per-round Redis state for the room: `round`, `deck:black`,
+  `deck:white`, `discard:white`, `discard:black`, every `hand:{id}`,
+  `czarOrder`, and the `game:{code}` round/phase fields
+  (`currentRound`, `czarStartOffset`, timer). Reuses existing key
+  constants; **room code and `game:{code}:players` survive**.
+- Carried players: status `active` **or** `grace` → score `0`,
+  status `active`, `discardsUsed 0`, gamble flag cleared (DB + Redis
+  mirror). Status `dropped` players are **not** carried (default;
+  flagged below).
+- Deletes prior `is_rando` rows (partial-unique per session); `startGame`
+  re-creates Rando if the rule is still configured.
+- Clears `game_sessions.winner_player_id / ended_at / end_mode`.
+- `mode: 'lobby'` → `status = 'lobby'`, broadcast `lobby_snapshot`.
+- `mode: 'rematch'` → `status = 'active'`, then the existing
+  `startGame` + `game_started` + `startRound` path (fresh decks,
+  fresh `czarOrder`, scores already 0).
+
+**New REST — `POST /api/games/$code/reset { mode }`:** host-only
+(403 `host_only` otherwise); `session.status` must be `'ended'`
+(409 `invalid_state` otherwise — this also guards a double-reset race);
+calls `resetGame`; 204.
+
+**New REST — `PATCH /api/games/$code/config { config }`:** host-only;
+`session.status` must be `'lobby'` (409 otherwise); validates with the
+**same** rules as create — reuse `CreateGameSchema`'s config shape
+(`api-helpers.ts:25-29`) and the modal-exclusivity check
+(`index.ts:52-65`), extracted to one shared helper so create and patch
+cannot diverge; writes `game_sessions.config` (JSONB); broadcasts the
+updated `lobby_snapshot`. 204.
+
+**New WS event — `game_reset { mode }`:** broadcast by `resetGame` so
+every connected client (including non-hosts) re-routes.
+
+**End screen gains a WS connection.** Today `end.tsx` has none — it reads
+`cab_last_game_over` from `sessionStorage`. It gains the standard
+`useGameSocket` (`auth` → `rejoin`) purely as a redirect hub:
+
+- `game_reset` (either mode) → navigate to `/games/$code/lobby`. The
+  lobby is already the universal reconnect hub: on its `lobby_snapshot`
+  it keeps players in `lobby`, and auto-forwards to `/session` once
+  status is `active` (covers the rematch path with no extra logic).
+- `lobby_snapshot` / `state_snapshot` arriving directly → same hub
+  routing as lobby today.
+- The end screen derives `isHost` from the rejoin/lobby snapshot's
+  `players` (`GamePlayer.isHost`). Host sees **Rematch** + **Back to
+  lobby** (POST `/reset`); non-host sees a disabled "Waiting for the
+  host…" affordance. Existing **Play again** (→ `/games/create`, a
+  brand-new room) and **Go home** stay.
+
+**Lobby gains host config editing.** `lobby.tsx` currently renders
+`config` read-only. When `isHost && status === 'lobby'`, the same config
+controls used on the create screen become editable and persist via
+`PATCH /config` (debounced or on-blur/explicit-apply — exact UX is a
+small build-time call, not a design fork); non-hosts keep the read-only
+view, refreshed by the broadcast `lobby_snapshot`. Modal-rule radio /
+3–10 / 3–20 / timer-enum / ≥1-pack constraints are enforced server-side
+by the shared validator regardless of client.
+
+**Edge cases:** reset when not `ended` → 409; non-host reset/patch →
+403; double reset guarded by the `status === 'ended'` precondition (first
+wins, second 409); `czarOrder` and Rando are rebuilt fresh by `startGame`
+on rematch; a player who dropped before reset is not carried (see
+default below); clients still on `/session` when a reset happens receive
+`game_reset` and route through the lobby hub.
+
+**Decision (user-confirmed 2026-05-19) — dropped-player carry:** carry
+`active` + `grace`, **exclude `dropped`** (a dropped player has no live
+socket and cleared session; they re-join by code into the new lobby).
+
+**Build order (user-chosen 2026-05-19):** #3 → #2 → #8. Full E2E suite
+kept green after each.
+
+**Protocol deltas (#3):** new `POST /api/games/$code/reset`; new
+`PATCH /api/games/$code/config`; new WS `game_reset { mode }`; end
+screen gains a WS connection (no new event types beyond `game_reset`).
 
 ---
 
@@ -221,3 +327,12 @@ prompts. Fix: dedupe the deck by card **text** when building it. The spec's
   #5 counter text, #6 pick-order badges, #7 stable hand order across rounds,
   #9 final-round winner highlight before `game_over`.
 - #1 and #4 verified by component/visual check; #4 has no logic to assert.
+- Phase 2 keeps the full suite green and adds: #8 unit test on
+  `buildDecks` (no case-insensitive text collisions); #2 protocol test
+  (`round_started.roundTimerExpiresAt` future epoch for `30s`, `null`
+  for `Off`; carried in snapshot on rejoin); #3 protocol test (play to
+  `game_over` → host `reset rematch` → `round_started` round 1 with all
+  scores 0; `reset lobby` → `lobby_snapshot` status `lobby` → `PATCH
+/config` → start → new game; non-host reset → 403; reset when not
+  `ended` → 409). #3 lobby editor + end-screen buttons get a
+  component/visual check.
