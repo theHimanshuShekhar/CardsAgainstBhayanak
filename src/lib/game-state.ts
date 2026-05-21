@@ -55,6 +55,30 @@ export async function updatePlayer(
   await redis.eval(UPDATE_PLAYER_LUA, 1, KEYS.players(code), playerId, JSON.stringify(patch))
 }
 
+// Atomic compare-and-set guard for `gamble`. The bare flow read player
+// → check `hasGambled` → drawCards → setHand → updatePlayer({ hasGambled:
+// true }) has a wide read-modify-write window: a second WS frame (e.g. a
+// double-click or a click that races a hand_update repaint) sneaks in
+// between read and write, both calls pass the guard, both deal cards →
+// hand grows by 2× pick instead of pick. The Lua flip is single-threaded,
+// so only the first caller's CAS commits; the duplicate sees `hasGambled
+// = true` and bails before drawing.
+const CLAIM_GAMBLE_LUA = `
+local cur = redis.call('HGET', KEYS[1], ARGV[1])
+if not cur then return 0 end
+local obj = cjson.decode(cur)
+if obj.hasGambled then return 0 end
+if (obj.score or 0) < 1 then return 0 end
+obj.hasGambled = true
+redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(obj))
+return 1
+`
+
+export async function claimGamble(code: string, playerId: string): Promise<boolean> {
+  const r = await redis.eval(CLAIM_GAMBLE_LUA, 1, KEYS.players(code), playerId)
+  return r === 1
+}
+
 export async function getAllPlayers(code: string): Promise<GamePlayer[]> {
   const map = await redis.hgetall(KEYS.players(code))
   return Object.values(map).map((s) => JSON.parse(s) as GamePlayer)
@@ -227,6 +251,30 @@ export async function clearPostResolveResumeAt(code: string): Promise<void> {
   await redis.hdel(KEYS.round(code), 'postResolveResumeAt')
 }
 
+// Atomic read-and-clear of the postResolveResumeAt cursor. The naive
+// `getPostResolveResumeAt` + `clearPostResolveResumeAt` pair is not safe
+// as an idempotency guard: two callers (e.g. the in-process endRound
+// continuation racing a boot-restore scheduler, or two boot-restore
+// passes in a process restart loop) can both pass the non-null read
+// before either gets to clear. The result is `startRound(nextRound)`
+// called twice — the second call overwrites the round hash with a
+// fresh black card while the gameRounds DB row still holds the first
+// call's pick, which shows up as a `pick`/hand-count mismatch in the
+// Gambling spec. Doing the read+delete inside a single Lua script
+// guarantees exactly one caller sees the prior value; the other gets
+// nil and bails.
+const TAKE_RESUME_AT_LUA = `
+local v = redis.call('HGET', KEYS[1], 'postResolveResumeAt')
+if not v then return nil end
+redis.call('HDEL', KEYS[1], 'postResolveResumeAt')
+return v
+`
+
+export async function takePostResolveResumeAt(code: string): Promise<number | null> {
+  const v = await redis.eval(TAKE_RESUME_AT_LUA, 1, KEYS.round(code))
+  return v ? Number(v) : null
+}
+
 // S2-1: persist the authoritative phase so a disconnect handler can tell
 // whether a round is mid-flight (and which czar owns it) without having
 // to re-derive it the way buildSnapshot does.
@@ -251,6 +299,19 @@ export async function getPhase(code: string): Promise<GamePhase | null> {
 export async function setRoundWinner(code: string, winnerId: string): Promise<void> {
   await redis.hset(KEYS.round(code), 'winnerId', winnerId)
   await redis.expire(KEYS.round(code), ROOM_TTL_SECONDS)
+}
+
+// Atomic single-writer claim: only the first caller within the current round
+// gets `true`. Subsequent concurrent invocations of pickWinner / castVote /
+// eliminateSubmission / applyRanking short-circuit, preventing double scoring
+// and the racy concurrent endRound that produced 20-card hands.
+export async function claimRoundWinner(code: string, winnerId: string): Promise<boolean> {
+  const ok = await redis.hsetnx(KEYS.round(code), 'winnerId', winnerId)
+  if (ok === 1) {
+    await redis.expire(KEYS.round(code), ROOM_TTL_SECONDS)
+    return true
+  }
+  return false
 }
 
 export async function getRoundWinner(code: string): Promise<string | null> {

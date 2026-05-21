@@ -175,23 +175,43 @@ export async function startRound(
   if (!session) throw new Error('session not found')
   const config = session.config as GameConfig
 
-  const blackIds = await state.drawCards(code, 'black', 1)
-  if (blackIds.length === 0) {
-    await endGame(code, 'deck_exhausted')
-    throw new Error('deck_exhausted')
+  // Happy Ending: the host armed an early end. Resolve the Haiku card
+  // here (not via deck LPUSH/LPOP) so the trigger is order-independent —
+  // a slow `happy_ending` WS message that lands between rounds can't
+  // race past the next LPOP and end up drawing the Haiku two rounds late
+  // (E2E flake: rule-happy-ending). The flag → final promotion happens
+  // atomically inside startRound, so the next round IS the Haiku round
+  // whenever the flag was set before this call.
+  let black: typeof blackCards.$inferSelect | undefined
+  const armed = await redis.hget(KEYS.game(code), 'happyEndingArmed')
+  if (armed) {
+    const [haiku] = await db
+      .select()
+      .from(blackCards)
+      .innerJoin(packs, eq(blackCards.packId, packs.id))
+      .where(eq(packs.slug, 'haiku-final'))
+      .limit(1)
+    if (haiku) {
+      black = haiku.black_cards
+      await redis.hset(KEYS.game(code), 'happyEndingFinal', '1')
+      await redis.hdel(KEYS.game(code), 'happyEndingArmed')
+    } else {
+      engineLogger.error({ code }, 'happy_ending: armed but Haiku card not seeded; falling back')
+    }
   }
-  const [black] = await db
-    .select()
-    .from(blackCards)
-    .where(eq(blackCards.id, blackIds[0] ?? ''))
-  if (!black) throw new Error('black card missing')
 
-  // Happy Ending: the host armed an early end last round — the Haiku card
-  // was queued at the deck head, so this round (which just drew it) is the
-  // forced final. Promote armed → final; endRound ends the game.
-  if (await redis.hget(KEYS.game(code), 'happyEndingArmed')) {
-    await redis.hset(KEYS.game(code), 'happyEndingFinal', '1')
-    await redis.hdel(KEYS.game(code), 'happyEndingArmed')
+  if (!black) {
+    const blackIds = await state.drawCards(code, 'black', 1)
+    if (blackIds.length === 0) {
+      await endGame(code, 'deck_exhausted')
+      throw new Error('deck_exhausted')
+    }
+    const [row] = await db
+      .select()
+      .from(blackCards)
+      .where(eq(blackCards.id, blackIds[0] ?? ''))
+    if (!row) throw new Error('black card missing')
+    black = row
   }
 
   let czarId: string | null = null
@@ -713,6 +733,14 @@ export async function pickWinner(
   if (!winnerKey || !submissions[winnerKey]) throw new Error('submission not found')
   const winnerPlayerId = resolvePlayerId(winnerKey)
 
+  // Idempotency gate: clients can re-fire the `pick` WS frame (double-click,
+  // network retry) and the WS handler dispatches each frame as a separate
+  // async task. Without a single-writer claim, scoring runs twice and
+  // endRound interleaves through the non-atomic setHand (del + rpush),
+  // producing 20-card hands.
+  const claimed = await state.claimRoundWinner(code, winnerPlayerId)
+  if (!claimed) return
+
   const winner = await state.getPlayer(code, winnerPlayerId)
   if (!winner) throw new Error('winner not found')
   // Read winner score before settling so the failed-gambler debits (which
@@ -723,7 +751,6 @@ export async function pickWinner(
   const players = await state.getAllPlayers(code)
   const scores = toPlayerScores(players, czarId)
 
-  await state.setRoundWinner(code, winnerPlayerId)
   await state.publishEvent(code, {
     type: 'round_won',
     winnerId: winnerPlayerId,
@@ -868,13 +895,15 @@ export async function endRound(code: string, submitterIds: string[]): Promise<vo
 
 // S2-NEW: the post-pause tail of endRound, extracted so the boot path
 // can run it for a session whose endRound was killed mid-sleep. The
-// resume-cursor clear at the top doubles as an idempotency guard —
+// resume-cursor take at the top doubles as an idempotency guard —
 // two concurrent callers (the original endRound continuation racing the
-// boot-scheduled timer) see one mismatch and the second bails.
+// boot-scheduled timer) see one mismatch and the second bails. Use the
+// atomic GETDEL-equivalent (takePostResolveResumeAt) so the read+clear
+// can't be straddled by a parallel caller — see game-state.ts for why
+// the non-atomic version raced under fast E2E pause settings.
 async function finalizeRoundAfterPause(code: string): Promise<void> {
-  const cursor = await state.getPostResolveResumeAt(code)
+  const cursor = await state.takePostResolveResumeAt(code)
   if (cursor === null) return // already finalized by an earlier caller
-  await state.clearPostResolveResumeAt(code)
 
   const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
   if (!session) return
@@ -1517,8 +1546,14 @@ async function publishHandUpdate(
 }
 
 export async function gamble(code: string, playerId: string): Promise<void> {
-  const player = await state.getPlayer(code, playerId)
-  if (!player || player.score < 1 || player.hasGambled) return
+  // Atomically flip hasGambled=true (also gates score ≥ 1). A duplicate
+  // gamble frame — double-click, or a second click that races the first
+  // `hand_update` round-trip — would otherwise both read hasGambled=false
+  // and each deal `black.pick` extra cards, doubling the hand. The Lua
+  // CAS commits exactly once per round per player; eligibility (score)
+  // and the wager debit live where they did before (settleGambles).
+  const claimed = await state.claimGamble(code, playerId)
+  if (!claimed) return
 
   const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
   if (!session) return
@@ -1532,14 +1567,14 @@ export async function gamble(code: string, playerId: string): Promise<void> {
   const [black] = await db.select().from(blackCards).where(eq(blackCards.id, roundRow.blackCardId))
   if (!black) return
 
-  // Eligibility (score >= 1) is checked above; the wagered point is debited
-  // at round resolution (settleGambles), not here, so a voided round leaves
-  // the wager intact.
-  await state.updatePlayer(code, playerId, { hasGambled: true })
+  // hasGambled was set atomically by claimGamble above. The wagered point
+  // is debited at round resolution (settleGambles), not here, so a voided
+  // round leaves the wager intact.
   const extra = await state.drawCards(code, 'white', black.pick)
   if (extra.length > 0) {
     const current = await state.getHand(code, playerId)
-    await state.setHand(code, playerId, [...current, ...extra])
+    const next = [...current, ...extra]
+    await state.setHand(code, playerId, next)
     await publishHandUpdate(code, playerId)
   }
   await state.publishEvent(code, { type: 'player_gambled', playerId })
@@ -1628,27 +1663,39 @@ export async function applyPackingHeat(code: string, playerIds: string[]): Promi
 // score.
 export async function triggerHappyEnding(code: string, playerId: string): Promise<void> {
   const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
-  if (!session) return
-  if (session.status !== 'active') return
-  if (session.hostPlayerId !== playerId) return
+  if (!session) {
+    engineLogger.warn({ code, playerId }, 'happy_ending: no session')
+    return
+  }
+  if (session.status !== 'active') {
+    engineLogger.warn(
+      { code, playerId, status: session.status },
+      'happy_ending: session not active',
+    )
+    return
+  }
+  if (session.hostPlayerId !== playerId) {
+    engineLogger.warn(
+      { code, playerId, hostId: session.hostPlayerId },
+      'happy_ending: caller is not host',
+    )
+    return
+  }
   const config = session.config as GameConfig
-  if (!config.rules.includes('happy_ending')) return
+  if (!config.rules.includes('happy_ending')) {
+    engineLogger.warn({ code, playerId, rules: config.rules }, 'happy_ending: rule not configured')
+    return
+  }
   // Idempotent: ignore repeat triggers once armed.
-  if (await redis.hget(KEYS.game(code), 'happyEndingArmed')) return
-
-  const [haiku] = await db
-    .select({ id: blackCards.id })
-    .from(blackCards)
-    .innerJoin(packs, eq(blackCards.packId, packs.id))
-    .where(eq(packs.slug, 'haiku-final'))
-    .limit(1)
-  if (!haiku) {
-    engineLogger.error({ code }, 'happy ending: Haiku card not seeded')
+  if (await redis.hget(KEYS.game(code), 'happyEndingArmed')) {
+    engineLogger.info({ code, playerId }, 'happy_ending: already armed (idempotent)')
     return
   }
 
-  // Queue the Haiku card as the very next black draw (deck is LPOP-drawn).
-  await redis.lpush(KEYS.deckBlack(code), haiku.id)
+  // Just arm the flag — startRound resolves the Haiku card directly when
+  // it sees the flag, so we don't race the deck LPUSH against the next
+  // LPOP (a slow trigger could otherwise land between rounds and pin the
+  // Haiku two rounds out).
   await redis.hset(KEYS.game(code), 'happyEndingArmed', '1')
   await redis.expire(KEYS.game(code), ROOM_TTL_SECONDS)
   engineLogger.info({ code, playerId }, 'happy ending armed')
