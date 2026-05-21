@@ -1858,11 +1858,10 @@ button {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 14px;
-  /* The fanned `.hand-card-wrap` cards each create a stacking context
-     (transform) with z-index up to 100 (hover) / 99 (selected) and, being
-     280px tall in a 200px flex-end `.hand`, overflow up over this header.
-     Without its own stacking, the label + Submit button render behind the
-     hand and are unclickable. Sit above every card. */
+  /* `.hand-card-wrap` cards apply a translateY on hover/select (own
+     stacking context) and lift above the header on the way up. Without
+     this header's own z-index, the label + Submit button render behind
+     the lifted card and become unclickable. Sit above every card. */
   position: relative;
   z-index: 101;
 }
@@ -2200,11 +2199,12 @@ button {
    between the scoreboard and the dock — viewport height minus that fixed
    overhead, plus a small safety margin — keeping 5:7 (width derives from
    height) and scaling text down since `.card` clips overflow. Two width
-   bands because the desktop fanned dock and the compact phone dock have
-   different overhead. The full card needs ≈1014px of height to clear the
-   desktop dock, so the cap must apply up to ~1024px (above that the
-   unmodified card fits). Higher-specificity selector overrides the base
-   and max-width prompt rules regardless of source order. */
+   bands because the desktop (≥861px) hand row uses a 148px card while the
+   compact phone dock uses a smaller clamp()ed card — different overhead.
+   The full card needs ≈1014px of height to clear the desktop dock, so the
+   cap must apply up to ~1024px (above that the unmodified card fits).
+   Higher-specificity selector overrides the base and max-width prompt
+   rules regardless of source order. */
 @media (max-height: 1024px) {
   .card-prompt.card-xl {
     width: auto;
@@ -2218,10 +2218,11 @@ button {
 }
 @media (max-height: 1024px) and (min-width: 861px) {
   /* 560, not 523: the flat hand strip uses a 148px (≈207px tall) card at
-     every width ≥861px, so the sticky dock is ~21px taller than the old
-     fanned 200px region this band was first tuned for. Shrink the prompt
-     enough that it clears the taller dock at rest on short laptops
-     (≤720px tall), where the dock would otherwise paint over it. */
+     every width ≥861px, so the sticky dock is ~21px taller than the
+     200px region this band was originally tuned for (back when desktop
+     used a shorter fanned arc). Shrink the prompt enough that it clears
+     the taller dock at rest on short laptops (≤720px tall), where the
+     dock would otherwise paint over it. */
   .card-prompt.card-xl {
     height: min(504px, calc(100vh - 560px));
   }

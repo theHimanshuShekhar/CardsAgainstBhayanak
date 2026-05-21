@@ -340,7 +340,7 @@ All keys: 24h TTL on idle, refreshed on mutation. Submissions write via single `
 - **Fonts:** Geist (body), Bricolage Grotesque (display), Geist Mono (codes/labels)
 - **Card sizes (5:7 ratio):** `.card-sm` 140px / `.card-md` 200px / `.card-lg` 280px / `.card-xl` 360px
 - **Semantic class names**, not Tailwind utility soup: `.btn`, `.card-prompt`, `.scoreboard`, `.hand-dock`, `.sheet`, `.stepper`, `.seg`, `.check-card`
-- **Hand dock:** 10 cards fanned per official CAH rules
+- **Hand dock:** flat, horizontally scrollable strip of up to 10 cards (`.hand` is a `flex; gap: 10px` row; selected cards lift `translateY(-8px)` instead of overlapping neighbours). The original design-reference fan was retired during the responsive rebuild.
 - **Mobile breakpoints:** 1100px, 860px, 720px, 420px (verbatim from design reference)
 - **Prompt blanks:** `__________` (10 underscores) → rendered as `<u>` styled per design
 - **Animation timing constants** in `src/lib/timing.ts`: `DEAL_MS=550`, `FADE_IN_MS=400`, `REVEAL_STAGGER=700`, `ROUND_RESULT_PAUSE_MS=4000` (server-driven post-round hold; E2E-tunable via `CAB_ROUND_RESULT_PAUSE_MS`), `RECONNECT_TOAST=250`, `GRACE_WINDOW_MS=30000`
