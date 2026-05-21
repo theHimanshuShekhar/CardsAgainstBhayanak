@@ -27,6 +27,10 @@ test('hand card is keyboard focusable during picking', async ({ browser }) => {
 
   // Can't reach session without a game; just verify that interactive elements on home are focusable
   await page.goto('/')
+  // Headless Chromium under WSL doesn't grant page focus from goto alone —
+  // pressing Tab on an unfocused page can no-op. Focus body explicitly
+  // so the first Tab moves into the document's tab order.
+  await page.evaluate(() => document.body.focus())
   await page.keyboard.press('Tab')
   const focused = page.locator(':focus')
   await expect(focused).toBeVisible()
