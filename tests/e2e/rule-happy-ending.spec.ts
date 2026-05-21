@@ -32,6 +32,17 @@ test('Happy Ending — host triggers forced Haiku final round', async ({ browser
   const players: PlayerHandle[] = [host, alice, bob]
   await Promise.all(players.map((h) => h.page.waitForURL('**/session', { timeout: 20_000 })))
 
+  // The hand-dock only mounts once round_started has been received over
+  // WS — a reliable signal that auth_ok landed and the connection is
+  // ready. Without this, the host can race the WS handshake on a slow
+  // CI box; pre-auth sends are now queued (useGameSocket) but waiting
+  // here also keeps the test's intent legible.
+  await Promise.race(
+    players.map((h) =>
+      h.page.locator('.hand-dock, .judge-bar').first().waitFor({ timeout: 20_000 }),
+    ),
+  )
+
   // Only the host renders the HostMenu trigger.
   await expect(host.page.locator('[data-testid="host-menu"]')).toBeVisible({ timeout: 10_000 })
   await expect(alice.page.locator('[data-testid="host-menu"]')).toBeHidden()
