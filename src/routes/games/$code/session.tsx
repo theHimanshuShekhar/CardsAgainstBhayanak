@@ -44,13 +44,23 @@ function SessionScreen() {
   // Off). Drives a display-only countdown — never a client phase timer.
   const [timerExpiresAt, setTimerExpiresAt] = useState<number | null>(null)
   // Per-rule state for this player. Hydrated from the rejoin snapshot
-  // and live-updated via hand_update (discardsUsed). Gambling state is
-  // wired in Slice 2.
+  // and live-updated via hand_update / player_gambled.
   const [discardsUsed, setDiscardsUsed] = useState(0)
+  const [hasGambled, setHasGambled] = useState(false)
+  // Gambling submission tracker: a gambler submits twice in one picking
+  // phase. After the first play we keep the UI in `picking` (cleared
+  // selection); only the second play moves us to `waiting`. Resets on
+  // round_started.
+  const [mySubmissionsSent, setMySubmissionsSent] = useState(0)
   // Never Have I Ever: a second tap on a hand card normally toggles
   // selection — entering discard mode reroutes the next click to a
   // confess_discard send. Cleared after the click or by toggling off.
   const [discardMode, setDiscardMode] = useState(false)
+  // God Is Dead: per-round vote state. The engine enforces one vote per
+  // round; the client mirrors that so all vote buttons disable after a
+  // tap, and renders the live tally beneath each card.
+  const [myVotedSubmissionId, setMyVotedSubmissionId] = useState<string | null>(null)
+  const [voteTally, setVoteTally] = useState<Record<string, number>>({})
   // Read inside the socket handler without putting `round` in the effect
   // deps — re-subscribing mid-game drops WS frames in the cleanup→setup gap.
   const roundRef = useRef(round)
@@ -74,6 +84,27 @@ function SessionScreen() {
   // Happy Ending: the host menu only matters while a game is active and
   // the rule is on; the engine ignores the trigger otherwise.
   const showHappyEndingTrigger = isHost && !!config?.rules.includes('happy_ending')
+  // Modal rules are mutually exclusive AND disable Gambling. Compute once
+  // from config so the gate is impossible to mis-spell.
+  const modalActive =
+    !!config?.rules.includes('godmode') ||
+    !!config?.rules.includes('survival') ||
+    !!config?.rules.includes('serious_business')
+  const isGodmode = !!config?.rules.includes('godmode')
+  // Gambling base mechanic: enabled outside modal rules, after round 1,
+  // for non-Czars with ≥1 pt who haven't already gambled this round.
+  const canGamble = !modalActive && round > 1 && myScore >= 1 && !hasGambled && !isCzar
+  // Godmode renders without a Czar (czarId === null). Voting opens once
+  // every submission has been revealed — the engine flips the phase to
+  // `waiting` post-stagger but doesn't push a phase_changed event, so we
+  // compute readiness from the local revealIndex instead.
+  const canVote =
+    isGodmode &&
+    phase === 'reveal' &&
+    submissions.length > 0 &&
+    revealIndex >= submissions.length &&
+    !myVotedSubmissionId &&
+    winnerId == null
 
   const { on, send } = useGameSocket(code, session?.sessionToken ?? null, session?.anonId ?? '')
 
@@ -120,6 +151,13 @@ function SessionScreen() {
         // Discard mode is per-tap; reset on round boundary so a stale
         // armed state doesn't survive into a new picking phase.
         setDiscardMode(false)
+        // Per-round gambling + voting state. The engine resets the
+        // hasGambled flag at round_end; mirror it locally so the Wager
+        // button re-enables for the next round without a refresh.
+        setHasGambled(false)
+        setMySubmissionsSent(0)
+        setMyVotedSubmissionId(null)
+        setVoteTally({})
       }
       if (event.type === 'host_changed') {
         setHostId(event.hostId)
@@ -133,6 +171,19 @@ function SessionScreen() {
       // mutations may fire mid-round; without this the scoreboard lags.
       if (event.type === 'scores_update') {
         setScores(event.scores)
+      }
+      // Gambling: server confirms the wager and pushes a fresh hand
+      // (via hand_update, handled above). The flag flips so the Wager
+      // button disappears and the gambler keeps `picking` for a 2nd play.
+      if (event.type === 'player_gambled' && event.playerId === myId) {
+        setHasGambled(true)
+      }
+      // God Is Dead: live tally for every voter, including a reset to
+      // {} on tie revote. Renders as a chip beneath each submission.
+      if (event.type === 'vote_tally') {
+        setVoteTally(event.votes)
+        // Tie revote → engine clears the tally and reopens voting.
+        if (Object.keys(event.votes).length === 0) setMyVotedSubmissionId(null)
       }
       if (event.type === 'player_played' || event.type === 'player_skipped') {
         // Server-authoritative progress: reaches submitted === expected
@@ -269,11 +320,35 @@ function SessionScreen() {
     send({ type: 'happy_ending' })
   }, [send])
 
+  const handleGamble = useCallback(() => {
+    send({ type: 'gamble' })
+  }, [send])
+
+  const handleVote = useCallback(
+    (submissionId: string) => {
+      // Optimistic disable — engine will silently drop self-votes
+      // (which we already gate by not rendering for own submission once
+      // playerId is leaked, but during voting submissions are still
+      // opaque, so the optimistic flag stands until vote_tally arrives).
+      setMyVotedSubmissionId(submissionId)
+      send({ type: 'vote', submissionId })
+    },
+    [send],
+  )
+
   const handleSubmit = useCallback(() => {
     if (!prompt || selected.length < prompt.pick) return
     send({ type: 'play', cardIds: selected })
+    // Gambling: a gambler submits twice in one picking phase. The first
+    // play keeps the UI in `picking` (cleared selection, extra cards in
+    // hand from the wager). Only the second play moves us to `waiting`.
+    if (hasGambled && mySubmissionsSent === 0) {
+      setSelected([])
+      setMySubmissionsSent(1)
+      return
+    }
     setPhase('waiting')
-  }, [prompt, selected, send])
+  }, [prompt, selected, send, hasGambled, mySubmissionsSent])
 
   // The server sends reveal_start automatically; this is a no-op UI affordance
   const handleStartReveal = useCallback(() => {
@@ -344,6 +419,11 @@ function SessionScreen() {
                     isCzar={isCzar}
                     onStartReveal={handleStartReveal}
                     onPickWinner={handlePickWinner}
+                    mode={isGodmode ? 'godmode' : 'normal'}
+                    canVote={canVote}
+                    myVotedSubmissionId={myVotedSubmissionId}
+                    voteTally={voteTally}
+                    onVote={handleVote}
                   />
                 )}
               </div>
@@ -351,7 +431,7 @@ function SessionScreen() {
 
             {phase === 'picking' && !isCzar && hand.length > 0 && (
               <>
-                {(canRedraw || canDiscard) && (
+                {(canRedraw || canDiscard || canGamble) && (
                   <div className="rule-bar" data-testid="rule-bar">
                     {canRedraw && (
                       <button
@@ -369,6 +449,15 @@ function SessionScreen() {
                         data-testid="discard-btn"
                       >
                         {discardMode ? 'Tap a card to discard…' : `Discard (${discardsUsed}/3)`}
+                      </button>
+                    )}
+                    {canGamble && (
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={handleGamble}
+                        data-testid="wager-btn"
+                      >
+                        Wager 1 pt
                       </button>
                     )}
                   </div>

@@ -41,7 +41,30 @@ export async function createGame(
     }
   }
 
-  await page.click('button:has-text("Create lobby")')
+  // The Create lobby button is gated by `canStart` (username ≥ 2 chars
+  // AND ≥ 1 pack). The Core pack auto-selects from a useEffect after
+  // /api/packs resolves, so racing the click before that effect lands
+  // hits a disabled button. Wait for it to enable.
+  const createBtn = page.locator('button:has-text("Create lobby")')
+  await createBtn.waitFor({ state: 'visible' })
+  await page
+    .waitForFunction(
+      () =>
+        !document
+          .querySelector<HTMLButtonElement>('button:disabled')
+          ?.textContent?.includes('Create lobby'),
+      null,
+      { timeout: 15_000 },
+    )
+    .catch(async () => {
+      // Fallback: poll the enabled state directly. waitForFunction can
+      // miss across SSR→hydration on slow CI.
+      for (let i = 0; i < 30; i++) {
+        if (await createBtn.isEnabled()) return
+        await page.waitForTimeout(500)
+      }
+    })
+  await createBtn.click()
   await page.waitForURL('**/lobby')
 
   const url = page.url()
@@ -91,7 +114,30 @@ export async function createGameWithRule(
   await ruleCard.waitFor({ state: 'visible' })
   await ruleCard.click()
 
-  await page.click('button:has-text("Create lobby")')
+  // The Create lobby button is gated by `canStart` (username ≥ 2 chars
+  // AND ≥ 1 pack). The Core pack auto-selects from a useEffect after
+  // /api/packs resolves, so racing the click before that effect lands
+  // hits a disabled button. Wait for it to enable.
+  const createBtn = page.locator('button:has-text("Create lobby")')
+  await createBtn.waitFor({ state: 'visible' })
+  await page
+    .waitForFunction(
+      () =>
+        !document
+          .querySelector<HTMLButtonElement>('button:disabled')
+          ?.textContent?.includes('Create lobby'),
+      null,
+      { timeout: 15_000 },
+    )
+    .catch(async () => {
+      // Fallback: poll the enabled state directly. waitForFunction can
+      // miss across SSR→hydration on slow CI.
+      for (let i = 0; i < 30; i++) {
+        if (await createBtn.isEnabled()) return
+        await page.waitForTimeout(500)
+      }
+    })
+  await createBtn.click()
   await page.waitForURL('**/lobby')
 
   const codeMatch = /\/games\/([A-Z0-9]{6})\/lobby/.exec(page.url())
