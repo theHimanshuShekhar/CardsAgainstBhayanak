@@ -3,10 +3,12 @@ import { HANDLES } from '../fixtures/handles'
 import { createGame, joinGame, getCzar, handPickCount, waitForPhase } from '../helpers'
 
 // Responsive regression for the round-1 picking screen. Two real bugs lived
-// here: (1) on desktop the fanned hand painted over the Submit button (own
-// stacking context, no z-index on the header); (2) the locked 5:7 prompt
-// card overflowed behind the sticky hand dock on any viewport < ~820px tall
-// (every phone AND most laptops) with no way to see it at rest.
+// here: (1) on desktop the hand cards painted over the Submit button (each
+// `.hand-card-wrap` has its own stacking context from the hover/select
+// translate; the header band had no z-index of its own); (2) the locked
+// 5:7 prompt card overflowed behind the sticky hand dock on any viewport
+// < ~820px tall (every phone AND most laptops) with no way to see it at
+// rest.
 //
 // For every screen size below, with the player in round-1 picking, assert:
 //   - the hand is displayed (cards present, hand box visible),
@@ -18,7 +20,7 @@ import { createGame, joinGame, getCzar, handPickCount, waitForPhase } from '../h
 //     position (its sampled column resolves to the prompt, not the dock).
 // Then prove end-to-end clickability with a real (non-dispatched) click.
 const SIZES = [
-  { name: 'desktop', w: 1280, h: 800 }, // fanned hand + short laptop height
+  { name: 'desktop', w: 1280, h: 800 }, // full-size hand + short laptop height
   { name: 'laptop', w: 1366, h: 720 }, // common laptop viewport
   { name: 'iphone-se', w: 375, h: 667 }, // small phone
   { name: 'android-sm', w: 360, h: 640 }, // common small Android
@@ -139,9 +141,10 @@ test('round-1 hand + Submit + prompt render correctly across screen sizes', asyn
   }
 
   // End-to-end: a real pointer click (not dispatchEvent) on the Submit button
-  // must register the submission. Selecting fanned cards still needs
-  // dispatchEvent — that overlap is a separate, documented concern; the point
-  // here is that the *button* itself is genuinely hit-testable and clickable.
+  // must register the submission. Card selection still uses dispatchEvent
+  // here for consistency with the rest of the suite (see `helpers.ts`); the
+  // point here is that the *button* itself is genuinely hit-testable and
+  // clickable.
   await page.setViewportSize({ width: 1280, height: 800 })
   await page.mouse.move(1, 1)
   await page.waitForTimeout(800)

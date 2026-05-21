@@ -2,14 +2,13 @@ import { test, expect } from '@playwright/test'
 import { HANDLES } from '../fixtures/handles'
 import { createGame, joinGame, getCzar, waitForPhase } from '../helpers'
 
-// Regression: on desktop the Submit button + "Your hand" label live in
-// `.hand-dock-hd`, a non-positioned element with no z-index, directly above
-// the fanned `.hand`. Each `.hand-card-wrap` has a `transform` (own stacking
-// context) plus `z-index` 0..9 (100 hover / 99 selected). A `.card-md` is
-// 280px tall in a 200px `.hand` (align-items:flex-end), so cards overflow
-// ~80px up and — being transformed/z-indexed — paint OVER the whole header
-// band. The entire header (label + Submit) renders behind the hand, so
-// players cannot submit.
+// Regression: the Submit button + "Your hand" label live in `.hand-dock-hd`
+// directly above the flat `.hand` strip. Each `.hand-card-wrap` applies a
+// transform on hover/select (own stacking context) and lifts above the
+// dock header on the way up; without `.hand-dock-hd { position: relative;
+// z-index: 101 }` the lifted card paints over the Submit button. Card
+// height (~207px) also exceeds the header's resting band, so any further
+// growth of the hover/select translate could re-introduce occlusion.
 //
 // The rest of the suite hides this: helpers.ts `submitCards()` uses
 // `dispatchEvent('click')` to bypass hit-testing. Here we assert the header
@@ -31,7 +30,7 @@ test('round 1 Submit button is not hidden behind the hand', async ({ browser }) 
   const player = all.find((h) => h !== czar)!
   const page = player.page
 
-  // Documented desktop breakpoint (fanned hand, > 1100px).
+  // Documented desktop breakpoint (>1100px — full-size 148px cards).
   await page.setViewportSize({ width: 1280, height: 800 })
   await page.locator('.hand-dock-hd button').waitFor({ state: 'visible', timeout: 15_000 })
   // Let the staggered deal animation (≈0.6s delay + 0.55s) fully settle so

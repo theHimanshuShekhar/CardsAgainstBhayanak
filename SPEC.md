@@ -219,7 +219,7 @@ Preserve from design prototype (do not regress):
 
 Design has breakpoints at `1100px`, `860px`, `720px`, `420px`. All preserved verbatim in `src/styles.css`. Mobile-specific behaviour:
 
-- Hand dock scrolls horizontally with snap (vs. fan on desktop)
+- Hand dock scrolls horizontally with snap at every breakpoint (the desktop fan from the design reference was dropped during the responsive rebuild — `.hand` is now a flat flex row everywhere, only the card size shrinks at narrow widths)
 - Scoreboard scrolls horizontally
 - Card-xl resizes from 360px → 280px → 260px
 
@@ -284,7 +284,7 @@ Player list with HOST/YOU badges and a small green presence dot per player (no r
 - Sticky topbar: ROUND XX pill, timer pill, **host-only ⋯ menu** (when `happy_ending` rule active — opens dropdown with "End game early — make a haiku"), Leave button
 - Scoreboard row (current Czar highlighted in white chip)
 - Stage: prompt card left (xl size), submissions grid right
-- Hand dock: sticky bottom, **10 cards** fanned per official CAH rules (design's 7-card fan widened to fit 10 — increase overlap or scroll horizontally on narrow screens), selected cards lift
+- Hand dock: sticky bottom, **10 cards** in a horizontally scrollable flex row (the design reference's fanned arc was dropped during the responsive rebuild — `.hand` uses `display: flex; gap: 10px; overflow-x: auto` at every width, with card size scaling via `clamp()`); selected cards lift `translateY(-8px)` and gain an outline rather than rearranging the layout
 
 **Multi-blank cards:** Black cards with `pick: 2` or `pick: 3` require multiple white card selections. Cards flatten into the grid with player-number badges. Real CAH packs typically only include `pick: 1` and `pick: 2`; engine supports `pick: 3` for forward compatibility with user-generated content.
 

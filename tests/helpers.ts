@@ -237,14 +237,14 @@ export async function playRound(players: PlayerHandle[], pick: number): Promise<
 }
 
 // Submit N cards for a non-czar player (selects first N hand cards, submits).
-// The hand dock fans the cards with a stacked z-index and a selected card
-// lifts (translateY -22px) to zIndex 99, so its box overlaps both its
-// neighbours and the Submit button. A real or forced pointer click is routed
-// by the browser to the topmost element at that point (the raised card), so
-// force:true would re-toggle the already-selected card instead of selecting
-// the next one / clicking Submit. dispatchEvent fires the click directly on
-// the target node; React's delegated onClick still handles it, bypassing
-// hit-testing entirely — the only reliable way to drive this fanned UI.
+// The hand is a flat horizontally scrollable flex row at every breakpoint
+// (`.hand` = `display: flex; gap: 10px`), so adjacent cards don't overlap
+// and real `.click()` would work. We keep `dispatchEvent('click')` here
+// for historical consistency across the 50+ specs that depend on this
+// helper (firing on the exact target node bypasses hit-testing entirely
+// — equivalent to a forced click on the lifted card, with no risk of a
+// regression if hover/select lift ever exceeds the gap again). See
+// `tests/e2e/ui-golden-path.spec.ts` for the real-click variant.
 export async function submitCards(handle: PlayerHandle, count: number): Promise<void> {
   for (let i = 0; i < count; i++) {
     const card = handle.page.locator('.hand-card-wrap').nth(i).locator('.card-response')
