@@ -1576,6 +1576,115 @@ button {
   flex-wrap: wrap;
   margin-top: 16px;
 }
+
+/* House-rule action bar above the hand dock (Rebooting redraw, NHIE discard).
+   Inline with the dock so card-tap context stays close to the trigger. */
+.rule-bar {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  flex-wrap: wrap;
+  padding: 8px 0 4px;
+}
+.rule-bar .btn.is-armed {
+  background: var(--white);
+  color: var(--black);
+  border-color: var(--white);
+}
+
+/* God Is Dead voting affordance, attached under each revealed submission. */
+.vote-strip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 0 2px;
+}
+.vote-strip .vote-btn[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.vote-strip .vote-btn.is-armed {
+  background: var(--white);
+  color: var(--black);
+  border-color: var(--white);
+}
+.vote-tally {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+}
+
+/* Survival of the Fittest: eliminate affordance + visual mark on the
+   removed card. Strikes through the card without removing it from the
+   grid so the elimination sequence stays legible. */
+.elim-strip,
+.rank-strip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 0 2px;
+}
+.elim-strip .elim-btn[disabled],
+.rank-strip .rank-btn[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.rank-strip .rank-btn.is-armed {
+  background: var(--white);
+  color: var(--black);
+  border-color: var(--white);
+}
+.sub-card.is-eliminated {
+  opacity: 0.35;
+  filter: grayscale(1);
+}
+.sub-card.is-ranked {
+  outline: 2px solid var(--white);
+  outline-offset: 2px;
+}
+.rank-confirm {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+/* Host overflow menu: anchored popover under a ⋯ button in the topbar. */
+.host-menu {
+  position: relative;
+  display: inline-block;
+}
+.host-menu-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 220px;
+  background: var(--black);
+  border: 1px solid var(--hairline-2);
+  border-radius: 8px;
+  padding: 6px;
+  z-index: 20;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+}
+.host-menu-item {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  color: var(--white);
+  border: none;
+  padding: 10px 12px;
+  font: 500 13px/1.2 var(--font-body);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.host-menu-item:hover {
+  background: var(--ink);
+}
 .role-toggle {
   display: inline-flex;
   align-items: center;

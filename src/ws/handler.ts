@@ -67,6 +67,7 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
   const players = await state.getAllPlayers(code)
   const czarId = roundRow.czarPlayerId ?? null
   const config = session.config as GameConfig
+  const me = players.find((p) => p.id === playerId)
 
   const scores: PlayerScore[] = engine.toPlayerScores(players, czarId)
 
@@ -140,6 +141,8 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
     round: roundRow.roundNum,
     prompt: { id: black.id, text: black.text, pick: black.pick as 1 | 2 | 3 },
     czarId,
+    hostId: session.hostPlayerId,
+    config,
     hand,
     submissions,
     scores,
@@ -148,6 +151,8 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
     submitted,
     expected,
     roundTimerExpiresAt,
+    myDiscardsUsed: me?.discardsUsed ?? 0,
+    myHasGambled: me?.hasGambled ?? false,
     ...(voteTally ? { voteTally } : {}),
     ...(eliminationTurnPlayerId ? { eliminationTurnPlayerId } : {}),
     ...(ranking ? { ranking } : {}),

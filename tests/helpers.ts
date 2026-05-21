@@ -41,13 +41,107 @@ export async function createGame(
     }
   }
 
-  await page.click('button:has-text("Create lobby")')
+  // The Create lobby button is gated by `canStart` (username ≥ 2 chars
+  // AND ≥ 1 pack). The Core pack auto-selects from a useEffect after
+  // /api/packs resolves, so racing the click before that effect lands
+  // hits a disabled button. Wait for it to enable.
+  const createBtn = page.locator('button:has-text("Create lobby")')
+  await createBtn.waitFor({ state: 'visible' })
+  await page
+    .waitForFunction(
+      () =>
+        !document
+          .querySelector<HTMLButtonElement>('button:disabled')
+          ?.textContent?.includes('Create lobby'),
+      null,
+      { timeout: 15_000 },
+    )
+    .catch(async () => {
+      // Fallback: poll the enabled state directly. waitForFunction can
+      // miss across SSR→hydration on slow CI.
+      for (let i = 0; i < 30; i++) {
+        if (await createBtn.isEnabled()) return
+        await page.waitForTimeout(500)
+      }
+    })
+  await createBtn.click()
   await page.waitForURL('**/lobby')
 
   const url = page.url()
   const codeMatch = /\/games\/([A-Z0-9]{6})\/lobby/.exec(url)
   const roomCode = codeMatch?.[1] ?? ''
 
+  return { handle: { context, page, username, roomCode }, roomCode }
+}
+
+// Creates a game with a single house-rule pre-selected before clicking
+// "Create lobby". The rule is identified by its visible CheckCard title
+// (e.g. "Rebooting the Universe", "Happy Ending"). Returns the host
+// handle and resolved room code, same shape as createGame.
+export async function createGameWithRule(
+  browser: Browser,
+  username: string,
+  ruleTitle: string,
+  opts: { roundsToWin?: number; maxPlayers?: number } = {},
+): Promise<{ handle: PlayerHandle; roomCode: string }> {
+  const context = await browser.newContext()
+  const page = await context.newPage()
+
+  await page.addInitScript((name) => {
+    localStorage.setItem('cab_anon_id', `anon-${name.toLowerCase()}`)
+  }, username)
+
+  await page.goto('/games/create')
+  await page.getByLabel('Your handle').fill(username)
+
+  if (opts.roundsToWin !== undefined) {
+    const stepper = page.locator('.opt-row', { hasText: 'Rounds to win' }).locator('.stepper')
+    const valEl = stepper.locator('.stepper-val')
+    for (let guard = 0; guard < 25; guard++) {
+      const cur = parseInt((await valEl.textContent())?.trim() ?? '', 10)
+      if (cur === opts.roundsToWin) break
+      const btn =
+        cur > opts.roundsToWin
+          ? stepper.locator('.stepper-btn').first()
+          : stepper.locator('.stepper-btn').last()
+      await btn.click()
+    }
+  }
+
+  // Toggle the rule's CheckCard. Title-match is sufficient — rule titles
+  // are unique within the editor.
+  const ruleCard = page.locator('.check-card', { hasText: ruleTitle }).first()
+  await ruleCard.waitFor({ state: 'visible' })
+  await ruleCard.click()
+
+  // The Create lobby button is gated by `canStart` (username ≥ 2 chars
+  // AND ≥ 1 pack). The Core pack auto-selects from a useEffect after
+  // /api/packs resolves, so racing the click before that effect lands
+  // hits a disabled button. Wait for it to enable.
+  const createBtn = page.locator('button:has-text("Create lobby")')
+  await createBtn.waitFor({ state: 'visible' })
+  await page
+    .waitForFunction(
+      () =>
+        !document
+          .querySelector<HTMLButtonElement>('button:disabled')
+          ?.textContent?.includes('Create lobby'),
+      null,
+      { timeout: 15_000 },
+    )
+    .catch(async () => {
+      // Fallback: poll the enabled state directly. waitForFunction can
+      // miss across SSR→hydration on slow CI.
+      for (let i = 0; i < 30; i++) {
+        if (await createBtn.isEnabled()) return
+        await page.waitForTimeout(500)
+      }
+    })
+  await createBtn.click()
+  await page.waitForURL('**/lobby')
+
+  const codeMatch = /\/games\/([A-Z0-9]{6})\/lobby/.exec(page.url())
+  const roomCode = codeMatch?.[1] ?? ''
   return { handle: { context, page, username, roomCode }, roomCode }
 }
 

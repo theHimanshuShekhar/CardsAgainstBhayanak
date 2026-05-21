@@ -247,7 +247,17 @@ export async function startRound(
     roundTimerExpiresAt = Date.now() + ms
     await state.setRoundTimerExpiresAt(code, roundTimerExpiresAt)
     const armedAt = roundTimerExpiresAt
-    setTimeout(() => void expireRoundTimer(code, round, czarId, armedAt), ms)
+    // Swallow rejections inside the timer callback. The session row can
+    // vanish between this insert and a later FK insert when the test
+    // suite's globalTeardown TRUNCATEs while orphaned timers are still
+    // queued; an unhandled rejection from setTimeout crashes the process.
+    // Treating these as no-ops is correct: a missing session means the
+    // game is gone, so there's nothing for the timer to drive forward.
+    setTimeout(() => {
+      expireRoundTimer(code, round, czarId, armedAt).catch((err) =>
+        engineLogger.warn({ err, code, round }, 'round timer expiry suppressed'),
+      )
+    }, ms)
   }
 
   const startProgress = await submissionProgress(code)
@@ -406,8 +416,13 @@ export async function restoreRoundTimers(): Promise<void> {
       // armedAt=null bypasses the persisted-expiry guard: the boot-restore
       // path IS the authoritative re-arm, and the persisted value is what
       // we just read, so a match-check would be tautological.
-      if (ms <= 0) void expireRoundTimer(code, round, czarId, null)
-      else setTimeout(() => void expireRoundTimer(code, round, czarId, null), ms)
+      const onExpire = (): void => {
+        expireRoundTimer(code, round, czarId, null).catch((err) =>
+          engineLogger.warn({ err, code, round }, 'round timer expiry suppressed'),
+        )
+      }
+      if (ms <= 0) onExpire()
+      else setTimeout(onExpire, ms)
       engineLogger.info({ code, round, ms: Math.max(0, ms) }, 'round timer restored')
       continue
     }
@@ -417,8 +432,13 @@ export async function restoreRoundTimers(): Promise<void> {
       const resumeAt = await state.getPostResolveResumeAt(code)
       if (!resumeAt) continue // not a finalize-pending transition (no-op)
       const ms = resumeAt - Date.now()
-      if (ms <= 0) void finalizeRoundAfterPause(code)
-      else setTimeout(() => void finalizeRoundAfterPause(code), ms)
+      const onResume = (): void => {
+        finalizeRoundAfterPause(code).catch((err) =>
+          engineLogger.warn({ err, code }, 'post-resolve pause suppressed'),
+        )
+      }
+      if (ms <= 0) onResume()
+      else setTimeout(onResume, ms)
       engineLogger.info({ code, ms: Math.max(0, ms) }, 'post-resolve pause restored')
       continue
     }
@@ -1447,6 +1467,55 @@ export async function applyRanking(code: string, czarId: string, ranking: string
   void czarId
 }
 
+// Push the player's current hand to its owner as a private `hand_update`.
+// Used by mutations that change the hand outside the round-start refill
+// flow (redraw, confess_discard, gamble's extra draw) — the snapshot in
+// Redis is authoritative but the client only learns of changes through
+// these targeted broadcasts. The WS layer routes hand_update privately
+// to the matching peer, so this is safe to call from any code path.
+// Push a refreshed scoreboard to every client. Used by mutations that
+// change a score outside the round_won path (redraw burns a point;
+// settleGambles already pipes through round_won so no need there). Reads
+// the current czar from the latest gameRounds row so the JUDGE chip
+// stays correct between rounds — `null` in transition/lobby is fine.
+async function broadcastScores(code: string): Promise<void> {
+  const [session] = await db
+    .select({ id: gameSessions.id })
+    .from(gameSessions)
+    .where(eq(gameSessions.code, code))
+  if (!session) return
+  const [latestRound] = await db
+    .select({ czarPlayerId: gameRounds.czarPlayerId })
+    .from(gameRounds)
+    .where(eq(gameRounds.sessionId, session.id))
+    .orderBy(desc(gameRounds.roundNum))
+    .limit(1)
+  const players = await state.getAllPlayers(code)
+  const scores = toPlayerScores(players, latestRound?.czarPlayerId ?? null)
+  await state.publishEvent(code, { type: 'scores_update', scores })
+}
+
+async function publishHandUpdate(
+  code: string,
+  playerId: string,
+  opts: { discardsUsed?: number } = {},
+): Promise<void> {
+  const ids = await state.getHand(code, playerId)
+  const rows = ids.length
+    ? await db.select().from(whiteCards).where(inArray(whiteCards.id, ids))
+    : []
+  const hand: Card[] = ids.map((id) => {
+    const c = rows.find((x) => x.id === id)
+    return c ? { id: c.id, text: c.text } : { id, text: '' }
+  })
+  await state.publishEvent(code, {
+    type: 'hand_update',
+    playerId,
+    hand,
+    ...(opts.discardsUsed !== undefined ? { discardsUsed: opts.discardsUsed } : {}),
+  })
+}
+
 export async function gamble(code: string, playerId: string): Promise<void> {
   const player = await state.getPlayer(code, playerId)
   if (!player || player.score < 1 || player.hasGambled) return
@@ -1471,6 +1540,7 @@ export async function gamble(code: string, playerId: string): Promise<void> {
   if (extra.length > 0) {
     const current = await state.getHand(code, playerId)
     await state.setHand(code, playerId, [...current, ...extra])
+    await publishHandUpdate(code, playerId)
   }
   await state.publishEvent(code, { type: 'player_gambled', playerId })
   const gamblerDistinctId = await distinctIdFor(code, playerId)
@@ -1494,6 +1564,11 @@ export async function redraw(code: string, playerId: string): Promise<void> {
   await state.discardCards(code, 'white', hand)
   const newCards = await state.drawCards(code, 'white', 10)
   await state.setHand(code, playerId, newCards)
+  // The hand_update lets the redrawing player render the fresh ten;
+  // scores_update propagates the -1 deduction to every scoreboard so
+  // the Redraw button's own enable check (score ≥ 1) self-throttles.
+  await publishHandUpdate(code, playerId)
+  await broadcastScores(code)
   captureServerEvent(await distinctIdFor(code, playerId), 'cab_rule_triggered', {
     roomCode: code,
     playerId,
@@ -1515,7 +1590,12 @@ export async function confessDiscard(
     const current = await state.getHand(code, playerId)
     await state.setHand(code, playerId, [...current, ...replacement])
   }
-  await state.updatePlayer(code, playerId, { discardsUsed: player.discardsUsed + 1 })
+  const newDiscardsUsed = player.discardsUsed + 1
+  await state.updatePlayer(code, playerId, { discardsUsed: newDiscardsUsed })
+  // The new card replaces the discarded one in the player's hand; the
+  // discardsUsed echo lets the client disable the button at 3 without
+  // tracking its own counter.
+  await publishHandUpdate(code, playerId, { discardsUsed: newDiscardsUsed })
   captureServerEvent(await distinctIdFor(code, playerId), 'cab_rule_triggered', {
     roomCode: code,
     playerId,
