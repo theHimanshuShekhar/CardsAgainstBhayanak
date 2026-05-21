@@ -1616,6 +1616,44 @@ button {
   letter-spacing: 0.04em;
 }
 
+/* Survival of the Fittest: eliminate affordance + visual mark on the
+   removed card. Strikes through the card without removing it from the
+   grid so the elimination sequence stays legible. */
+.elim-strip,
+.rank-strip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 0 2px;
+}
+.elim-strip .elim-btn[disabled],
+.rank-strip .rank-btn[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.rank-strip .rank-btn.is-armed {
+  background: var(--white);
+  color: var(--black);
+  border-color: var(--white);
+}
+.sub-card.is-eliminated {
+  opacity: 0.35;
+  filter: grayscale(1);
+}
+.sub-card.is-ranked {
+  outline: 2px solid var(--white);
+  outline-offset: 2px;
+}
+.rank-confirm {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+
 /* Host overflow menu: anchored popover under a ⋯ button in the topbar. */
 .host-menu {
   position: relative;

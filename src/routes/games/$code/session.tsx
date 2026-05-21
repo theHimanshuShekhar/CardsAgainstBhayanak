@@ -61,6 +61,20 @@ function SessionScreen() {
   // tap, and renders the live tally beneath each card.
   const [myVotedSubmissionId, setMyVotedSubmissionId] = useState<string | null>(null)
   const [voteTally, setVoteTally] = useState<Record<string, number>>({})
+  // Survival of the Fittest: the engine drives whose turn it is via
+  // `elimination_turn` events. The client also tracks locally-eliminated
+  // submissionIds — the card_eliminated event only carries the id, not a
+  // refreshed submission — so the "Eliminated" label and disabled state
+  // render immediately, not just on rejoin.
+  const [eliminationTurn, setEliminationTurn] = useState<string | null>(null)
+  const [eliminatedIds, setEliminatedIds] = useState<Set<string>>(new Set())
+  // Serious Business: the czar builds an ordered ranking client-side and
+  // sends it via `{type:'rank', ranking}` once confirmed. The list holds
+  // submissionIds in 1st/2nd/3rd order.
+  const [myRanking, setMyRanking] = useState<string[]>([])
+  // `round_ranked` arrives with the full ranking. We display the engine's
+  // resolved order in the rank badge by storing it; non-czars need it too.
+  const [serverRanking, setServerRanking] = useState<Submission[] | null>(null)
   // Read inside the socket handler without putting `round` in the effect
   // deps — re-subscribing mid-game drops WS frames in the cleanup→setup gap.
   const roundRef = useRef(round)
@@ -91,6 +105,8 @@ function SessionScreen() {
     !!config?.rules.includes('survival') ||
     !!config?.rules.includes('serious_business')
   const isGodmode = !!config?.rules.includes('godmode')
+  const isSurvival = !!config?.rules.includes('survival')
+  const isSerious = !!config?.rules.includes('serious_business')
   // Gambling base mechanic: enabled outside modal rules, after round 1,
   // for non-Czars with ≥1 pt who haven't already gambled this round.
   const canGamble = !modalActive && round > 1 && myScore >= 1 && !hasGambled && !isCzar
@@ -104,6 +120,25 @@ function SessionScreen() {
     submissions.length > 0 &&
     revealIndex >= submissions.length &&
     !myVotedSubmissionId &&
+    winnerId == null
+  // Survival: only the elimination-turn holder can eliminate, and only
+  // once every card is face-up. The engine flips server phase to
+  // 'eliminating' silently — the client stays on 'reveal' until winner.
+  const canEliminate =
+    isSurvival &&
+    phase === 'reveal' &&
+    submissions.length > 0 &&
+    revealIndex >= submissions.length &&
+    eliminationTurn === myId &&
+    winnerId == null
+  // Serious Business: the czar ranks top 3 once the reveal completes.
+  const canRank =
+    isSerious &&
+    phase === 'reveal' &&
+    submissions.length > 0 &&
+    revealIndex >= submissions.length &&
+    isCzar &&
+    serverRanking == null &&
     winnerId == null
 
   const { on, send } = useGameSocket(code, session?.sessionToken ?? null, session?.anonId ?? '')
@@ -132,6 +167,14 @@ function SessionScreen() {
         setTimerExpiresAt(s.roundTimerExpiresAt)
         setDiscardsUsed(s.myDiscardsUsed)
         if (s.hand) setHand(s.hand)
+        // Survival/SB rejoin: restore the elimination-turn pointer and any
+        // server-resolved ranking. Eliminated flags ride on submissions
+        // already (state.getSubmissions preserves them).
+        setEliminationTurn(s.eliminationTurnPlayerId ?? null)
+        setServerRanking(s.ranking ?? null)
+        setEliminatedIds(
+          new Set(s.submissions.filter((x) => x.eliminated).map((x) => x.submissionId)),
+        )
         setPhase(s.phase === 'picking' && s.czarId === myId ? 'waiting' : s.phase)
       }
       if (event.type === 'round_started') {
@@ -158,6 +201,13 @@ function SessionScreen() {
         setMySubmissionsSent(0)
         setMyVotedSubmissionId(null)
         setVoteTally({})
+        // Survival/SB: per-round state must reset alongside submissions
+        // so a stale eliminate-turn / ranking doesn't survive into the
+        // fresh round_started.
+        setEliminationTurn(null)
+        setEliminatedIds(new Set())
+        setMyRanking([])
+        setServerRanking(null)
       }
       if (event.type === 'host_changed') {
         setHostId(event.hostId)
@@ -184,6 +234,46 @@ function SessionScreen() {
         setVoteTally(event.votes)
         // Tie revote → engine clears the tally and reopens voting.
         if (Object.keys(event.votes).length === 0) setMyVotedSubmissionId(null)
+      }
+      // Survival: the engine fires elimination_turn at reveal end and
+      // again after each elimination, cycling through active non-Czar
+      // submitters. Mirror locally so the elim button enables only on
+      // the active player's page.
+      if (event.type === 'elimination_turn') {
+        setEliminationTurn(event.playerId)
+      }
+      // Survival: mark the submission eliminated on every client. The
+      // engine will follow up with `elimination_turn` for the next player
+      // or `round_won` when only one card remains.
+      if (event.type === 'card_eliminated') {
+        setEliminatedIds((prev) => {
+          const next = new Set(prev)
+          next.add(event.submissionId)
+          return next
+        })
+      }
+      // Serious Business: engine emits the final ranking + score delta.
+      // Apply scoresDelta to local scores so the scoreboard reflects the
+      // 3/2/1 award without waiting for the next round's payload.
+      if (event.type === 'round_ranked') {
+        setServerRanking(event.ranking)
+        // Pin the top-ranked submission as the round winner so the
+        // grid highlights it and the round_end pause renders cleanly.
+        const top = event.ranking[0]
+        if (top) setWinnerId(top.submissionId)
+        // Apply scoresDelta and resolve the top-ranked player's handle
+        // in the same setter so we read the freshest scores list.
+        setScores((prev) => {
+          const next = prev.map((p) =>
+            event.scoresDelta[p.playerId] != null
+              ? { ...p, score: p.score + (event.scoresDelta[p.playerId] ?? 0) }
+              : p,
+          )
+          if (top?.playerId) {
+            setWinnerName(next.find((x) => x.playerId === top.playerId)?.username ?? null)
+          }
+          return next
+        })
       }
       if (event.type === 'player_played' || event.type === 'player_skipped') {
         // Server-authoritative progress: reaches submitted === expected
@@ -363,6 +453,34 @@ function SessionScreen() {
     [send],
   )
 
+  const handleEliminate = useCallback(
+    (submissionId: string) => {
+      // Optimistically mark eliminated so the button flips to "Eliminated"
+      // before the broadcast lands; card_eliminated handler is idempotent.
+      setEliminatedIds((prev) => {
+        const next = new Set(prev)
+        next.add(submissionId)
+        return next
+      })
+      send({ type: 'eliminate', submissionId })
+    },
+    [send],
+  )
+
+  const handleRankTap = useCallback((submissionId: string) => {
+    setMyRanking((prev) => {
+      // Toggle out if already ranked; append (up to 3) otherwise.
+      if (prev.includes(submissionId)) return prev.filter((id) => id !== submissionId)
+      if (prev.length >= 3) return prev
+      return [...prev, submissionId]
+    })
+  }, [])
+
+  const handleConfirmRank = useCallback(() => {
+    if (myRanking.length === 0) return
+    send({ type: 'rank', ranking: myRanking })
+  }, [myRanking, send])
+
   return (
     <div className="scene game-scene">
       <Topbar
@@ -419,11 +537,26 @@ function SessionScreen() {
                     isCzar={isCzar}
                     onStartReveal={handleStartReveal}
                     onPickWinner={handlePickWinner}
-                    mode={isGodmode ? 'godmode' : 'normal'}
+                    mode={
+                      isGodmode
+                        ? 'godmode'
+                        : isSurvival
+                          ? 'survival'
+                          : isSerious
+                            ? 'serious_business'
+                            : 'normal'
+                    }
                     canVote={canVote}
                     myVotedSubmissionId={myVotedSubmissionId}
                     voteTally={voteTally}
                     onVote={handleVote}
+                    canEliminate={canEliminate}
+                    eliminatedIds={eliminatedIds}
+                    onEliminate={handleEliminate}
+                    canRank={canRank}
+                    myRanking={myRanking}
+                    onRankTap={handleRankTap}
+                    onConfirmRank={handleConfirmRank}
                   />
                 )}
               </div>
