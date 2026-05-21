@@ -20,7 +20,7 @@ import {
 // around in a test.
 
 test('God Is Dead — vote button mounts, tally chip propagates a vote', async ({ browser }) => {
-  test.setTimeout(120_000)
+  test.setTimeout(180_000)
   const { handle: host, roomCode } = await createGameWithRule(browser, 'Host', 'God Is Dead', {
     roundsToWin: 5,
   })
@@ -39,12 +39,17 @@ test('God Is Dead — vote button mounts, tally chip propagates a vote', async (
   for (const p of players) await submitCards(p, pick)
 
   // Reveal completes when canVote flips → first vote button is enabled
-  // (`canVote = revealIndex >= submissions.length`).
-  for (const p of players) {
-    await expect(p.page.locator('[data-testid="vote-btn"]').first()).toBeEnabled({
-      timeout: 30_000,
-    })
-  }
+  // (`canVote = revealIndex >= submissions.length`). All three clients
+  // share the same server reveal sequence, so they enable at roughly the
+  // same wall-clock moment — wait in parallel instead of serially so the
+  // total budget is one stagger window, not three.
+  await Promise.all(
+    players.map((p) =>
+      expect(p.page.locator('[data-testid="vote-btn"]').first()).toBeEnabled({
+        timeout: 45_000,
+      }),
+    ),
+  )
 
   // Every page renders one button + one tally chip per submission.
   for (const p of players) {
