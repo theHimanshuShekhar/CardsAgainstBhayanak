@@ -247,7 +247,17 @@ export async function startRound(
     roundTimerExpiresAt = Date.now() + ms
     await state.setRoundTimerExpiresAt(code, roundTimerExpiresAt)
     const armedAt = roundTimerExpiresAt
-    setTimeout(() => void expireRoundTimer(code, round, czarId, armedAt), ms)
+    // Swallow rejections inside the timer callback. The session row can
+    // vanish between this insert and a later FK insert when the test
+    // suite's globalTeardown TRUNCATEs while orphaned timers are still
+    // queued; an unhandled rejection from setTimeout crashes the process.
+    // Treating these as no-ops is correct: a missing session means the
+    // game is gone, so there's nothing for the timer to drive forward.
+    setTimeout(() => {
+      expireRoundTimer(code, round, czarId, armedAt).catch((err) =>
+        engineLogger.warn({ err, code, round }, 'round timer expiry suppressed'),
+      )
+    }, ms)
   }
 
   const startProgress = await submissionProgress(code)
@@ -406,8 +416,13 @@ export async function restoreRoundTimers(): Promise<void> {
       // armedAt=null bypasses the persisted-expiry guard: the boot-restore
       // path IS the authoritative re-arm, and the persisted value is what
       // we just read, so a match-check would be tautological.
-      if (ms <= 0) void expireRoundTimer(code, round, czarId, null)
-      else setTimeout(() => void expireRoundTimer(code, round, czarId, null), ms)
+      const onExpire = (): void => {
+        expireRoundTimer(code, round, czarId, null).catch((err) =>
+          engineLogger.warn({ err, code, round }, 'round timer expiry suppressed'),
+        )
+      }
+      if (ms <= 0) onExpire()
+      else setTimeout(onExpire, ms)
       engineLogger.info({ code, round, ms: Math.max(0, ms) }, 'round timer restored')
       continue
     }
@@ -417,8 +432,13 @@ export async function restoreRoundTimers(): Promise<void> {
       const resumeAt = await state.getPostResolveResumeAt(code)
       if (!resumeAt) continue // not a finalize-pending transition (no-op)
       const ms = resumeAt - Date.now()
-      if (ms <= 0) void finalizeRoundAfterPause(code)
-      else setTimeout(() => void finalizeRoundAfterPause(code), ms)
+      const onResume = (): void => {
+        finalizeRoundAfterPause(code).catch((err) =>
+          engineLogger.warn({ err, code }, 'post-resolve pause suppressed'),
+        )
+      }
+      if (ms <= 0) onResume()
+      else setTimeout(onResume, ms)
       engineLogger.info({ code, ms: Math.max(0, ms) }, 'post-resolve pause restored')
       continue
     }
