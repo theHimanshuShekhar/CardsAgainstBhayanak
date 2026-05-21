@@ -70,6 +70,14 @@ export type SessionState = {
   round: number
   prompt: BlackCard
   czarId: string | null
+  // host_changed migrates this mid-game (longest-present active player),
+  // so the snapshot is the floor — the client keeps it in sync via the
+  // broadcast event.
+  hostId: string | null
+  // The config doesn't change mid-game (lobby PATCH is rejected once
+  // active), so the rejoin snapshot is enough — the client uses it to
+  // decide which house-rule buttons to render.
+  config: GameConfig
   hand?: Hand
   submissions: Submission[]
   scores: PlayerScore[]
@@ -86,6 +94,13 @@ export type SessionState = {
   eliminationTurnPlayerId?: string
   voteTally?: Record<string, number>
   ranking?: Submission[]
+  // Never Have I Ever: only the requesting player's count is needed —
+  // the button disables at 3, and the engine is authoritative on the cap.
+  myDiscardsUsed: number
+  // Gambling (base mechanic): the engine flips this when the player wagers
+  // and the round resolves; the rejoin must restore so the player can finish
+  // a gamble across a refresh.
+  myHasGambled: boolean
 }
 
 // ── Session-level status ──────────────────────────────────────────
@@ -204,7 +219,8 @@ export type ServerMessage =
       roundTimerExpiresAt: number | null
     }
   | { type: 'player_played'; playerId: string; submitted: number; expected: number }
-  | { type: 'hand_update'; playerId: string; hand: Hand }
+  | { type: 'hand_update'; playerId: string; hand: Hand; discardsUsed?: number }
+  | { type: 'scores_update'; scores: PlayerScore[] }
   | { type: 'player_gambled'; playerId: string }
   | { type: 'player_skipped'; playerId: string; round: number; submitted: number; expected: number }
   | { type: 'reveal_start' }

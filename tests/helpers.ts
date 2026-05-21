@@ -51,6 +51,54 @@ export async function createGame(
   return { handle: { context, page, username, roomCode }, roomCode }
 }
 
+// Creates a game with a single house-rule pre-selected before clicking
+// "Create lobby". The rule is identified by its visible CheckCard title
+// (e.g. "Rebooting the Universe", "Happy Ending"). Returns the host
+// handle and resolved room code, same shape as createGame.
+export async function createGameWithRule(
+  browser: Browser,
+  username: string,
+  ruleTitle: string,
+  opts: { roundsToWin?: number; maxPlayers?: number } = {},
+): Promise<{ handle: PlayerHandle; roomCode: string }> {
+  const context = await browser.newContext()
+  const page = await context.newPage()
+
+  await page.addInitScript((name) => {
+    localStorage.setItem('cab_anon_id', `anon-${name.toLowerCase()}`)
+  }, username)
+
+  await page.goto('/games/create')
+  await page.getByLabel('Your handle').fill(username)
+
+  if (opts.roundsToWin !== undefined) {
+    const stepper = page.locator('.opt-row', { hasText: 'Rounds to win' }).locator('.stepper')
+    const valEl = stepper.locator('.stepper-val')
+    for (let guard = 0; guard < 25; guard++) {
+      const cur = parseInt((await valEl.textContent())?.trim() ?? '', 10)
+      if (cur === opts.roundsToWin) break
+      const btn =
+        cur > opts.roundsToWin
+          ? stepper.locator('.stepper-btn').first()
+          : stepper.locator('.stepper-btn').last()
+      await btn.click()
+    }
+  }
+
+  // Toggle the rule's CheckCard. Title-match is sufficient — rule titles
+  // are unique within the editor.
+  const ruleCard = page.locator('.check-card', { hasText: ruleTitle }).first()
+  await ruleCard.waitFor({ state: 'visible' })
+  await ruleCard.click()
+
+  await page.click('button:has-text("Create lobby")')
+  await page.waitForURL('**/lobby')
+
+  const codeMatch = /\/games\/([A-Z0-9]{6})\/lobby/.exec(page.url())
+  const roomCode = codeMatch?.[1] ?? ''
+  return { handle: { context, page, username, roomCode }, roomCode }
+}
+
 export async function joinGame(
   browser: Browser,
   username: string,

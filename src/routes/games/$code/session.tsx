@@ -1,13 +1,14 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { Topbar } from '~/components/ui/Topbar'
+import { HostMenu } from '~/components/ui/HostMenu'
 import { Scoreboard } from '~/components/game/Scoreboard'
 import { HandDock } from '~/components/game/HandDock'
 import { SubmissionsGrid } from '~/components/game/SubmissionsGrid'
 import { PromptStage } from '~/components/game/PromptStage'
 import { useSession } from '~/hooks/useSession'
 import { useGameSocket } from '~/hooks/useGameSocket'
-import type { BlackCard, Card, GamePhase, PlayerScore, Submission } from '~/lib/types'
+import type { BlackCard, Card, GameConfig, GamePhase, PlayerScore, Submission } from '~/lib/types'
 
 export const Route = createFileRoute('/games/$code/session')({
   component: SessionScreen,
@@ -22,6 +23,10 @@ function SessionScreen() {
   const [phase, setPhase] = useState<GamePhase>('picking')
   const [prompt, setPrompt] = useState<BlackCard | null>(null)
   const [czarId, setCzarId] = useState<string | null>(null)
+  const [hostId, setHostId] = useState<string | null>(null)
+  // Rule visibility flags read from the rejoin snapshot — the config is
+  // immutable once a game is active, so set-and-forget is fine.
+  const [config, setConfig] = useState<GameConfig | null>(null)
   const [hand, setHand] = useState<Card[]>([])
   const [selected, setSelected] = useState<string[]>([])
   const [scores, setScores] = useState<PlayerScore[]>([])
@@ -38,6 +43,14 @@ function SessionScreen() {
   // Server-authoritative round-timer expiry (epoch ms; null when timer
   // Off). Drives a display-only countdown — never a client phase timer.
   const [timerExpiresAt, setTimerExpiresAt] = useState<number | null>(null)
+  // Per-rule state for this player. Hydrated from the rejoin snapshot
+  // and live-updated via hand_update (discardsUsed). Gambling state is
+  // wired in Slice 2.
+  const [discardsUsed, setDiscardsUsed] = useState(0)
+  // Never Have I Ever: a second tap on a hand card normally toggles
+  // selection — entering discard mode reroutes the next click to a
+  // confess_discard send. Cleared after the click or by toggling off.
+  const [discardMode, setDiscardMode] = useState(false)
   // Read inside the socket handler without putting `round` in the effect
   // deps — re-subscribing mid-game drops WS frames in the cleanup→setup gap.
   const roundRef = useRef(round)
@@ -47,8 +60,20 @@ function SessionScreen() {
 
   const myId = session?.playerId ?? ''
   const isCzar = czarId === myId
+  const isHost = hostId !== null && hostId === myId
+  const myScore = scores.find((s) => s.playerId === myId)?.score ?? 0
   const czarScore = scores.find((s) => s.playerId === czarId)
   const czarName = czarScore?.username ?? 'Judge'
+  // Rebooting allows redraw during picking (HandDock is mounted) when the
+  // player has at least one point. Round-1 isn't excluded by the engine,
+  // so the score check naturally gates it.
+  const canRedraw = !!config?.rules.includes('rebooting') && myScore >= 1 && !isCzar
+  // Never Have I Ever: the 3-per-game cap is the engine floor; the
+  // button mirrors it so a stale click can't slip past the limit.
+  const canDiscard = !!config?.rules.includes('never_have_i_ever') && discardsUsed < 3 && !isCzar
+  // Happy Ending: the host menu only matters while a game is active and
+  // the rule is on; the engine ignores the trigger otherwise.
+  const showHappyEndingTrigger = isHost && !!config?.rules.includes('happy_ending')
 
   const { on, send } = useGameSocket(code, session?.sessionToken ?? null, session?.anonId ?? '')
 
@@ -62,6 +87,8 @@ function SessionScreen() {
         setRound(s.round)
         setPrompt(s.prompt)
         setCzarId(s.czarId)
+        setHostId(s.hostId)
+        setConfig(s.config)
         setScores(s.scores)
         setSubmissions(s.submissions)
         setRevealIndex(s.revealIndex)
@@ -72,6 +99,7 @@ function SessionScreen() {
         setSubmitted(s.submitted)
         setExpected(s.expected)
         setTimerExpiresAt(s.roundTimerExpiresAt)
+        setDiscardsUsed(s.myDiscardsUsed)
         if (s.hand) setHand(s.hand)
         setPhase(s.phase === 'picking' && s.czarId === myId ? 'waiting' : s.phase)
       }
@@ -89,9 +117,22 @@ function SessionScreen() {
         setTimerExpiresAt(event.roundTimerExpiresAt)
         if (event.hand) setHand(event.hand)
         setPhase(event.czarId === myId ? 'waiting' : 'picking')
+        // Discard mode is per-tap; reset on round boundary so a stale
+        // armed state doesn't survive into a new picking phase.
+        setDiscardMode(false)
+      }
+      if (event.type === 'host_changed') {
+        setHostId(event.hostId)
       }
       if (event.type === 'hand_update' && event.playerId === myId) {
         setHand(event.hand)
+        if (event.discardsUsed !== undefined) setDiscardsUsed(event.discardsUsed)
+      }
+      // Off-cycle score changes (Rebooting burns a point; future: settled
+      // gambles, etc.). The round_won path carries scores too, but those
+      // mutations may fire mid-round; without this the scoreboard lags.
+      if (event.type === 'scores_update') {
+        setScores(event.scores)
       }
       if (event.type === 'player_played' || event.type === 'player_skipped') {
         // Server-authoritative progress: reaches submitted === expected
@@ -195,6 +236,14 @@ function SessionScreen() {
   const handleToggle = useCallback(
     (cardId: string) => {
       if (!prompt) return
+      // NHIE discard mode: the next card tap discards the card instead of
+      // toggling its selection. One-shot — mode clears either way so a
+      // mis-aimed tap doesn't burn a discard.
+      if (discardMode) {
+        setDiscardMode(false)
+        send({ type: 'confess_discard', cardId })
+        return
+      }
       setSelected((prev) => {
         if (prev.includes(cardId)) return prev.filter((id) => id !== cardId)
         // Quota full: ignore taps on new cards (#6). Evicting pick #1 to
@@ -205,8 +254,20 @@ function SessionScreen() {
         return [...prev, cardId]
       })
     },
-    [prompt],
+    [prompt, discardMode, send],
   )
+
+  const handleRedraw = useCallback(() => {
+    send({ type: 'redraw' })
+  }, [send])
+
+  const handleToggleDiscardMode = useCallback(() => {
+    setDiscardMode((prev) => !prev)
+  }, [])
+
+  const handleHappyEnding = useCallback(() => {
+    send({ type: 'happy_ending' })
+  }, [send])
 
   const handleSubmit = useCallback(() => {
     if (!prompt || selected.length < prompt.pick) return
@@ -236,6 +297,7 @@ function SessionScreen() {
               <span className="dot live" />
               {round > 0 ? `Round ${round}` : 'Round —'}
             </div>
+            {showHappyEndingTrigger && <HostMenu onEndEarly={handleHappyEnding} />}
             <button
               className="btn btn-ghost btn-sm"
               onClick={() => navigate({ to: '/games/$code/lobby', params: { code } })}
@@ -288,13 +350,37 @@ function SessionScreen() {
             )}
 
             {phase === 'picking' && !isCzar && hand.length > 0 && (
-              <HandDock
-                hand={hand}
-                selected={selected}
-                blanks={prompt.pick}
-                onToggle={handleToggle}
-                onSubmit={handleSubmit}
-              />
+              <>
+                {(canRedraw || canDiscard) && (
+                  <div className="rule-bar" data-testid="rule-bar">
+                    {canRedraw && (
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={handleRedraw}
+                        data-testid="redraw-btn"
+                      >
+                        Redraw (–1 pt)
+                      </button>
+                    )}
+                    {canDiscard && (
+                      <button
+                        className={`btn btn-ghost btn-sm${discardMode ? ' is-armed' : ''}`}
+                        onClick={handleToggleDiscardMode}
+                        data-testid="discard-btn"
+                      >
+                        {discardMode ? 'Tap a card to discard…' : `Discard (${discardsUsed}/3)`}
+                      </button>
+                    )}
+                  </div>
+                )}
+                <HandDock
+                  hand={hand}
+                  selected={selected}
+                  blanks={prompt.pick}
+                  onToggle={handleToggle}
+                  onSubmit={handleSubmit}
+                />
+              </>
             )}
 
             {phase === 'judging' && isCzar && (

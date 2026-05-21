@@ -1576,6 +1576,53 @@ button {
   flex-wrap: wrap;
   margin-top: 16px;
 }
+
+/* House-rule action bar above the hand dock (Rebooting redraw, NHIE discard).
+   Inline with the dock so card-tap context stays close to the trigger. */
+.rule-bar {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  flex-wrap: wrap;
+  padding: 8px 0 4px;
+}
+.rule-bar .btn.is-armed {
+  background: var(--white);
+  color: var(--black);
+  border-color: var(--white);
+}
+
+/* Host overflow menu: anchored popover under a ⋯ button in the topbar. */
+.host-menu {
+  position: relative;
+  display: inline-block;
+}
+.host-menu-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 220px;
+  background: var(--black);
+  border: 1px solid var(--hairline-2);
+  border-radius: 8px;
+  padding: 6px;
+  z-index: 20;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+}
+.host-menu-item {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  color: var(--white);
+  border: none;
+  padding: 10px 12px;
+  font: 500 13px/1.2 var(--font-body);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.host-menu-item:hover {
+  background: var(--ink);
+}
 .role-toggle {
   display: inline-flex;
   align-items: center;
