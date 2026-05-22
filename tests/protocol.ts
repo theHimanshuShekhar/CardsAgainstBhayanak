@@ -543,9 +543,13 @@ export async function playCzarDrop(base: string): Promise<CzarDropResult> {
     (e) => e,
     () => null,
   )
+  // Must use waitForNth: round 1's round_started is already in observer.events
+  // from the start of the game, so a plain waitFor returns immediately on the
+  // stale event and the synchronous .find(e.round === 2) races the void →
+  // restart gap. waitForNth waits for the second round_started specifically.
   const r2 = voided
-    ? await waitFor(observer, 'round_started', 10_000).then(
-        () => observer.events.find((e) => e.type === 'round_started' && e.round === 2),
+    ? await waitForNth(observer, 'round_started', 2, 10_000).then(
+        (e) => e,
         () => null,
       )
     : null
