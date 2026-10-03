@@ -61,8 +61,20 @@ export function useGameSocket(code: string | null, sessionToken: string | null, 
           ws.send(JSON.stringify({ type: 'rejoin' } satisfies ClientToServerEvent))
         }
         if (event.type === 'auth_error') setAuthed(false)
-        if (event.type === 'state_snapshot' || event.type === 'lobby_snapshot')
+        if (
+          event.type === 'state_snapshot' ||
+          (event.type === 'lobby_snapshot' &&
+            event.gameStatus !== 'active' &&
+            event.gameStatus !== 'paused')
+        )
           synchronizedRef.current = true
+        // A session can connect after startGame marks the room active,
+        // before startRound creates the first round. That rejoin receives
+        // an active lobby snapshot without a hand. The round announcement
+        // guarantees the row exists, so finish synchronizing then.
+        if (event.type === 'round_started' && !synchronizedRef.current) {
+          ws.send(JSON.stringify({ type: 'rejoin' } satisfies ClientToServerEvent))
+        }
         for (const h of handlersRef.current) h(event)
       }
       ws.onclose = () => {

@@ -16,20 +16,59 @@ type Faults = {
   mode: 'pass' | 'hold' | 'reject' | 'throw'
   held?: string
   delayAck: boolean
+  beforeRound: boolean
+  synchronized: boolean
   acknowledgements: string[]
   sendHeld: () => void
 }
 
-async function wire(page: Page) {
-  await page.evaluate(() => {
+async function wire(page: Page, beforeRound = false) {
+  await page.evaluate((beforeRound) => {
     const NativeSocket = window.WebSocket
-    const faults = { mode: 'pass', delayAck: false, acknowledgements: [] } as unknown as Faults
+    const faults = {
+      mode: 'pass',
+      delayAck: false,
+      beforeRound,
+      acknowledgements: [],
+    } as unknown as Faults
     ;(window as unknown as { faults: Faults }).faults = faults
     window.WebSocket = class extends NativeSocket {
       constructor(url: string | URL, protocols?: string | string[]) {
         super(url, protocols)
         faults.socket = this
+        faults.synchronized = false
         this.addEventListener('message', (event) => {
+          const message = JSON.parse(String(event.data))
+          if (faults.beforeRound && message.type === 'state_snapshot') {
+            faults.beforeRound = false
+            event.stopImmediatePropagation()
+            // Reproduce rejoin before the first round row exists. The
+            // real snapshot supplies the subsequent round-start frame.
+            this.dispatchEvent(
+              new MessageEvent('message', {
+                data: JSON.stringify({
+                  type: 'lobby_snapshot',
+                  gameStatus: 'active',
+                  config: message.state.config,
+                  players: [],
+                }),
+              }),
+            )
+            this.dispatchEvent(
+              new MessageEvent('message', {
+                data: JSON.stringify({
+                  type: 'round_started',
+                  round: message.state.round,
+                  prompt: message.state.prompt,
+                  czarId: message.state.czarId,
+                  submitted: message.state.submitted,
+                  expected: message.state.expected,
+                  roundTimerExpiresAt: message.state.roundTimerExpiresAt,
+                }),
+              }),
+            )
+          }
+          if (message.type === 'state_snapshot' && !event.cancelBubble) faults.synchronized = true
           if (faults.delayAck && JSON.parse(String(event.data)).type === 'command_accepted') {
             faults.acknowledgements.push(String(event.data))
             event.stopImmediatePropagation()
@@ -59,7 +98,7 @@ async function wire(page: Page) {
       }
     }
     faults.sendHeld = () => NativeSocket.prototype.send.call(faults.socket, faults.held!)
-  })
+  }, beforeRound)
   const mode = (mode: Faults['mode']) =>
     page.evaluate((mode) => {
       ;(window as unknown as { faults: Faults }).faults.mode = mode
@@ -95,15 +134,22 @@ async function wire(page: Page) {
   }
 }
 
-async function start(browser: Browser, godmode = false) {
+async function start(browser: Browser, godmode = false, beforeRound = false) {
   const { handle: host, roomCode } = godmode
     ? await createGameWithRule(browser, 'FeedbackHost', 'God Is Dead')
     : await createGame(browser, 'FeedbackHost')
+  // These receipt tests hold commands deliberately; round expiry is a
+  // separate server behavior and must not race the injected delay.
+  const saved = host.page.waitForResponse(
+    (response) => response.url().endsWith('/config') && response.request().method() === 'PATCH',
+  )
+  await host.page.getByRole('radio', { name: 'Off', exact: true }).click()
+  expect((await saved).status()).toBe(204)
   const p1 = await joinGame(browser, 'FeedbackOne', roomCode)
   const p2 = await joinGame(browser, 'FeedbackTwo', roomCode)
   const players = [host, p1, p2]
   const wires = new Map<PlayerHandle, Awaited<ReturnType<typeof wire>>>()
-  for (const player of players) wires.set(player, await wire(player.page))
+  for (const player of players) wires.set(player, await wire(player.page, beforeRound))
   await expect(host.page.getByRole('button', { name: 'Start game' })).toBeEnabled()
   await host.page.getByRole('button', { name: 'Start game' }).click()
   await Promise.all(players.map((p) => p.page.waitForURL('**/session')))
@@ -172,9 +218,10 @@ test('submit keeps selections on rejection and disconnect, and waits for delayed
 })
 
 async function socketReady(page: Page) {
-  return page.evaluate(
-    () => (window as unknown as { faults: Faults }).faults.socket.readyState === WebSocket.OPEN,
-  )
+  return page.evaluate(() => {
+    const faults = (window as unknown as { faults: Faults }).faults
+    return faults.socket.readyState === WebSocket.OPEN && faults.synchronized
+  })
 }
 
 async function disconnectBeforeClick(page: Page, selector: string) {
@@ -265,7 +312,7 @@ test('winner pick reports rejection and disconnect without declaring a winner, t
     await transport.release()
     // Completion comes from the server's outcome; the next round can
     // arrive before a delayed acknowledgement without changing it back.
-    await expect(page.locator('.pill', { hasText: 'Round 2' })).toBeVisible()
+    await expect(page.locator('.pill', { hasText: 'Round 2' })).toBeVisible({ timeout: 15_000 })
     await transport.releaseAck()
     await expect(page.locator('.is-winner')).toHaveCount(0)
     await expect(page.locator('.hand-dock')).toBeVisible()
@@ -340,3 +387,20 @@ async function submissionVote(page: Page, text: string) {
   }
   return slot.getByTestId('vote-btn')
 }
+
+test('a session joining before the first round hydrates its hand before allowing gameplay commands', async ({
+  browser,
+}) => {
+  test.setTimeout(90_000)
+  const { players } = await start(browser, false, true)
+  try {
+    const czar = await getCzar(players)
+    const player = players.find((p) => p !== czar)!
+    await expect(player.page.locator('.score-chip')).toHaveCount(3)
+    await selectHand(player.page)
+    await player.page.getByRole('button', { name: /Submit card/ }).click()
+    await expect(player.page.locator('.hand-dock')).toBeHidden()
+  } finally {
+    await Promise.all(players.map((p) => p.context.close()))
+  }
+})
