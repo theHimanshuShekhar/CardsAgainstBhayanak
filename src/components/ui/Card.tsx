@@ -1,4 +1,5 @@
 import type { Card, BlackCard } from '~/lib/types'
+import { CARD_CONTENT_PRIVACY_PROPS } from '~/lib/card-privacy'
 
 type CardSize = 'sm' | 'md' | 'lg' | 'xl'
 
@@ -7,7 +8,7 @@ function PromptText({ text, fills }: { text: string; fills?: string[] }) {
   const parts = text.includes('__________') ? text.split(/(__________)/g) : [text]
   let blankIdx = 0
   return (
-    <p className="card-text" data-ph-no-capture>
+    <p className="card-text" {...CARD_CONTENT_PRIVACY_PROPS}>
       {parts.map((p, i) => {
         if (p === '__________') {
           const fill = fills?.[blankIdx]
@@ -74,7 +75,7 @@ export function ResponseCard({
       onClick={onClick}
     >
       {pickOrder != null && <div className="pick-order-badge">{pickOrder}</div>}
-      <p className="card-text" data-ph-no-capture>
+      <p className="card-text" {...CARD_CONTENT_PRIVACY_PROPS}>
         {card.text}
       </p>
     </div>
@@ -90,7 +91,7 @@ type CardBackProps = {
 export function CardBack({ size = 'sm', className = '', style }: CardBackProps) {
   return (
     <div className={`card card-prompt card-back card-${size} ${className}`} style={style}>
-      <div className="card-back-mark" data-ph-no-capture>
+      <div className="card-back-mark" {...CARD_CONTENT_PRIVACY_PROPS}>
         <span className="card-back-full">CardsAgainstBhayanak</span>
         <span className="card-back-short">CAB</span>
       </div>

@@ -1,4 +1,5 @@
 import posthog from 'posthog-js'
+import { SESSION_RECORDING_PRIVACY } from './card-privacy'
 
 let initialized = false
 
@@ -36,10 +37,7 @@ export async function initPostHog(): Promise<void> {
     posthog.init(cfg.posthogKey, {
       api_host: cfg.posthogHost,
       person_profiles: 'identified_only',
-      session_recording: {
-        maskAllInputs: true,
-        maskTextSelector: '[data-ph-no-capture], .card-text, .card-back-mark',
-      },
+      session_recording: SESSION_RECORDING_PRIVACY,
       capture_pageview: true,
       capture_pageleave: true,
       autocapture: false,
