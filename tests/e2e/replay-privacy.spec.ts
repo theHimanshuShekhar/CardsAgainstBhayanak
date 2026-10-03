@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { test, expect, type Page } from '@playwright/test'
 import { SESSION_RECORDING_PRIVACY } from '../../src/lib/card-privacy'
+import { seedReplayStats } from '../fixtures/replay-stats'
 
 const require = createRequire(import.meta.url)
 const recorderPath = join(dirname(require.resolve('posthog-js')), 'recorder.js')
@@ -38,35 +39,38 @@ async function recordingSnapshot(page: Page): Promise<string> {
 
 test('Stats card text is redacted in replay while counts and navigation remain usable', async ({
   page,
+  request,
 }) => {
-  const cardTexts = ['Secret statistics response one.', 'Secret statistics response two.']
-  await page.route('**/api/stats', (route) =>
-    route.fulfill({
-      json: {
-        totals: { games: 4, rounds: 12, players: 16 },
-        randoWins: 1,
-        randoWinRate: 0.25,
-        avgPlayersPerGame: 4,
-        gamesPerDay: Array.from({ length: 30 }, () => 0),
-        playerCountDist: [{ n: 4, count: 4 }],
-        packAdoption: [{ name: 'Core', pct: 100 }],
-        houseRulesAdoption: [],
-        topCards: cardTexts.map((text, i) => ({ text, count: 11 - i })),
-      },
-    }),
-  )
-  await page.goto('/stats')
-  await expect(page.locator('.top-card-text')).toHaveText(cardTexts)
-  await expect(page.locator('.top-card-text[data-ph-no-capture]')).toHaveCount(2)
+  const fixture = await seedReplayStats()
+  try {
+    const response = await request.get('/api/stats')
+    expect(response.ok()).toBe(true)
+    const stats = (await response.json()) as { topCards: { text: string; count: number }[] }
+    expect(stats.topCards.slice(0, 2)).toEqual(fixture.topCards)
 
-  const snapshot = await recordingSnapshot(page)
-  for (const text of cardTexts) expect(snapshot).not.toContain(text)
-  expect(snapshot).toContain('Most-picked response cards')
-  expect(snapshot).toContain('"textContent":"11"')
-  expect(snapshot).toContain('Back')
+    // A fresh browser context has no cached Stats response. The screen fetches
+    // the real API, which currently computes aggregates directly from Postgres.
+    await page.goto('/stats')
+    const cardTexts = fixture.topCards.map((card) => card.text)
+    await expect(page.locator('.top-card-text').first()).toHaveText(cardTexts[0]!)
+    await expect(page.locator('.top-card-text').nth(1)).toHaveText(cardTexts[1]!)
+    const renderedCards = await page.locator('.top-card-text').allTextContents()
+    expect(renderedCards.length).toBeGreaterThanOrEqual(2)
+    await expect(page.locator('.top-card-text[data-ph-no-capture]')).toHaveCount(
+      renderedCards.length,
+    )
 
-  await page.getByRole('button', { name: '← Back' }).click()
-  await expect(page).toHaveURL(/\/$/)
+    const snapshot = await recordingSnapshot(page)
+    for (const text of renderedCards) expect(snapshot).not.toContain(text)
+    expect(snapshot).toContain('Most-picked response cards')
+    expect(snapshot).toContain(`"textContent":"${fixture.topCards[0]!.count}"`)
+    expect(snapshot).toContain('Back')
+
+    await page.getByRole('button', { name: '← Back' }).click()
+    await expect(page).toHaveURL(/\/$/)
+  } finally {
+    await fixture.cleanup()
+  }
 })
 
 test('prompt blanks, filled prompts, hand cards, submissions and card backs are masked', async ({
