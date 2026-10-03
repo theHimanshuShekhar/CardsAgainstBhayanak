@@ -53,6 +53,10 @@ export function sanitizeServerException(err: unknown): Error {
     const frames = err.stack.slice(prefix.length).split('\n')
     const locations: string[] = []
     for (const frame of frames) {
+      if (/^ {4}at async Promise\.all \(index \d+\)$/.test(frame)) {
+        locations.push(frame)
+        continue
+      }
       // Keep source locations for sourcemaps; discard function names and all
       // arbitrary error properties. Unexpected formats use the synthetic stack.
       const match =

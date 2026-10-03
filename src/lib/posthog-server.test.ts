@@ -2,6 +2,15 @@ import { describe, expect, it } from 'vitest'
 import { sanitizeServerException } from './posthog-server'
 
 describe('safe server exception diagnostics', () => {
+  it('retains source frames around Node async Promise.all markers', () => {
+    const error = new Error('private message')
+    error.stack =
+      'Error: private message\n    at getPlayer (/app/src/lib/game-state.ts:42:7)\n    at async Promise.all (index 0)\n    at async message (/app/src/ws/handler.ts:341:9)'
+    expect(sanitizeServerException(error).stack).toBe(
+      'Error: WebSocket command failed\n    at /app/src/lib/game-state.ts:42:7\n    at async Promise.all (index 0)\n    at /app/src/ws/handler.ts:341:9',
+    )
+  })
+
   it('preserves source locations without exposing a multiline message or arbitrary properties', () => {
     const error = new Error('private-card\n    at stolenToken (/private/token.ts:1:2)')
     error.stack = `${error.name}: ${error.message}\n    at submitCards (/app/src/lib/game-engine.ts:665:19)\n    at async message (/app/src/ws/handler.ts:341:9)`
