@@ -5,6 +5,7 @@ import type { ServerToClientEvent, ClientToServerEvent } from '~/lib/types'
 
 export function useGameSocket(code: string | null, sessionToken: string | null, anonId: string) {
   const wsRef = useRef<WebSocket | null>(null)
+  const synchronizedRef = useRef(false)
   const handlersRef = useRef<((event: ServerToClientEvent) => void)[]>([])
   const [connected, setConnected] = useState(false)
   const [authed, setAuthed] = useState(false)
@@ -25,6 +26,7 @@ export function useGameSocket(code: string | null, sessionToken: string | null, 
       attempt++
       const ws = new WebSocket(`${location.origin.replace('http', 'ws')}/api/games/${code}/ws`)
       wsRef.current = ws
+      synchronizedRef.current = false
 
       ws.onopen = () => {
         connectTime = Date.now()
@@ -59,9 +61,12 @@ export function useGameSocket(code: string | null, sessionToken: string | null, 
           ws.send(JSON.stringify({ type: 'rejoin' } satisfies ClientToServerEvent))
         }
         if (event.type === 'auth_error') setAuthed(false)
+        if (event.type === 'state_snapshot' || event.type === 'lobby_snapshot')
+          synchronizedRef.current = true
         for (const h of handlersRef.current) h(event)
       }
       ws.onclose = () => {
+        synchronizedRef.current = false
         setConnected(false)
         setAuthed(false)
         if (pingTimer) clearInterval(pingTimer)
@@ -88,8 +93,16 @@ export function useGameSocket(code: string | null, sessionToken: string | null, 
   }, [code, sessionToken, anonId])
 
   const send = (event: ClientToServerEvent) => {
-    if (!authed) return
-    wsRef.current?.send(JSON.stringify(event))
+    const ws = wsRef.current
+    if (!authed || !synchronizedRef.current || !ws || ws.readyState !== WebSocket.OPEN) {
+      return { ok: false as const, message: 'Disconnected. Reconnect and try again.' }
+    }
+    try {
+      ws.send(JSON.stringify(event))
+      return { ok: true as const }
+    } catch {
+      return { ok: false as const, message: 'Could not send. Try again.' }
+    }
   }
   // Stable identity: the consumer's subscription effect must not tear down
   // and re-add its handler every render. A re-subscribe has a window between
@@ -102,5 +115,12 @@ export function useGameSocket(code: string | null, sessionToken: string | null, 
     }
   }, [])
 
-  return { connected, authed, send, on }
+  const reconnect = useCallback(() => {
+    synchronizedRef.current = false
+    setConnected(false)
+    setAuthed(false)
+    wsRef.current?.close()
+  }, [])
+
+  return { connected, authed, send, on, reconnect }
 }
