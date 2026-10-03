@@ -42,6 +42,33 @@ export async function distinctIdForHost(code: string): Promise<string> {
   return hostId ? distinctIdFor(code, hostId) : code
 }
 
+export function sanitizeServerException(err: unknown): Error {
+  const safe = new Error('WebSocket command failed')
+  try {
+    if (!(err instanceof Error) || typeof err.stack !== 'string') return safe
+    // A message may span lines and even contain fake frames. Remove its
+    // complete prefix before inspecting the actual stack, never just line one.
+    const prefix = `${err.name}: ${err.message}\n`
+    if (!err.stack.startsWith(prefix)) return safe
+    const frames = err.stack.slice(prefix.length).split('\n')
+    const locations: string[] = []
+    for (const frame of frames) {
+      // Keep source locations for sourcemaps; discard function names and all
+      // arbitrary error properties. Unexpected formats use the synthetic stack.
+      const match =
+        /^ {4}at (?:[^\r\n()]+ \()?((?:file:\/\/)?\/[A-Za-z0-9_./@%+~-]+:\d+:\d+|node:[A-Za-z0-9_./-]+:\d+:\d+|<anonymous>)\)?$/.exec(
+          frame,
+        )
+      if (!match) return safe
+      locations.push(`    at ${match[1]}`)
+    }
+    if (locations.length) safe.stack = `${safe.name}: ${safe.message}\n${locations.join('\n')}`
+  } catch {
+    // Custom thrown objects can expose throwing getters instead of strings.
+  }
+  return safe
+}
+
 export function captureServerException(
   distinctId: string,
   err: unknown,

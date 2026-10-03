@@ -3,7 +3,11 @@ import { eq, inArray, desc } from 'drizzle-orm'
 import { db } from '~/db'
 import { blackCards, whiteCards, gameSessions, gameRounds } from '~/db/schema'
 import { wsLogger } from '~/lib/logger'
-import { captureServerException } from '~/lib/posthog-server'
+import {
+  captureServerException,
+  distinctIdFor,
+  sanitizeServerException,
+} from '~/lib/posthog-server'
 import { authenticateSocket } from './auth'
 import { ClientMessageSchema } from './client-message'
 import { redis, getSubscriber, KEYS } from '~/lib/redis'
@@ -376,22 +380,23 @@ export const wsHooks = {
           await engine.dropPlayer(ctx.code, ctx.playerId, 'leave')
           return
       }
-    } catch {
+    } catch (err) {
       // Exceptions can contain card IDs, hands, tokens or database values.
-      // Log only trusted routing metadata, never the frame or raw exception.
+      // Preserve verified source locations, never the frame or raw exception.
+      const safeError = sanitizeServerException(err)
       wsLogger.error(
-        { code: ctx.code, playerId: ctx.playerId, eventType },
+        { err: safeError, roomCode: ctx.code, playerId: ctx.playerId, eventType },
         'WebSocket command failed',
       )
+      send(peer, { type: 'error', code: 'internal_error', message: 'Command failed' })
       captureServerException(
-        ctx.anonId || ctx.playerId || ctx.code,
-        new Error('WebSocket command failed'),
+        ctx.playerId ? await distinctIdFor(ctx.code, ctx.playerId) : ctx.code,
+        safeError,
         {
           roomCode: ctx.code,
           eventType,
         },
       )
-      send(peer, { type: 'error', code: 'internal_error', message: 'Command failed' })
     }
   },
 

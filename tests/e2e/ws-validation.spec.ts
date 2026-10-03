@@ -142,7 +142,10 @@ test('a rejected async command returns a safe error and leaves the server usable
         // Valid protocol shape, but the engine rejects an ID absent from the deck.
         // The thrown error includes this private value; the protocol must not echo it.
         expect(
-          await peer.reply({ type: 'play', cardIds: ['private-card-id-do-not-log'] }, 'error'),
+          await peer.reply(
+            { type: 'play', cardIds: ['private-card-id-do-not-log\nprivate-multiline-marker'] },
+            'error',
+          ),
         ).toEqual({
           type: 'error',
           code: 'internal_error',
