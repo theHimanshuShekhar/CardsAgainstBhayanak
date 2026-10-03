@@ -3,7 +3,9 @@ import { eq, inArray, desc } from 'drizzle-orm'
 import { db } from '~/db'
 import { blackCards, whiteCards, gameSessions, gameRounds } from '~/db/schema'
 import { wsLogger } from '~/lib/logger'
+import { captureServerException } from '~/lib/posthog-server'
 import { authenticateSocket } from './auth'
+import { ClientMessageSchema } from './client-message'
 import { redis, getSubscriber, KEYS } from '~/lib/redis'
 import * as engine from '~/lib/game-engine'
 import * as state from '~/lib/game-state'
@@ -272,98 +274,124 @@ export const wsHooks = {
     const ctx = peerContext.get(peer)
     if (!ctx) return
 
-    let parsed: ClientToServerEvent
+    let eventType: ClientToServerEvent['type'] | undefined
     try {
-      parsed = JSON.parse(msg.text())
-    } catch {
-      return send(peer, { type: 'error', code: 'internal_error', message: 'bad JSON' })
-    }
-
-    // Auth handshake — must be the first message
-    if (!ctx.playerId) {
-      if (parsed.type !== 'auth')
-        return send(peer, { type: 'error', code: 'not_authorized', message: 'auth first' })
-      const auth = await authenticateSocket(ctx.code, parsed)
-      if (!auth.ok)
-        return send(peer, {
-          type: 'auth_error',
-          code: auth.code,
-          message: auth.code === 'player_dropped' ? 'player dropped' : 'invalid token',
-        })
-      ctx.playerId = auth.playerId
-      ctx.anonId = auth.anonId
-      // Bind role + clear grace BEFORE acking. The client fires its next
-      // message (e.g. `play`) the instant it sees auth_ok; acking first
-      // left a window where ctx.role was still undefined and the
-      // spectator action guard below was skipped (S2-3).
-      const player = await state.getPlayer(ctx.code, auth.playerId)
-      ctx.role = player?.role
-      if (player?.status === 'grace') {
-        await state.updatePlayer(ctx.code, auth.playerId, { status: 'active' })
-        await state.clearGrace(ctx.code, auth.playerId)
+      let input: unknown
+      try {
+        input = JSON.parse(msg.text())
+      } catch {
+        return send(peer, { type: 'error', code: 'invalid_state', message: 'Invalid command' })
       }
-      send(peer, { type: 'auth_ok' })
-      return
-    }
 
-    ctx.lastPing = Date.now()
+      const result = ClientMessageSchema.safeParse(input)
+      if (!result.success) {
+        return send(peer, { type: 'error', code: 'invalid_state', message: 'Invalid command' })
+      }
+      const parsed = result.data
+      eventType = parsed.type
 
-    // S2-3: spectators may ping / rejoin / leave, never act on the game.
-    if (ctx.role === 'spectator' && SPECTATOR_BLOCKED.has(parsed.type)) {
-      return send(peer, {
-        type: 'error',
-        code: 'spectator_action',
-        message: 'spectators cannot perform game actions',
-      })
-    }
+      // Auth handshake — must be the first message
+      if (!ctx.playerId) {
+        if (parsed.type !== 'auth')
+          return send(peer, { type: 'error', code: 'not_authorized', message: 'auth first' })
+        const auth = await authenticateSocket(ctx.code, parsed)
+        if (!auth.ok)
+          return send(peer, {
+            type: 'auth_error',
+            code: auth.code,
+            message: auth.code === 'player_dropped' ? 'player dropped' : 'invalid token',
+          })
+        ctx.playerId = auth.playerId
+        ctx.anonId = auth.anonId
+        // Bind role + clear grace BEFORE acking. The client fires its next
+        // message (e.g. `play`) the instant it sees auth_ok; acking first
+        // left a window where ctx.role was still undefined and the
+        // spectator action guard below was skipped (S2-3).
+        const player = await state.getPlayer(ctx.code, auth.playerId)
+        ctx.role = player?.role
+        if (player?.status === 'grace') {
+          await state.updatePlayer(ctx.code, auth.playerId, { status: 'active' })
+          await state.clearGrace(ctx.code, auth.playerId)
+        }
+        send(peer, { type: 'auth_ok' })
+        return
+      }
 
-    switch (parsed.type) {
-      case 'ping':
-        return send(peer, { type: 'pong' })
-      case 'rejoin': {
-        const snapshot = await buildSnapshot(ctx.code, ctx.playerId)
-        if (snapshot) {
-          send(peer, { type: 'state_snapshot', state: snapshot })
+      ctx.lastPing = Date.now()
+
+      // S2-3: spectators may ping / rejoin / leave, never act on the game.
+      if (ctx.role === 'spectator' && SPECTATOR_BLOCKED.has(parsed.type)) {
+        return send(peer, {
+          type: 'error',
+          code: 'spectator_action',
+          message: 'spectators cannot perform game actions',
+        })
+      }
+
+      switch (parsed.type) {
+        case 'ping':
+          return send(peer, { type: 'pong' })
+        case 'rejoin': {
+          const snapshot = await buildSnapshot(ctx.code, ctx.playerId)
+          if (snapshot) {
+            send(peer, { type: 'state_snapshot', state: snapshot })
+            return
+          }
+          const lobby = await buildLobbySnapshot(ctx.code)
+          if (lobby) send(peer, { type: 'lobby_snapshot', ...lobby })
           return
         }
-        const lobby = await buildLobbySnapshot(ctx.code)
-        if (lobby) send(peer, { type: 'lobby_snapshot', ...lobby })
-        return
+        case 'play':
+          await engine.submitCards(ctx.code, ctx.playerId, parsed.cardIds)
+          return
+        case 'gamble':
+          await engine.gamble(ctx.code, ctx.playerId)
+          return
+        case 'pick':
+          await engine.pickWinner(ctx.code, ctx.playerId, parsed.submissionId)
+          return
+        case 'vote':
+          await engine.castVote(ctx.code, ctx.playerId, parsed.submissionId)
+          return
+        case 'eliminate':
+          await engine.eliminateSubmission(ctx.code, ctx.playerId, parsed.submissionId)
+          return
+        case 'rank':
+          await engine.applyRanking(ctx.code, ctx.playerId, parsed.ranking)
+          return
+        case 'redraw':
+          await engine.redraw(ctx.code, ctx.playerId)
+          return
+        case 'confess_discard':
+          await engine.confessDiscard(ctx.code, ctx.playerId, parsed.cardId)
+          return
+        case 'happy_ending':
+          await engine.triggerHappyEnding(ctx.code, ctx.playerId)
+          return
+        case 'leave':
+          // S2-5: explicit leave is immediate — no 30s grace. Stop
+          // broadcasting to this peer and run the full drop path now;
+          // the subsequent socket `close` no-ops (already 'dropped').
+          roomPeers.get(ctx.code)?.delete(peer)
+          await engine.dropPlayer(ctx.code, ctx.playerId, 'leave')
+          return
       }
-      case 'play':
-        await engine.submitCards(ctx.code, ctx.playerId, parsed.cardIds)
-        return
-      case 'gamble':
-        await engine.gamble(ctx.code, ctx.playerId)
-        return
-      case 'pick':
-        await engine.pickWinner(ctx.code, ctx.playerId, parsed.submissionId)
-        return
-      case 'vote':
-        await engine.castVote(ctx.code, ctx.playerId, parsed.submissionId)
-        return
-      case 'eliminate':
-        await engine.eliminateSubmission(ctx.code, ctx.playerId, parsed.submissionId)
-        return
-      case 'rank':
-        await engine.applyRanking(ctx.code, ctx.playerId, parsed.ranking)
-        return
-      case 'redraw':
-        await engine.redraw(ctx.code, ctx.playerId)
-        return
-      case 'confess_discard':
-        await engine.confessDiscard(ctx.code, ctx.playerId, parsed.cardId)
-        return
-      case 'happy_ending':
-        await engine.triggerHappyEnding(ctx.code, ctx.playerId)
-        return
-      case 'leave':
-        // S2-5: explicit leave is immediate — no 30s grace. Stop
-        // broadcasting to this peer and run the full drop path now;
-        // the subsequent socket `close` no-ops (already 'dropped').
-        roomPeers.get(ctx.code)?.delete(peer)
-        await engine.dropPlayer(ctx.code, ctx.playerId, 'leave')
-        return
+    } catch {
+      // Exceptions can contain card IDs, hands, tokens or database values.
+      // Log only trusted routing metadata, never the frame or raw exception.
+      wsLogger.error(
+        { code: ctx.code, playerId: ctx.playerId, eventType },
+        'WebSocket command failed',
+      )
+      captureServerException(
+        ctx.anonId || ctx.playerId || ctx.code,
+        new Error('WebSocket command failed'),
+        {
+          roomCode: ctx.code,
+          eventType,
+        },
+      )
+      send(peer, { type: 'error', code: 'internal_error', message: 'Command failed' })
     }
   },
 

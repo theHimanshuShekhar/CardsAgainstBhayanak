@@ -255,7 +255,7 @@ export async function playGodmode(
 // Drives one full normal-mode round and asserts the loop advances.
 export async function playRound(
   base: string,
-  opts: { rules?: string[]; players?: number } = {},
+  opts: { rules?: string[]; players?: number; whilePicking?: () => Promise<void> } = {},
 ): Promise<GameResult> {
   const playerCount = opts.players ?? 3
   const rules = opts.rules ?? []
@@ -307,6 +307,9 @@ export async function playRound(
   if (!snap) throw new Error('no snapshot after start')
   const czarId = snap.czarId
   const pick = snap.prompt.pick as number
+
+  // Allows fault/protocol tests to act while this independent room is active.
+  await opts.whilePicking?.()
 
   let submitterHandLen = 0
   for (const [name, id] of Object.entries(idByName)) {
