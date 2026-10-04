@@ -4,6 +4,7 @@ import type { Submission } from '~/lib/types'
 
 type Props = {
   submissions: Submission[]
+  pickCount: 1 | 2 | 3
   phase: 'judging' | 'reveal'
   revealIndex: number
   winnerId: string | null
@@ -46,6 +47,7 @@ type Props = {
 
 export function SubmissionsGrid({
   submissions,
+  pickCount,
   phase,
   revealIndex,
   winnerId,
@@ -97,14 +99,14 @@ export function SubmissionsGrid({
         <div className="subs-grid subs-grid-large">
           {/* filter(Boolean): a lost reveal frame must never crash every
               client via the error boundary — degrade, don't white-screen. */}
-          {submissions.filter(Boolean).flatMap((s, i) =>
-            s.fills.map((_, fi) => (
+          {submissions.filter(Boolean).flatMap((_, i) =>
+            Array.from({ length: pickCount }, (_, fi) => (
               <div
                 key={`${i}-${fi}`}
-                className={`sub-card ${s.fills.length > 1 ? 'multi-card' : ''} ${isCzar ? 'card-clickable' : ''}`}
+                className={`sub-card ${pickCount > 1 ? 'multi-card' : ''} ${isCzar ? 'card-clickable' : ''}`}
                 onClick={() => isCzar && onStartReveal()}
               >
-                {s.fills.length > 1 && <div className="player-badge">{i + 1}</div>}
+                {pickCount > 1 && <div className="player-badge">{i + 1}</div>}
                 <CardBack size="md" />
               </div>
             )),
@@ -138,14 +140,15 @@ export function SubmissionsGrid({
               isCzar &&
               revealed &&
               winnerId == null
-            return s.fills.map((card, fi) => (
+            const slots = revealed ? s.fills : Array.from({ length: pickCount }, () => null)
+            return slots.map((card, fi) => (
               <div
                 key={`${i}-${fi}`}
-                className={`sub-card ${s.fills.length > 1 ? 'multi-card' : ''} ${revealed ? '' : 'hidden-card'} ${isWinner ? 'is-winner' : ''} ${isLoser ? 'is-loser' : ''} ${isEliminated ? 'is-eliminated' : ''} ${rankOrdinal ? 'is-ranked' : ''}`}
+                className={`sub-card ${pickCount > 1 ? 'multi-card' : ''} ${revealed ? '' : 'hidden-card'} ${isWinner ? 'is-winner' : ''} ${isLoser ? 'is-loser' : ''} ${isEliminated ? 'is-eliminated' : ''} ${rankOrdinal ? 'is-ranked' : ''}`}
                 onClick={() => (clickable ? onPickWinner(s.submissionId) : undefined)}
               >
-                {s.fills.length > 1 && <div className="player-badge">{i + 1}</div>}
-                {revealed ? (
+                {pickCount > 1 && <div className="player-badge">{i + 1}</div>}
+                {revealed && card ? (
                   <div className="flip-reveal">
                     <ResponseCard
                       card={card}
