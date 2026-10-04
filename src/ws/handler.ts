@@ -405,7 +405,6 @@ export const wsHooks = {
           return
       }
     } catch (err) {
-      ctx.authenticating = false
       // Exceptions can contain card IDs, hands, tokens or database values.
       // Preserve verified source locations, never the frame or raw exception.
       const safeError = sanitizeServerException(err)
@@ -414,6 +413,13 @@ export const wsHooks = {
         'WebSocket command failed',
       )
       send(peer, { type: 'error', code: 'internal_error', message: 'Command failed' })
+      if (ctx.authenticating) {
+        // Setup may have bound the identity before a grace write failed.
+        // Keep commands blocked until close restores grace for that identity.
+        roomPeers.get(ctx.code)?.delete(peer)
+        openPeers.delete(peer)
+        peer.close(1011, 'authentication setup failed')
+      }
       captureServerException(
         ctx.playerId ? await distinctIdFor(ctx.code, ctx.playerId) : ctx.code,
         safeError,
