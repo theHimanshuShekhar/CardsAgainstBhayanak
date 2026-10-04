@@ -79,15 +79,12 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
 
   const scores: PlayerScore[] = engine.toPlayerScores(players, czarId)
 
-  // The public submissionId is the index into the server-persisted
-  // permuted order so a reconnecting client agrees with everyone else.
+  // No public IDs exist until the engine persists its shuffled order.
+  // Picking reconnects use progress and the recipient's private receipt
+  // instead of exposing submission arrival order.
   const rawSubs = await state.getSubmissions(code)
   const subOrder: string[] = JSON.parse((await redis.get(`${KEYS.round(code)}:order`)) ?? '[]')
-  const submissions: Submission[] =
-    subOrder.length > 0
-      ? subOrder.map((k, i) => ({ submissionId: String(i), fills: rawSubs[k]?.fills ?? [] }))
-      : Object.values(rawSubs).map((s, i) => ({ submissionId: String(i), fills: s.fills }))
-  const revealIndex = Number((await redis.get(`${KEYS.round(code)}:revealed`)) ?? 0)
+  const persistedRevealIndex = Number((await redis.get(`${KEYS.round(code)}:revealed`)) ?? 0)
 
   const handIds = await state.getHand(code, playerId)
   let hand: Hand | undefined
@@ -107,12 +104,13 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
   // transition (state.setPhase). Trust it so a reconnect during
   // reveal/judging/transition resumes correctly; the submission-count
   // heuristic is only a defensive fallback for a room with no phase yet.
-  let phase: GamePhase | null = await state.getPhase(code)
+  const persistedPhase = await state.getPhase(code)
+  let phase: GamePhase | null = persistedPhase
   if (!phase) {
     phase = 'picking'
     if (
-      submissions.length > 0 &&
-      submissions.length + skippedPlayers.length >= expectedSubmitters.length
+      Object.keys(rawSubs).length > 0 &&
+      Object.keys(rawSubs).length + skippedPlayers.length >= expectedSubmitters.length
     ) {
       if (config.rules.includes('godmode')) phase = 'waiting'
       else if (config.rules.includes('survival')) phase = 'eliminating'
@@ -120,6 +118,29 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
       else phase = 'judging'
     }
   }
+
+  // Completed phases also cover boot recovery's reveal fast-forward,
+  // which advances the phase without replaying individual reveal frames.
+  const completedReveal =
+    persistedPhase === 'judging' ||
+    persistedPhase === 'eliminating' ||
+    persistedPhase === 'ranking' ||
+    persistedPhase === 'transition' ||
+    (persistedPhase === 'waiting' && config.rules.includes('godmode'))
+  const revealIndex = completedReveal
+    ? subOrder.length
+    : Math.max(0, Math.min(subOrder.length, persistedRevealIndex))
+
+  // All recipients, including the submitter and Czar, see only answers
+  // whose scheduled reveal has happened. Empty fills retain stable slots
+  // without transmitting a hidden card ID, text, or submitter identity.
+  const submissions: Submission[] =
+    phase === 'picking'
+      ? []
+      : subOrder.map((key, index) => ({
+          submissionId: String(index),
+          fills: index < revealIndex ? (rawSubs[key]?.fills ?? []) : [],
+        }))
 
   let voteTally: Record<string, number> | undefined
   if (config.rules.includes('godmode')) {

@@ -48,6 +48,7 @@ export type Pack = {
 
 export type Submission = {
   submissionId: string
+  // Rejoin snapshots keep shuffled slots but redact fills until reveal.
   fills: Card[]
   playerId?: string
   rank?: 1 | 2 | 3

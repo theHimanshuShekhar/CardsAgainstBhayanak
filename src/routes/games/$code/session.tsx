@@ -631,6 +631,7 @@ function SessionScreen() {
                 {(phase === 'judging' || phase === 'reveal') && (
                   <SubmissionsGrid
                     submissions={submissions}
+                    pickCount={prompt.pick}
                     phase={phase as 'judging' | 'reveal'}
                     revealIndex={revealIndex}
                     winnerId={winnerId}
