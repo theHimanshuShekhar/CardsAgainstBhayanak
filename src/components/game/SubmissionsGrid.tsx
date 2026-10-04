@@ -99,7 +99,7 @@ export function SubmissionsGrid({
         <div className="subs-grid subs-grid-large">
           {/* filter(Boolean): a lost reveal frame must never crash every
               client via the error boundary — degrade, don't white-screen. */}
-          {submissions.filter(Boolean).flatMap((s, i) =>
+          {submissions.filter(Boolean).flatMap((_, i) =>
             Array.from({ length: pickCount }, (_, fi) => (
               <div
                 key={`${i}-${fi}`}
