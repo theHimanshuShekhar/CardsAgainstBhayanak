@@ -12,6 +12,7 @@ import { authenticateSocket } from './auth'
 import { ClientMessageSchema } from './client-message'
 import { redis, getSubscriber, KEYS } from '~/lib/redis'
 import * as engine from '~/lib/game-engine'
+import { GameCommandError } from '~/lib/game-command-error'
 import * as state from '~/lib/game-state'
 import { TIMING } from '~/lib/timing'
 import type {
@@ -461,6 +462,16 @@ export const wsHooks = {
           return
       }
     } catch (err) {
+      if (err instanceof GameCommandError) {
+        if (!accepted)
+          send(peer, {
+            type: 'error',
+            code: err.code,
+            message: err.message,
+            ...(commandId ? { commandId } : {}),
+          })
+        return
+      }
       // Exceptions can contain card IDs, hands, tokens or database values.
       // Preserve verified source locations, never the frame or raw exception.
       const safeError = sanitizeServerException(err)
