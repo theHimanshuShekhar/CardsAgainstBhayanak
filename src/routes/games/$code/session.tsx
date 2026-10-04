@@ -213,6 +213,7 @@ function SessionScreen() {
         setHostId(event.hostId)
       }
       if (event.type === 'hand_update' && event.playerId === myId) {
+        // Includes round refills; round_end carries only public metadata.
         setHand(event.hand)
         if (event.discardsUsed !== undefined) setDiscardsUsed(event.discardsUsed)
       }
@@ -311,10 +312,6 @@ function SessionScreen() {
         // event.winnerId is the winning playerId; resolve its handle
         // from the same scores payload for the result badge (#1).
         setWinnerName(event.scores.find((x) => x.playerId === event.winnerId)?.username ?? null)
-      }
-      if (event.type === 'round_end') {
-        const myHand = event.handsRefilled[myId]
-        if (myHand) setHand(myHand)
       }
       // S3-NEW-B: a voided round (czar dropped, or timer expiry with <2
       // submitters) is followed immediately by a fresh round_started from

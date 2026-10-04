@@ -530,13 +530,14 @@ All client messages are scoped to the socket's authenticated `playerId` + `roomC
 { type: "elimination_turn", playerId }                  // Survival: whose turn to eliminate
 { type: "card_eliminated",  submissionId, byPlayerId }  // Survival
 { type: "vote_tally",       votes: Record<submissionId, number> } // God Is Dead live
-{ type: "round_end",        activatedPlayers: string[], handsRefilled: Record<playerId, Hand> } // every mode ends with this
+{ type: "hand_update",      playerId, hand: Hand, discardsUsed?: number } // private, only to the owning player
+{ type: "round_end",        activatedPlayers: string[] } // public; every mode ends with this
 { type: "game_over",        finalScores: PlayerScore[], winnerId, mode: GameOverMode }
 { type: "error",            code: ErrorCode, message }
 { type: "pong" }
 ```
 
-`round_end` is the single source of truth for round termination across all modes. It always carries `handsRefilled` (each submitter's new full hand) so clients update their hand UI uniformly. Mode-specific events (`round_won`, `round_ranked`) precede `round_end` to describe the outcome; `round_end` finalizes scores and refills.
+`round_end` is the single source of truth for round termination across all modes. Mode-specific events (`round_won`, `round_ranked`) precede `round_end` to describe the outcome. Before `round_end`, each refilled submitter and newly activated player receives their own full hand through recipient-private `hand_update`; clients refresh their hand through that event. `round_end` contains only public activation metadata. This intentionally replaces the former all-player `handsRefilled` map, which exposed opponents' hands to players and spectators.
 
 ### Submission ordering
 
@@ -597,7 +598,7 @@ Client sends `ping` every 15s; server responds `pong`. After 45s of silence, ser
    - **Normal / God Is Dead:** Czar picks (or vote-majority resolves) → winner gets the black card as 1 Awesome Point. Server emits `round_won`.
    - **Survival of the Fittest:** Players eliminate cards until 1 remains → that submitter wins 1 point. Server emits `round_won`.
    - **Serious Business:** Czar ranks top 3 → +3/+2/+1 points to the respective players. Server emits `round_ranked`.
-6. **Round termination & hand replenishment (uniform across modes):** Server emits `round_end` containing `handsRefilled: Record<playerId, Hand>` — every submitter's hand topped back up to 10 from `deck:white`. Discards (winners + losers) moved to `discard:white`. Black card moved to `discard:black`. `round_end` also carries `activatedPlayers[]` if any mid-game joiners are now active.
+6. **Round termination & hand replenishment (uniform across modes):** Every submitter's hand is topped back up to 10 from `deck:white` and delivered only to its owner through `hand_update`. Server then emits public `round_end` uniformly across modes. Discards (winners + losers) moved to `discard:white`. Black card moved to `discard:black`. `round_end` also carries `activatedPlayers[]` if any mid-game joiners are now active.
 7. First to `roundsToWin` Awesome Points wins → `game_over`
 
 ### Gambling (base mechanic, available except in modal house-rule games and on round 1)
@@ -870,7 +871,7 @@ Test matrix using multi-context (separate browser contexts per player):
     4. Czar context: sees "Start reveal →" button, clicks it
     5. All contexts: assert cards flip in sequence (`REVEAL_STAGGER` apart)
     6. Czar context: clicks the submission marked as winning by the test plan (test plan precomputed from seed) → asserts winner badge appears
-    7. All contexts: scoreboard updates; hands replenish to 10 for submitters via `round_end` event
+    7. All contexts: scoreboard updates; hands replenish to 10 for submitters via recipient-private `hand_update` before public `round_end`
     8. Server holds `ROUND_RESULT_PAUSE_MS` (winner highlighted) → next round starts
     9. Break loop when any context observes `game_over` event
   - Assert: total round count ≤ 20 (sanity bound), winner has exactly 5 points

@@ -170,7 +170,7 @@ test('pending and rejected sockets receive no round, score or private hand event
     czar.send({ type: 'pick', submissionId: '0' })
     for (const peer of peers) {
       expect((await peer.wait('round_won')).scores.some((score) => score.score === 1)).toBe(true)
-      expect(Object.keys((await peer.wait('round_end')).handsRefilled)).toHaveLength(2)
+      expect(await peer.wait('round_end')).toEqual({ type: 'round_end', activatedPlayers: [] })
     }
     await new Promise((resolve) => setTimeout(resolve, 300))
     expect(pending.events).toEqual([])
@@ -179,7 +179,7 @@ test('pending and rejected sockets receive no round, score or private hand event
     }
     for (const [index, peer] of peers.entries()) {
       expect(peer.events.filter((event) => event.type === 'hand_update')).toHaveLength(
-        index === ownerIndex ? 1 : 0,
+        index === czarIndex ? 0 : index === ownerIndex ? 2 : 1,
       )
     }
   } finally {
