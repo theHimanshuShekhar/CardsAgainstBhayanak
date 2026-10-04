@@ -162,6 +162,7 @@ export async function startGame(code: string): Promise<void> {
     .update(gameSessions)
     .set({ status: 'active', lastActivityAt: new Date() })
     .where(eq(gameSessions.id, session.id))
+  await redis.hset(KEYS.game(code), 'status', 'active')
 
   engineLogger.info({ code, firstCzarIdx, players: activePlayers.length }, 'game started')
 }
@@ -247,9 +248,7 @@ export async function startRound(
   // outcome in the snapshot.
   await state.clearRoundResolution(code)
   await state.setCurrentRound(code, round)
-  await state.setPhase(code, 'picking')
-
-  await db
+  const [roundRow] = await db
     .insert(gameRounds)
     .values({
       sessionId: session.id,
@@ -258,6 +257,14 @@ export async function startRound(
       czarPlayerId: czarId ?? undefined,
     })
     .onConflictDoNothing()
+    .returning({ id: gameRounds.id })
+  if (!roundRow) throw new Error('round already exists')
+  await redis.hset(KEYS.round(code), {
+    roundId: roundRow.id,
+    czarId: czarId ?? '',
+    phase: 'picking',
+  })
+  await redis.expire(KEYS.round(code), ROOM_TTL_SECONDS)
   await touchSessionActivity(code)
 
   // Arm the round timer before announcing the round so round_started can
@@ -279,6 +286,8 @@ export async function startRound(
         engineLogger.warn({ err, code, round }, 'round timer expiry suppressed'),
       )
     }, ms)
+  } else {
+    await redis.hdel(KEYS.round(code), 'roundTimerExpiresAt')
   }
 
   const startProgress = await submissionProgress(code)
@@ -419,6 +428,16 @@ export async function restoreRoundTimers(): Promise<void> {
     .where(eq(gameSessions.status, 'active'))
   for (const s of sessions) {
     const { code } = s
+    const currentRound = await state.getCurrentRound(code)
+    const [currentRow] = await db
+      .select()
+      .from(gameRounds)
+      .where(and(eq(gameRounds.sessionId, s.id), eq(gameRounds.roundNum, currentRound)))
+    if (
+      !currentRow ||
+      !(await state.ensureRoundIdentity(code, currentRound, currentRow.id, currentRow.czarPlayerId))
+    )
+      continue
     const phase = await state.getPhase(code)
 
     // Case 1 — picking-phase round timer (S2-10)
@@ -530,6 +549,17 @@ export function publicIdForKey(order: string[], key: string): string {
   return String(order.indexOf(key))
 }
 
+function submissionComplete(
+  player: GamePlayer,
+  submissions: Record<string, Submission>,
+  timerExpired: boolean,
+): boolean {
+  return (
+    !!submissions[player.id] &&
+    (!player.hasGambled || !!submissions[`${player.id}:gamble`] || timerExpired)
+  )
+}
+
 // Picking-phase submission progress for the client counter. Uses the
 // EXACT same predicate as checkRoundReady's resolution gate below so the
 // UI reaches "N of N" precisely when the round resolves. Rando is
@@ -557,8 +587,11 @@ export async function submissionProgress(
   const expectedPlayers = players.filter(
     (p) => p.status === 'active' && p.id !== czarId && !p.isRando && !skippedSet.has(p.id),
   )
-  const submittedSet = new Set(Object.keys(submissions).map(resolvePlayerId))
-  const submitted = expectedPlayers.filter((p) => submittedSet.has(p.id)).length
+  const deadline = await state.getRoundTimerExpiresAt(code)
+  const timerExpired = deadline !== null && Date.now() >= deadline
+  const submitted = expectedPlayers.filter((p) =>
+    submissionComplete(p, submissions, timerExpired),
+  ).length
   return { submitted, expected: expectedPlayers.length }
 }
 
@@ -589,8 +622,12 @@ export async function checkRoundReady(code: string): Promise<void> {
     (p) => p.status === 'active' && p.id !== czarId && !p.isRando && !skippedSet.has(p.id),
   )
   const submitted = new Set(Object.keys(submissions).map(resolvePlayerId))
+  const deadline = await state.getRoundTimerExpiresAt(code)
+  const timerExpired = deadline !== null && Date.now() >= deadline
   const ready =
-    expected.length > 0 && expected.every((p) => submitted.has(p.id)) && submitted.size >= 2
+    expected.length > 0 &&
+    expected.every((p) => submissionComplete(p, submissions, timerExpired)) &&
+    submitted.size >= 2
   if (!ready) return
 
   // Resolve exactly once per round (guards concurrent last submissions).
@@ -664,23 +701,35 @@ export async function submitCards(
   cardIds: string[],
   onOutcome?: (accepted: boolean) => void,
 ): Promise<void> {
+  const round = await state.getCurrentRound(code)
+  const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
+  const [roundRow] = session
+    ? await db
+        .select()
+        .from(gameRounds)
+        .where(and(eq(gameRounds.sessionId, session.id), eq(gameRounds.roundNum, round)))
+    : []
+  if (!roundRow || session?.status !== 'active')
+    throw new GameCommandError('invalid_state', 'No active round')
+  const [black] = await db.select().from(blackCards).where(eq(blackCards.id, roundRow.blackCardId))
+  if (!black) throw new GameCommandError('invalid_state', 'No active prompt')
   const allCards = await db.select().from(whiteCards).where(inArray(whiteCards.id, cardIds))
   const fills: Card[] = cardIds.map((id) => {
     const c = allCards.find((x) => x.id === id)
-    if (!c) throw new Error(`card ${id} not found`)
+    if (!c) throw new GameCommandError('invalid_state', 'Submit cards from your hand')
     return { id: c.id, text: c.text }
   })
   const submission: Submission = { submissionId: createId(), fills, playerId }
 
-  // Gamblers get a second anonymous slot; regular submission goes under playerId
-  const [player, existingSubs] = await Promise.all([
-    state.getPlayer(code, playerId),
-    state.getSubmissions(code),
-  ])
-  const storageKey = player?.hasGambled && existingSubs[playerId] ? `${playerId}:gamble` : playerId
-
-  await state.setSubmission(code, storageKey, submission)
-  await state.removeFromHand(code, playerId, cardIds)
+  await state.commitSubmission(
+    code,
+    playerId,
+    submission,
+    black.pick,
+    roundRow.id,
+    round,
+    roundRow.czarPlayerId,
+  )
   onOutcome?.(true)
   const playedProgress = await submissionProgress(code)
   await state.publishEvent(code, {
@@ -983,6 +1032,7 @@ async function finalizeRoundAfterPause(code: string): Promise<void> {
 }
 
 export async function endGame(code: string, mode: GameOverMode, winnerId?: string): Promise<void> {
+  await redis.hset(KEYS.game(code), 'status', 'ended')
   const players = await state.getAllPlayers(code)
   const finalScores = toPlayerScores(players, null)
 
@@ -1146,7 +1196,7 @@ export async function voidRound(code: string, reason: string): Promise<void> {
     .limit(1)
   if (!roundRow) return
   const round = roundRow.roundNum
-
+  await state.setPhase(code, 'transition')
   await returnRoundCards(code, roundRow.blackCardId)
   await state.clearSubmissions(code)
   await state.clearSkippedPlayers(code)

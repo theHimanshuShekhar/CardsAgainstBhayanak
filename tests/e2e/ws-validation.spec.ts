@@ -139,8 +139,8 @@ test('a rejected async command returns a safe error and leaves the server usable
           { type: 'auth', sessionToken: room.sessionToken, anonId: 'validation-host' },
           'auth_ok',
         )
-        // Valid protocol shape, but the engine rejects an ID absent from the deck.
-        // The thrown error includes this private value; the protocol must not echo it.
+        // A valid frame in a lobby is an expected rejection. Its private
+        // card value must never be echoed in the protocol response.
         expect(
           await peer.reply(
             { type: 'play', cardIds: ['private-card-id-do-not-log\nprivate-multiline-marker'] },
@@ -148,8 +148,8 @@ test('a rejected async command returns a safe error and leaves the server usable
           ),
         ).toEqual({
           type: 'error',
-          code: 'internal_error',
-          message: 'Command failed',
+          code: 'invalid_state',
+          message: 'No active round',
         })
         expect(await peer.reply({ type: 'ping' }, 'pong')).toEqual({ type: 'pong' })
         expect(await peer.reply({ type: 'rejoin' }, 'lobby_snapshot')).toMatchObject({

@@ -187,7 +187,7 @@ test('submit keeps selections on rejection and disconnect, and waits for delayed
     await expect(page.getByRole('button', { name: /Submit card/ })).toBeEnabled()
     await transport.reject()
     await page.getByRole('button', { name: /Submit card/ }).click()
-    await expect(page.getByRole('alert')).toHaveText('Command failed')
+    await expect(page.getByRole('alert')).toHaveText('Submit cards from your hand')
     await expect(page.getByRole('button', { name: /Submit card/ })).toBeEnabled()
     await disconnectBeforeClick(page, '.hand-dock-hd button')
     await expect(page.getByRole('alert')).toContainText('Disconnected')
@@ -459,7 +459,7 @@ test('a pending play locks wager changes and a rejected play still allows a lega
     await expect.poll(() => transport.receiptPending()).toBe(true)
     await expect(page.getByTestId('wager-btn')).toBeDisabled()
     await transport.releaseAck()
-    await expect(page.getByRole('alert')).toHaveText('Command failed')
+    await expect(page.getByRole('alert')).toHaveText('Submit cards from your hand')
     await expect(page.getByTestId('wager-btn')).toBeEnabled()
 
     // The pending guard must not remove legal wagers after rejection.

@@ -1,4 +1,5 @@
 import { redis, KEYS, ROOM_TTL_SECONDS } from './redis'
+import { GameCommandError } from './game-command-error'
 import type { GameConfig, GamePlayer, GamePhase, Submission } from './types'
 
 export async function createGameState(
@@ -178,6 +179,103 @@ export async function removeFromHand(
 
 const submissionsKey = (code: string) => `${KEYS.round(code)}:submissions`
 
+// Ownership is checked against the live hand at the same instant the
+// submission is recorded and its cards are consumed.
+const COMMIT_SUBMISSION_LUA = `
+local storedRoundId = redis.call('HGET', KEYS[4], 'roundId')
+local legacyRound = not storedRoundId
+  and redis.call('HGET', KEYS[5], 'currentRound') == ARGV[6]
+local status = redis.call('HGET', KEYS[5], 'status')
+if redis.call('HGET', KEYS[4], 'phase') ~= 'picking'
+  or redis.call('HGET', KEYS[5], 'currentRound') ~= ARGV[6]
+  or (storedRoundId ~= ARGV[5] and not legacyRound)
+  or (status ~= 'active' and not (legacyRound and status == 'lobby'))
+  or redis.call('EXISTS', KEYS[7]) == 1 then return 'phase' end
+local expiresAt = tonumber(redis.call('HGET', KEYS[4], 'roundTimerExpiresAt'))
+if expiresAt then
+  local now = redis.call('TIME')
+  if tonumber(now[1]) * 1000 + tonumber(now[2]) / 1000 >= expiresAt then return 'phase' end
+end
+local player = cjson.decode(redis.call('HGET', KEYS[3], ARGV[1]) or '{}')
+if player.role == 'spectator' then return 'spectator' end
+local czarId = redis.call('HGET', KEYS[4], 'czarId') or ARGV[7]
+if player.role ~= 'player' or player.status ~= 'active' or player.isRando
+  or ARGV[1] == czarId
+  or redis.call('SISMEMBER', KEYS[6], ARGV[1]) == 1 then return 'actor' end
+local submission = cjson.decode(ARGV[2])
+if #submission.fills ~= tonumber(ARGV[4]) then return 'cards' end
+local distinct = {}
+for _, card in ipairs(submission.fills) do
+  if distinct[card.id] then return 'cards' end
+  distinct[card.id] = true
+end
+local hand = redis.call('LRANGE', KEYS[2], 0, -1)
+local owned = {}
+for _, id in ipairs(hand) do owned[id] = true end
+for _, card in ipairs(submission.fills) do
+  if not owned[card.id] then return 'cards' end
+end
+local slot = ARGV[1]
+if player.hasGambled and redis.call('HEXISTS', KEYS[1], slot) == 1 then
+  slot = slot .. ':gamble'
+end
+if redis.call('HEXISTS', KEYS[1], slot) == 1 then return 'submitted' end
+-- Rooms already picking before this deployment lack the new identity.
+-- Upgrade only the DB-verified current round, inside the same commit.
+if legacyRound then
+  redis.call('HSET', KEYS[4], 'roundId', ARGV[5], 'czarId', czarId)
+  redis.call('HSET', KEYS[5], 'status', 'active')
+  redis.call('EXPIRE', KEYS[4], ARGV[3])
+  redis.call('EXPIRE', KEYS[5], ARGV[3])
+end
+redis.call('HSET', KEYS[1], slot, ARGV[2])
+for _, card in ipairs(submission.fills) do
+  redis.call('LREM', KEYS[2], 0, card.id)
+end
+redis.call('EXPIRE', KEYS[1], ARGV[3])
+redis.call('EXPIRE', KEYS[2], ARGV[3])
+return 1
+`
+
+export async function commitSubmission(
+  code: string,
+  playerId: string,
+  submission: Submission,
+  pick: number,
+  roundId: string,
+  round: number,
+  czarId: string | null,
+): Promise<void> {
+  const accepted = await redis.eval(
+    COMMIT_SUBMISSION_LUA,
+    7,
+    submissionsKey(code),
+    KEYS.hand(code, playerId),
+    KEYS.players(code),
+    KEYS.round(code),
+    KEYS.game(code),
+    skippedKey(code),
+    `${KEYS.round(code)}:resolving`,
+    playerId,
+    JSON.stringify(submission),
+    ROOM_TTL_SECONDS,
+    pick,
+    roundId,
+    round,
+    czarId ?? '',
+  )
+  if (accepted === 'spectator')
+    throw new GameCommandError('spectator_action', 'Spectators cannot submit cards')
+  if (accepted === 'actor')
+    throw new GameCommandError('not_authorized', 'You cannot submit in this round')
+  if (accepted === 'phase')
+    throw new GameCommandError('invalid_state', 'This round is not accepting submissions')
+  if (accepted === 'submitted')
+    throw new GameCommandError('invalid_state', 'Your submissions are already complete')
+  if (accepted !== 1)
+    throw new GameCommandError('invalid_state', 'Submit the required distinct cards from your hand')
+}
+
 export async function setSubmission(
   code: string,
   playerId: string,
@@ -217,6 +315,39 @@ export async function setCurrentRound(code: string, round: number): Promise<void
 export async function getCurrentRound(code: string): Promise<number> {
   const val = await redis.hget(KEYS.game(code), 'currentRound')
   return val ? Number(val) : 0
+}
+
+// Upgrade active rooms created before round identity was persisted. A
+// recovery read must never stamp an older DB row over a newer round.
+export async function ensureRoundIdentity(
+  code: string,
+  round: number,
+  roundId: string,
+  czarId: string | null,
+): Promise<boolean> {
+  const ok = await redis.eval(
+    `
+    if redis.call('HGET', KEYS[1], 'currentRound') ~= ARGV[1] then return 0 end
+    local current = redis.call('HGET', KEYS[2], 'roundId')
+    if current and current ~= ARGV[2] then return 0 end
+    redis.call('HSETNX', KEYS[2], 'roundId', ARGV[2])
+    redis.call('HSETNX', KEYS[2], 'czarId', ARGV[3])
+    redis.call('EXPIRE', KEYS[2], ARGV[4])
+    if not current and redis.call('HGET', KEYS[1], 'status') == 'lobby' then
+      redis.call('HSET', KEYS[1], 'status', 'active')
+      redis.call('EXPIRE', KEYS[1], ARGV[4])
+    end
+    return 1
+    `,
+    2,
+    KEYS.game(code),
+    KEYS.round(code),
+    round,
+    roundId,
+    czarId ?? '',
+    ROOM_TTL_SECONDS,
+  )
+  return ok === 1
 }
 
 export async function setRoundTimerExpiresAt(code: string, expiresAt: number): Promise<void> {

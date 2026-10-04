@@ -60,6 +60,7 @@ test('Gambling — winner wagers on round 2, submits twice, round resolves', asy
   for (const p of r1others) await submitCards(p, pick1)
   await waitForPhase(players, 'judging')
   await startReveal(r1czar)
+  await expect(r1czar.page.locator('.flip-reveal .card-response')).toHaveCount(2 * pick1)
   await pickWinner(r1czar, 0)
   await host.page.waitForTimeout(800)
 
@@ -71,6 +72,7 @@ test('Gambling — winner wagers on round 2, submits twice, round resolves', asy
     for (const p of r2others) await submitCards(p, pick2round)
     await waitForPhase(players, 'judging')
     await startReveal(r2czar)
+    await expect(r2czar.page.locator('.flip-reveal .card-response')).toHaveCount(2 * pick2round)
     await pickWinner(r2czar, 0)
     await host.page.waitForTimeout(800)
     gambler = await findGambler()
@@ -102,8 +104,14 @@ test('Gambling — winner wagers on round 2, submits twice, round resolves', asy
 
   // First play: submit the first `pick` cards. UI must stay in
   // `picking` (hand dock still visible, no waiting screen).
+  const primaryTexts = (
+    await gambler!.page.locator('.hand-card-wrap .card-text').allTextContents()
+  ).slice(0, pick)
   await submitCards(gambler!, pick)
   await expect(gambler!.page.locator('.hand-dock')).toBeVisible({ timeout: 5_000 })
+  await expect(gambler!.page.locator('.hand-card-wrap')).toHaveCount(10)
+  const remainingTexts = await gambler!.page.locator('.hand-card-wrap .card-text').allTextContents()
+  for (const text of primaryTexts) expect(remainingTexts).not.toContain(text)
 
   // Second play: submit the next `pick` cards. Now we move to waiting.
   await submitCards(gambler!, pick)
@@ -114,6 +122,9 @@ test('Gambling — winner wagers on round 2, submits twice, round resolves', asy
 
   await waitForPhase(players, 'judging')
   await startReveal(curCzar)
+  // A wager creates three anonymous submissions; wait for every reveal
+  // before the Czar sends a command now that judging is phase-gated.
+  await expect(curCzar.page.locator('.flip-reveal .card-response')).toHaveCount(3 * pick)
   await pickWinner(curCzar, 0)
 
   // Round resolved — the next round starts after ROUND_RESULT_PAUSE_MS.
