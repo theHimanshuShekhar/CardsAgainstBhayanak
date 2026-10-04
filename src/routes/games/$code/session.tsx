@@ -441,7 +441,7 @@ function SessionScreen() {
 
   const handleToggle = useCallback(
     (cardId: string) => {
-      if (!prompt) return
+      if (!prompt || pendingRef.current?.type === 'play') return
       // NHIE discard mode: the next card tap discards the card instead of
       // toggling its selection. One-shot — mode clears either way so a
       // mis-aimed tap doesn't burn a discard.
@@ -464,10 +464,12 @@ function SessionScreen() {
   )
 
   const handleRedraw = useCallback(() => {
+    if (pendingRef.current?.type === 'play') return
     send({ type: 'redraw' })
   }, [send])
 
   const handleToggleDiscardMode = useCallback(() => {
+    if (pendingRef.current?.type === 'play') return
     setDiscardMode((prev) => !prev)
   }, [])
 
@@ -476,6 +478,7 @@ function SessionScreen() {
   }, [send])
 
   const handleGamble = useCallback(() => {
+    if (pendingRef.current?.type === 'play') return
     send({ type: 'gamble' })
   }, [send])
 
@@ -670,6 +673,7 @@ function SessionScreen() {
                         className="btn btn-ghost btn-sm"
                         onClick={handleRedraw}
                         data-testid="redraw-btn"
+                        disabled={pending?.type === 'play'}
                       >
                         Redraw (–1 pt)
                       </button>
@@ -679,6 +683,7 @@ function SessionScreen() {
                         className={`btn btn-ghost btn-sm${discardMode ? ' is-armed' : ''}`}
                         onClick={handleToggleDiscardMode}
                         data-testid="discard-btn"
+                        disabled={pending?.type === 'play'}
                       >
                         {discardMode ? 'Tap a card to discard…' : `Discard (${discardsUsed}/3)`}
                       </button>
@@ -688,6 +693,7 @@ function SessionScreen() {
                         className="btn btn-ghost btn-sm"
                         onClick={handleGamble}
                         data-testid="wager-btn"
+                        disabled={pending?.type === 'play'}
                       >
                         Wager 1 pt
                       </button>

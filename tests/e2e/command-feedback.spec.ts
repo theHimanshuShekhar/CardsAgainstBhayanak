@@ -69,7 +69,10 @@ async function wire(page: Page, beforeRound = false) {
             )
           }
           if (message.type === 'state_snapshot' && !event.cancelBubble) faults.synchronized = true
-          if (faults.delayAck && JSON.parse(String(event.data)).type === 'command_accepted') {
+          if (
+            faults.delayAck &&
+            (message.type === 'command_accepted' || (message.type === 'error' && message.commandId))
+          ) {
             faults.acknowledgements.push(String(event.data))
             event.stopImmediatePropagation()
           }
@@ -120,6 +123,10 @@ async function wire(page: Page, beforeRound = false) {
         faults.mode = 'pass'
         faults.sendHeld()
       }),
+    receiptPending: () =>
+      page.evaluate(
+        () => (window as unknown as { faults: Faults }).faults.acknowledgements.length > 0,
+      ),
     delayAck: () =>
       page.evaluate(() => {
         ;(window as unknown as { faults: Faults }).faults.delayAck = true
@@ -400,6 +407,79 @@ test('a session joining before the first round hydrates its hand before allowing
     await selectHand(player.page)
     await player.page.getByRole('button', { name: /Submit card/ }).click()
     await expect(player.page.locator('.hand-dock')).toBeHidden()
+  } finally {
+    await Promise.all(players.map((p) => p.context.close()))
+  }
+})
+
+test('a pending play locks wager changes and a rejected play still allows a legal two-submission gamble', async ({
+  browser,
+}) => {
+  test.setTimeout(120_000)
+  const { players, wires } = await start(browser)
+  try {
+    let gambler: PlayerHandle | undefined
+    for (let rounds = 0; rounds < 3 && !gambler; rounds++) {
+      gambler = (
+        await Promise.all(
+          players.map(async (player) =>
+            (await player.page.getByTestId('wager-btn').isVisible()) ? player : undefined,
+          ),
+        )
+      ).find(Boolean)
+      if (gambler) break
+      const czar = await getCzar(players)
+      const round = await players[0]!.page.locator('.pill').first().textContent()
+      let pick = 1
+      for (const player of players.filter((p) => p !== czar)) {
+        pick = Number(
+          /pick (\d)/.exec(
+            (await player.page.locator('.hand-dock .eyebrow').textContent()) ?? '',
+          )?.[1] ?? 1,
+        )
+        await selectHand(player.page)
+        await player.page.getByRole('button', { name: /Submit card/ }).click()
+        await expect(player.page.locator('.hand-dock')).toBeHidden()
+      }
+      await expect(czar.page.locator('.flip-reveal .card-response')).toHaveCount(2 * pick)
+      await czar.page.locator('.flip-reveal .card-response').first().click()
+      await expect(players[0]!.page.locator('.pill').first()).not.toHaveText(round!, {
+        timeout: 15_000,
+      })
+    }
+    expect(gambler, 'a non-czar with a point can wager').toBeTruthy()
+    const player = gambler!
+    const page = player.page
+    const transport = wires.get(player)!
+    await transport.reject()
+    await transport.delayAck()
+    await selectHand(page)
+    await page.getByRole('button', { name: /Submit card/ }).click()
+    await expect(page.getByRole('button', { name: 'Sending…' })).toBeDisabled()
+    await expect.poll(() => transport.receiptPending()).toBe(true)
+    await expect(page.getByTestId('wager-btn')).toBeDisabled()
+    await transport.releaseAck()
+    await expect(page.getByRole('alert')).toHaveText('Command failed')
+    await expect(page.getByTestId('wager-btn')).toBeEnabled()
+
+    // The pending guard must not remove legal wagers after rejection.
+    await transport.pass()
+    const pick = Number(
+      /pick (\d)/.exec((await page.locator('.hand-dock .eyebrow').textContent()) ?? '')?.[1] ?? 1,
+    )
+    await page.getByTestId('wager-btn').click()
+    await expect(page.locator('.hand-card-wrap')).toHaveCount(10 + pick)
+    await expect(page.getByTestId('wager-btn')).toBeHidden()
+    await transport.delayAck()
+    await page.getByRole('button', { name: /Submit card/ }).click()
+    await expect(page.getByRole('button', { name: 'Sending…' })).toBeDisabled()
+    await expect.poll(() => transport.receiptPending()).toBe(true)
+    await transport.releaseAck()
+    await expect(page.getByRole('button', { name: /Pick a card|Pick \d+ more/ })).toBeVisible()
+    await expect(page.locator('.hand-dock')).toBeVisible()
+    await selectHand(page)
+    await page.getByRole('button', { name: /Submit card/ }).click()
+    await expect(page.locator('.hand-dock')).toBeHidden()
   } finally {
     await Promise.all(players.map((p) => p.context.close()))
   }
