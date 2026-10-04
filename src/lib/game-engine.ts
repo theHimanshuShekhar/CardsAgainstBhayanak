@@ -18,6 +18,7 @@ import type {
   ResetMode,
 } from './types'
 import { createId } from '@paralleldrive/cuid2'
+import { GameCommandError } from './game-command-error'
 
 export function chooseFirstCzar(activePlayerCount: number): number {
   return randomInt(0, activePlayerCount)
@@ -728,15 +729,52 @@ export async function autoSubmitRando(code: string, pick: number): Promise<void>
   })
 }
 
+// Resolution authority belongs here, so every caller uses the persisted
+// round Czar and current room policy rather than trusting socket/UI state.
+async function authorizeCzarResolution(
+  code: string,
+  playerId: string,
+  action: 'pick' | 'rank',
+): Promise<void> {
+  const [[session], player, round, phase] = await Promise.all([
+    db.select().from(gameSessions).where(eq(gameSessions.code, code)),
+    state.getPlayer(code, playerId),
+    state.getCurrentRound(code),
+    state.getPhase(code),
+  ])
+  if (!player || player.status !== 'active' || player.role !== 'player' || player.isRando)
+    throw new GameCommandError('not_authorized', 'Only an active Czar can resolve the round')
+  if (!session || session.status !== 'active')
+    throw new GameCommandError('invalid_state', 'The game is not active')
+
+  const [roundRow] = await db
+    .select()
+    .from(gameRounds)
+    .where(and(eq(gameRounds.sessionId, session.id), eq(gameRounds.roundNum, round)))
+  if (!roundRow) throw new GameCommandError('invalid_state', 'No current round')
+  if (roundRow.czarPlayerId !== playerId)
+    throw new GameCommandError('not_authorized', 'Only the current Czar can resolve the round')
+
+  const rules = (session.config as GameConfig).rules
+  const allowedMode =
+    action === 'rank'
+      ? rules.includes('serious_business')
+      : !rules.some((rule) => ['godmode', 'survival', 'serious_business'].includes(rule))
+  if (!allowedMode || phase !== (action === 'pick' ? 'judging' : 'ranking'))
+    throw new GameCommandError('invalid_state', 'This action is not allowed in the current round')
+}
+
 export async function pickWinner(
   code: string,
   czarId: string,
   submissionId: string,
   onOutcome?: (accepted: boolean) => void,
 ): Promise<void> {
+  await authorizeCzarResolution(code, czarId, 'pick')
   const submissions = await state.getSubmissions(code)
   const winnerKey = await resolveSubmissionKey(code, submissionId)
-  if (!winnerKey || !submissions[winnerKey]) throw new Error('submission not found')
+  if (!winnerKey || !submissions[winnerKey])
+    throw new GameCommandError('invalid_state', 'Command failed')
   const winnerPlayerId = resolvePlayerId(winnerKey)
 
   // Idempotency gate: clients can re-fire the `pick` WS frame (double-click,
@@ -1480,7 +1518,18 @@ export async function eliminateSubmission(
 }
 
 export async function applyRanking(code: string, czarId: string, ranking: string[]): Promise<void> {
+  await authorizeCzarResolution(code, czarId, 'rank')
   const submissions = await state.getSubmissions(code)
+  // Validate the entire command before crediting any submission. A stale
+  // target in a later podium slot must not leave a partially scored round.
+  const keys = await Promise.all(ranking.map((sid) => resolveSubmissionKey(code, sid)))
+  if (
+    ranking.length !== Math.min(3, Object.keys(submissions).length) ||
+    keys.length === 0 ||
+    keys.some((key) => !key || !submissions[key]) ||
+    new Set(keys).size !== keys.length
+  )
+    throw new GameCommandError('invalid_state', 'Ranking must use distinct current submissions')
   const points = [3, 2, 1] as const
   const scoresDelta: Record<string, number> = {}
   const rankedSubmissions: Submission[] = []
@@ -1491,8 +1540,7 @@ export async function applyRanking(code: string, czarId: string, ranking: string
 
   for (let i = 0; i < ranking.length && i < 3; i++) {
     const sid = ranking[i]!
-    const key = await resolveSubmissionKey(code, sid)
-    if (!key || !submissions[key]) continue
+    const key = keys[i]!
     const pid = resolvePlayerId(key)
     const pts = points[i] ?? 1
     scoresDelta[pid] = pts
@@ -1517,8 +1565,6 @@ export async function applyRanking(code: string, czarId: string, ranking: string
     ranking: rankedSubmissions,
   })
   await endRound(code, Object.keys(submissions))
-
-  void czarId
 }
 
 // Push the player's current hand to its owner as a private `hand_update`.
