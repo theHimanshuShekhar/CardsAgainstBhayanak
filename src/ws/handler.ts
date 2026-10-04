@@ -161,6 +161,8 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
     roundTimerExpiresAt,
     myDiscardsUsed: me?.discardsUsed ?? 0,
     myHasGambled: me?.hasGambled ?? false,
+    mySubmissionCount: Number(!!rawSubs[playerId]) + Number(!!rawSubs[`${playerId}:gamble`]),
+    myVotedSubmissionId: await redis.hget(`${KEYS.round(code)}:voterchoices`, playerId),
     ...(voteTally ? { voteTally } : {}),
     ...(eliminationTurnPlayerId ? { eliminationTurnPlayerId } : {}),
     ...(ranking ? { ranking } : {}),
@@ -279,6 +281,23 @@ export const wsHooks = {
     if (!ctx) return
 
     let eventType: ClientToServerEvent['type'] | undefined
+    let commandId: string | undefined
+    let accepted = false
+    const accept = (ok: boolean) => {
+      accepted = ok
+      if (!commandId) return
+      send(
+        peer,
+        ok
+          ? { type: 'command_accepted', commandId }
+          : {
+              type: 'error',
+              code: 'invalid_state',
+              message: 'Action was not accepted. Try again.',
+              commandId,
+            },
+      )
+    }
     try {
       if (ctx.authenticating)
         return send(peer, { type: 'error', code: 'not_authorized', message: 'auth first' })
@@ -291,15 +310,30 @@ export const wsHooks = {
 
       const result = ClientMessageSchema.safeParse(input)
       if (!result.success) {
-        return send(peer, { type: 'error', code: 'invalid_state', message: 'Invalid command' })
+        const id =
+          typeof input === 'object' && input !== null && 'commandId' in input
+            ? input.commandId
+            : undefined
+        return send(peer, {
+          type: 'error',
+          code: 'invalid_state',
+          message: 'Invalid command',
+          ...(typeof id === 'string' && id.length > 0 && id.length <= 256 ? { commandId: id } : {}),
+        })
       }
       const parsed = result.data
+      commandId = 'commandId' in parsed ? parsed.commandId : undefined
       eventType = parsed.type
 
       // Auth handshake — must be the first message
       if (!ctx.playerId) {
         if (parsed.type !== 'auth')
-          return send(peer, { type: 'error', code: 'not_authorized', message: 'auth first' })
+          return send(peer, {
+            type: 'error',
+            code: 'not_authorized',
+            message: 'auth first',
+            ...(commandId ? { commandId } : {}),
+          })
         ctx.authenticating = true
         const auth = await authenticateSocket(ctx.code, parsed)
         if (peerContext.get(peer) !== ctx) return
@@ -353,6 +387,7 @@ export const wsHooks = {
           type: 'error',
           code: 'spectator_action',
           message: 'spectators cannot perform game actions',
+          ...(commandId ? { commandId } : {}),
         })
       }
 
@@ -370,16 +405,16 @@ export const wsHooks = {
           return
         }
         case 'play':
-          await engine.submitCards(ctx.code, ctx.playerId, parsed.cardIds)
+          await engine.submitCards(ctx.code, ctx.playerId, parsed.cardIds, accept)
           return
         case 'gamble':
           await engine.gamble(ctx.code, ctx.playerId)
           return
         case 'pick':
-          await engine.pickWinner(ctx.code, ctx.playerId, parsed.submissionId)
+          await engine.pickWinner(ctx.code, ctx.playerId, parsed.submissionId, accept)
           return
         case 'vote':
-          await engine.castVote(ctx.code, ctx.playerId, parsed.submissionId)
+          await engine.castVote(ctx.code, ctx.playerId, parsed.submissionId, accept)
           return
         case 'eliminate':
           await engine.eliminateSubmission(ctx.code, ctx.playerId, parsed.submissionId)
@@ -412,7 +447,13 @@ export const wsHooks = {
         { err: safeError, roomCode: ctx.code, playerId: ctx.playerId, eventType },
         'WebSocket command failed',
       )
-      send(peer, { type: 'error', code: 'internal_error', message: 'Command failed' })
+      if (!accepted)
+        send(peer, {
+          type: 'error',
+          code: 'internal_error',
+          message: 'Command failed',
+          ...(commandId ? { commandId } : {}),
+        })
       if (ctx.authenticating) {
         // Setup may have bound the identity before a grace write failed.
         // Keep commands blocked until close restores grace for that identity.

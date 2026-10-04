@@ -163,3 +163,32 @@ test('a rejected async command returns a safe error and leaves the server usable
     peer.ws.close()
   }
 })
+
+test('rejected commands preserve valid correlation IDs without relaxing frame validation', async () => {
+  const room = await createRoom()
+  const peer = await connect(room.roomCode)
+  try {
+    expect(
+      await peer.reply({ type: 'play', cardIds: ['card'], commandId: 'before-auth' }, 'error'),
+    ).toMatchObject({ code: 'not_authorized', commandId: 'before-auth' })
+    await peer.reply({ type: 'auth', sessionToken: room.sessionToken }, 'auth_ok')
+    expect(
+      await peer.reply({ type: 'play', cardIds: [], commandId: 'malformed-play' }, 'error'),
+    ).toEqual({
+      type: 'error',
+      code: 'invalid_state',
+      message: 'Invalid command',
+      commandId: 'malformed-play',
+    })
+    for (const commandId of ['', 123, 'x'.repeat(257)]) {
+      expect(await peer.reply({ type: 'vote', submissionId: '0', commandId }, 'error')).toEqual({
+        type: 'error',
+        code: 'invalid_state',
+        message: 'Invalid command',
+      })
+    }
+    expect(await peer.reply({ type: 'ping' }, 'pong')).toEqual({ type: 'pong' })
+  } finally {
+    peer.ws.close()
+  }
+})

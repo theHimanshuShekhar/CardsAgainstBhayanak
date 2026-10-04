@@ -551,7 +551,7 @@ Each player's submission writes to a single Redis hash field: `HSET game:{code}:
 
 ### Submission deduplication
 
-If a player sends `play` twice for the same round (network glitch, double-click), the server treats the second as a no-op (responds with same `player_played` ack, doesn't update Redis). Client UI uses optimistic local state to prevent UI confusion.
+If a player sends `play` twice for the same round (network glitch, double-click), the server treats the second as a no-op (responds with same `player_played` ack, doesn't update Redis). For `play`, `vote`, and `pick`, clients may include a bounded `commandId`. The server sends a private `command_accepted(commandId)` at the accepted mutation, or an `error` carrying the same ID on rejection, including ignored votes and winner claims. Clients keep controls pending until the matching receipt, preserve selections on failure, and use outcome events for winner display. A missing receipt triggers reconnect and an authoritative snapshot before retrying; commands are never automatically replayed. Rejoin snapshots include the requesting player's `mySubmissionCount` and `myVotedSubmissionId` so a lost receipt cannot offer a duplicate action. Vote receipts reset when a tie starts a new ballot.
 
 ### Reconnect flow
 

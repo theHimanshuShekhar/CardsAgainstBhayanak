@@ -499,6 +499,7 @@ const revealedKey = (code: string) => `${KEYS.round(code)}:revealed`
 const voteTallyKeyFor = (code: string) => `${KEYS.round(code)}:votetally`
 const tieKeyFor = (code: string) => `${KEYS.round(code)}:tiebreak`
 const votersKeyFor = (code: string) => `${KEYS.round(code)}:voters`
+const voterChoicesKeyFor = (code: string) => `${KEYS.round(code)}:voterchoices`
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms))
@@ -654,10 +655,13 @@ async function transitionAfterReveal(
   // serious_business / normal: the Czar now ranks / picks (client-driven).
 }
 
+// Report the command outcome at its mutation, before asynchronous reveals
+// or round delays. Callers without a receipt callback keep existing behavior.
 export async function submitCards(
   code: string,
   playerId: string,
   cardIds: string[],
+  onOutcome?: (accepted: boolean) => void,
 ): Promise<void> {
   const allCards = await db.select().from(whiteCards).where(inArray(whiteCards.id, cardIds))
   const fills: Card[] = cardIds.map((id) => {
@@ -676,6 +680,7 @@ export async function submitCards(
 
   await state.setSubmission(code, storageKey, submission)
   await state.removeFromHand(code, playerId, cardIds)
+  onOutcome?.(true)
   const playedProgress = await submissionProgress(code)
   await state.publishEvent(code, {
     type: 'player_played',
@@ -727,6 +732,7 @@ export async function pickWinner(
   code: string,
   czarId: string,
   submissionId: string,
+  onOutcome?: (accepted: boolean) => void,
 ): Promise<void> {
   const submissions = await state.getSubmissions(code)
   const winnerKey = await resolveSubmissionKey(code, submissionId)
@@ -739,7 +745,10 @@ export async function pickWinner(
   // endRound interleaves through the non-atomic setHand (del + rpush),
   // producing 20-card hands.
   const claimed = await state.claimRoundWinner(code, winnerPlayerId)
-  if (!claimed) return
+  if (!claimed) {
+    onOutcome?.(false)
+    return
+  }
 
   const winner = await state.getPlayer(code, winnerPlayerId)
   if (!winner) throw new Error('winner not found')
@@ -747,6 +756,7 @@ export async function pickWinner(
   // skip the winner) don't race the winner's own credit.
   const transfer = await settleGambles(code, winnerPlayerId)
   await state.updatePlayer(code, winnerPlayerId, { score: winner.score + 1 + transfer })
+  onOutcome?.(true)
 
   const players = await state.getAllPlayers(code)
   const scores = toPlayerScores(players, czarId)
@@ -840,6 +850,7 @@ export async function endRound(code: string, submitterIds: string[]): Promise<vo
     voteTallyKeyFor(code),
     tieKeyFor(code),
     votersKeyFor(code),
+    voterChoicesKeyFor(code),
   )
 
   const players = await state.getAllPlayers(code)
@@ -1114,6 +1125,7 @@ export async function voidRound(code: string, reason: string): Promise<void> {
     voteTallyKeyFor(code),
     tieKeyFor(code),
     votersKeyFor(code),
+    voterChoicesKeyFor(code),
   )
 
   await state.publishEvent(code, { type: 'round_voided', round, reason })
@@ -1293,23 +1305,36 @@ async function settleGambles(code: string, winnerPlayerId: string): Promise<numb
   return transfer
 }
 
-export async function castVote(code: string, voterId: string, submissionId: string): Promise<void> {
+export async function castVote(
+  code: string,
+  voterId: string,
+  submissionId: string,
+  onOutcome?: (accepted: boolean) => void,
+): Promise<void> {
   const voteTallyKey = voteTallyKeyFor(code)
   const tieKey = tieKeyFor(code)
   const votersKey = votersKeyFor(code)
 
   // Can't vote for your own submission (God Is Dead house rule).
   const votedKey = await resolveSubmissionKey(code, submissionId)
-  if (!votedKey) return
-  if (resolvePlayerId(votedKey) === voterId) return
+  if (!votedKey || resolvePlayerId(votedKey) === voterId) {
+    onOutcome?.(false)
+    return
+  }
 
   // One vote per player per round.
   const fresh = await redis.sadd(votersKey, voterId)
   await redis.expire(votersKey, ROOM_TTL_SECONDS)
-  if (fresh === 0) return
+  if (fresh === 0) {
+    onOutcome?.(false)
+    return
+  }
 
+  await redis.hset(voterChoicesKeyFor(code), voterId, submissionId)
+  await redis.expire(voterChoicesKeyFor(code), ROOM_TTL_SECONDS)
   await redis.hincrby(voteTallyKey, submissionId, 1)
   await redis.expire(voteTallyKey, ROOM_TTL_SECONDS)
+  onOutcome?.(true)
 
   const players = await state.getAllPlayers(code)
   const voters = players.filter((p) => p.status === 'active' && !p.isRando)
@@ -1334,7 +1359,7 @@ export async function castVote(code: string, voterId: string, submissionId: stri
     const attempts = await redis.incr(tieKey)
     await redis.expire(tieKey, ROOM_TTL_SECONDS)
     if (attempts <= 2) {
-      await redis.del(voteTallyKey, votersKey)
+      await redis.del(voteTallyKey, votersKey, voterChoicesKeyFor(code))
       await state.publishEvent(code, { type: 'vote_tally', votes: {} })
       return
     }
