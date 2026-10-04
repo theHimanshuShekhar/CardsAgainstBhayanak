@@ -101,6 +101,9 @@ export type SessionState = {
   // and the round resolves; the rejoin must restore so the player can finish
   // a gamble across a refresh.
   myHasGambled: boolean
+  // Private action receipts let reconnects reconcile a lost acknowledgement.
+  mySubmissionCount: number
+  myVotedSubmissionId: string | null
 }
 
 // ── Session-level status ──────────────────────────────────────────
@@ -185,11 +188,11 @@ export type ServerToClientEvent = ServerMessage
 export type ClientMessage =
   | { type: 'auth'; sessionToken: string; anonId?: string }
   | { type: 'rejoin' }
-  | { type: 'play'; cardIds: string[] }
+  | { type: 'play'; cardIds: string[]; commandId?: string }
   | { type: 'gamble' }
-  | { type: 'pick'; submissionId: string }
+  | { type: 'pick'; submissionId: string; commandId?: string }
   | { type: 'rank'; ranking: string[] }
-  | { type: 'vote'; submissionId: string }
+  | { type: 'vote'; submissionId: string; commandId?: string }
   | { type: 'eliminate'; submissionId: string }
   | { type: 'redraw' }
   | { type: 'confess_discard'; cardId: string }
@@ -234,5 +237,6 @@ export type ServerMessage =
   | { type: 'round_end'; activatedPlayers: string[]; handsRefilled: Record<string, Hand> }
   | { type: 'game_over'; finalScores: PlayerScore[]; winnerId: string; mode: GameOverMode }
   | { type: 'game_reset'; mode: ResetMode }
-  | { type: 'error'; code: ErrorCode; message: string }
+  | { type: 'command_accepted'; commandId: string }
+  | { type: 'error'; code: ErrorCode; message: string; commandId?: string }
   | { type: 'pong' }

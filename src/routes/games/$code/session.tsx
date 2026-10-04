@@ -8,7 +8,15 @@ import { SubmissionsGrid } from '~/components/game/SubmissionsGrid'
 import { PromptStage } from '~/components/game/PromptStage'
 import { useSession } from '~/hooks/useSession'
 import { useGameSocket } from '~/hooks/useGameSocket'
-import type { BlackCard, Card, GameConfig, GamePhase, PlayerScore, Submission } from '~/lib/types'
+import type {
+  BlackCard,
+  Card,
+  GameConfig,
+  GamePhase,
+  PlayerScore,
+  Submission,
+  ClientToServerEvent,
+} from '~/lib/types'
 
 export const Route = createFileRoute('/games/$code/session')({
   component: SessionScreen,
@@ -18,6 +26,20 @@ function SessionScreen() {
   const navigate = useNavigate()
   const { code } = Route.useParams()
   const { session, setSession } = useSession()
+
+  type PendingAction = {
+    commandId: string
+    type: 'play' | 'vote' | 'pick'
+    submissionId?: string
+    firstGamble: boolean
+  }
+  const pendingRef = useRef<PendingAction | null>(null)
+  const [pending, setPending] = useState<PendingAction | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
+  const clearPending = useCallback(() => {
+    pendingRef.current = null
+    setPending(null)
+  }, [])
 
   const [round, setRound] = useState(0)
   const [phase, setPhase] = useState<GamePhase>('picking')
@@ -57,8 +79,8 @@ function SessionScreen() {
   // confess_discard send. Cleared after the click or by toggling off.
   const [discardMode, setDiscardMode] = useState(false)
   // God Is Dead: per-round vote state. The engine enforces one vote per
-  // round; the client mirrors that so all vote buttons disable after a
-  // tap, and renders the live tally beneath each card.
+  // round; controls disable while pending and the accepted vote is marked
+  // only by a matching receipt. Live tallies alone cannot confirm our vote.
   const [myVotedSubmissionId, setMyVotedSubmissionId] = useState<string | null>(null)
   const [voteTally, setVoteTally] = useState<Record<string, number>>({})
   // Survival of the Fittest: the engine drives whose turn it is via
@@ -141,11 +163,33 @@ function SessionScreen() {
     serverRanking == null &&
     winnerId == null
 
-  const { on, send } = useGameSocket(code, session?.sessionToken ?? null, session?.anonId ?? '')
+  const { on, send, connected, reconnect } = useGameSocket(
+    code,
+    session?.sessionToken ?? null,
+    session?.anonId ?? '',
+  )
 
   useEffect(() => {
     const off = on((event) => {
+      if (event.type === 'command_accepted' && event.commandId === pendingRef.current?.commandId) {
+        const action = pendingRef.current
+        clearPending()
+        if (action.type === 'play') {
+          setSelected([])
+          setMySubmissionsSent((count) => count + 1)
+          if (!action.firstGamble)
+            setPhase((current) => (current === 'picking' ? 'waiting' : current))
+        }
+        if (action.type === 'vote') setMyVotedSubmissionId(action.submissionId ?? null)
+      }
+      if (event.type === 'error') {
+        if (!event.commandId || event.commandId === pendingRef.current?.commandId) {
+          setActionError(event.message)
+          if (event.commandId) clearPending()
+        }
+      }
       if (event.type === 'state_snapshot') {
+        clearPending()
         // Hydration path: the session WS connects after navigation, so the
         // live game_started/round_started already fired on the lobby socket.
         // The rejoin reply carries the authoritative round state.
@@ -166,6 +210,11 @@ function SessionScreen() {
         setExpected(s.expected)
         setTimerExpiresAt(s.roundTimerExpiresAt)
         setDiscardsUsed(s.myDiscardsUsed)
+        setHasGambled(s.myHasGambled)
+        setMySubmissionsSent(s.mySubmissionCount)
+        setMyVotedSubmissionId(s.myVotedSubmissionId)
+        setVoteTally(s.voteTally ?? {})
+        setSelected((cards) => cards.filter((id) => s.hand?.some((card) => card.id === id)))
         if (s.hand) setHand(s.hand)
         // Survival/SB rejoin: restore the elimination-turn pointer and any
         // server-resolved ranking. Eliminated flags ride on submissions
@@ -175,9 +224,20 @@ function SessionScreen() {
         setEliminatedIds(
           new Set(s.submissions.filter((x) => x.eliminated).map((x) => x.submissionId)),
         )
-        setPhase(s.phase === 'picking' && s.czarId === myId ? 'waiting' : s.phase)
+        const finishedSubmitting = s.mySubmissionCount >= (s.myHasGambled ? 2 : 1)
+        const snapshotPhase =
+          s.phase === 'picking' && (s.czarId === myId || finishedSubmitting)
+            ? 'waiting'
+            : s.submissions.length > 0 &&
+                (s.phase === 'judging' ||
+                  (s.config.rules.includes('godmode') && s.phase === 'waiting'))
+              ? 'reveal'
+              : s.phase
+        setPhase(snapshotPhase)
       }
       if (event.type === 'round_started') {
+        clearPending()
+        setActionError(null)
         setRound(event.round)
         setPrompt(event.prompt)
         setCzarId(event.czarId)
@@ -233,7 +293,10 @@ function SessionScreen() {
       if (event.type === 'vote_tally') {
         setVoteTally(event.votes)
         // Tie revote → engine clears the tally and reopens voting.
-        if (Object.keys(event.votes).length === 0) setMyVotedSubmissionId(null)
+        if (Object.keys(event.votes).length === 0) {
+          setMyVotedSubmissionId(null)
+          if (pendingRef.current?.type === 'vote') clearPending()
+        }
       }
       // Survival: the engine fires elimination_turn at reveal end and
       // again after each elimination, cycling through active non-Czar
@@ -313,6 +376,7 @@ function SessionScreen() {
         setWinnerName(event.scores.find((x) => x.playerId === event.winnerId)?.username ?? null)
       }
       if (event.type === 'round_end') {
+        clearPending()
         const myHand = event.handsRefilled[myId]
         if (myHand) setHand(myHand)
       }
@@ -321,6 +385,7 @@ function SessionScreen() {
       // the engine. Drop the dead round's UI state so the incoming round
       // doesn't render against a stale winner badge / partial submissions.
       if (event.type === 'round_voided') {
+        clearPending()
         setSelected([])
         setSubmissions([])
         setRevealIndex(-1)
@@ -372,11 +437,11 @@ function SessionScreen() {
     return () => {
       off()
     }
-  }, [on, code, navigate, setSession, myId])
+  }, [on, code, navigate, setSession, myId, clearPending])
 
   const handleToggle = useCallback(
     (cardId: string) => {
-      if (!prompt) return
+      if (!prompt || pendingRef.current?.type === 'play') return
       // NHIE discard mode: the next card tap discards the card instead of
       // toggling its selection. One-shot — mode clears either way so a
       // mis-aimed tap doesn't burn a discard.
@@ -399,10 +464,12 @@ function SessionScreen() {
   )
 
   const handleRedraw = useCallback(() => {
+    if (pendingRef.current?.type === 'play') return
     send({ type: 'redraw' })
   }, [send])
 
   const handleToggleDiscardMode = useCallback(() => {
+    if (pendingRef.current?.type === 'play') return
     setDiscardMode((prev) => !prev)
   }, [])
 
@@ -411,34 +478,59 @@ function SessionScreen() {
   }, [send])
 
   const handleGamble = useCallback(() => {
+    if (pendingRef.current?.type === 'play') return
     send({ type: 'gamble' })
   }, [send])
 
+  useEffect(() => {
+    if (!connected && pendingRef.current) {
+      clearPending()
+      setActionError('Disconnected. Reconnect and try again.')
+    }
+  }, [connected, clearPending])
+
+  useEffect(() => {
+    if (!pending) return
+    const timer = setTimeout(() => {
+      clearPending()
+      setActionError('Confirmation delayed. Reconnecting to check your action.')
+      reconnect()
+    }, 10_000)
+    return () => clearTimeout(timer)
+  }, [pending, clearPending, reconnect])
+
+  const sendAction = useCallback(
+    (event: Extract<ClientToServerEvent, { type: 'play' | 'vote' | 'pick' }>) => {
+      if (pendingRef.current) return
+      const action: PendingAction = {
+        commandId: crypto.randomUUID(),
+        type: event.type,
+        submissionId: 'submissionId' in event ? event.submissionId : undefined,
+        firstGamble: event.type === 'play' && hasGambled && mySubmissionsSent === 0,
+      }
+      setActionError(null)
+      pendingRef.current = action
+      setPending(action)
+      const result = send({ ...event, commandId: action.commandId })
+      if (!result.ok) {
+        clearPending()
+        setActionError(result.message)
+      }
+    },
+    [send, clearPending, hasGambled, mySubmissionsSent],
+  )
+
   const handleVote = useCallback(
     (submissionId: string) => {
-      // Optimistic disable — engine will silently drop self-votes
-      // (which we already gate by not rendering for own submission once
-      // playerId is leaked, but during voting submissions are still
-      // opaque, so the optimistic flag stands until vote_tally arrives).
-      setMyVotedSubmissionId(submissionId)
-      send({ type: 'vote', submissionId })
+      sendAction({ type: 'vote', submissionId })
     },
-    [send],
+    [sendAction],
   )
 
   const handleSubmit = useCallback(() => {
     if (!prompt || selected.length < prompt.pick) return
-    send({ type: 'play', cardIds: selected })
-    // Gambling: a gambler submits twice in one picking phase. The first
-    // play keeps the UI in `picking` (cleared selection, extra cards in
-    // hand from the wager). Only the second play moves us to `waiting`.
-    if (hasGambled && mySubmissionsSent === 0) {
-      setSelected([])
-      setMySubmissionsSent(1)
-      return
-    }
-    setPhase('waiting')
-  }, [prompt, selected, send, hasGambled, mySubmissionsSent])
+    sendAction({ type: 'play', cardIds: selected })
+  }, [prompt, selected, sendAction])
 
   // The server sends reveal_start automatically; this is a no-op UI affordance
   const handleStartReveal = useCallback(() => {
@@ -447,10 +539,9 @@ function SessionScreen() {
 
   const handlePickWinner = useCallback(
     (submissionId: string) => {
-      send({ type: 'pick', submissionId })
-      setWinnerId(submissionId)
+      sendAction({ type: 'pick', submissionId })
     },
-    [send],
+    [sendAction],
   )
 
   const handleEliminate = useCallback(
@@ -502,6 +593,16 @@ function SessionScreen() {
       />
 
       <div className="game-wrap">
+        {actionError && (
+          <div role="alert" className="muted">
+            {actionError}
+          </div>
+        )}
+        {pending && (
+          <div role="status" className="muted">
+            Sending…
+          </div>
+        )}
         {scores.length > 0 && <Scoreboard scores={scores} czarId={czarId} />}
 
         {prompt ? (
@@ -535,6 +636,7 @@ function SessionScreen() {
                     winnerId={winnerId}
                     winnerName={winnerName}
                     isCzar={isCzar}
+                    pending={pending !== null}
                     onStartReveal={handleStartReveal}
                     onPickWinner={handlePickWinner}
                     mode={
@@ -571,6 +673,7 @@ function SessionScreen() {
                         className="btn btn-ghost btn-sm"
                         onClick={handleRedraw}
                         data-testid="redraw-btn"
+                        disabled={pending?.type === 'play'}
                       >
                         Redraw (–1 pt)
                       </button>
@@ -580,6 +683,7 @@ function SessionScreen() {
                         className={`btn btn-ghost btn-sm${discardMode ? ' is-armed' : ''}`}
                         onClick={handleToggleDiscardMode}
                         data-testid="discard-btn"
+                        disabled={pending?.type === 'play'}
                       >
                         {discardMode ? 'Tap a card to discard…' : `Discard (${discardsUsed}/3)`}
                       </button>
@@ -589,6 +693,7 @@ function SessionScreen() {
                         className="btn btn-ghost btn-sm"
                         onClick={handleGamble}
                         data-testid="wager-btn"
+                        disabled={pending?.type === 'play'}
                       >
                         Wager 1 pt
                       </button>
@@ -601,6 +706,7 @@ function SessionScreen() {
                   blanks={prompt.pick}
                   onToggle={handleToggle}
                   onSubmit={handleSubmit}
+                  pending={pending?.type === 'play'}
                 />
               </>
             )}

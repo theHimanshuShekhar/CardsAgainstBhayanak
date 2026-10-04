@@ -12,6 +12,7 @@ type Props = {
   // only place the winning player's name is available.
   winnerName: string | null
   isCzar: boolean
+  pending?: boolean
   onStartReveal: () => void
   onPickWinner: (submissionId: string) => void
   // God Is Dead extras. `mode` flips judging vs voting affordances;
@@ -50,6 +51,7 @@ export function SubmissionsGrid({
   winnerId,
   winnerName,
   isCzar,
+  pending = false,
   onStartReveal,
   onPickWinner,
   mode = 'normal',
@@ -129,7 +131,13 @@ export function SubmissionsGrid({
             // is in the czar's working ranking. 0 = unranked.
             const rankOrdinal = isSerious ? myRanking.indexOf(s.submissionId) + 1 : 0
             const clickable =
-              !isGodmode && !isSurvival && !isSerious && isCzar && revealed && winnerId == null
+              !pending &&
+              !isGodmode &&
+              !isSurvival &&
+              !isSerious &&
+              isCzar &&
+              revealed &&
+              winnerId == null
             return s.fills.map((card, fi) => (
               <div
                 key={`${i}-${fi}`}
@@ -149,7 +157,7 @@ export function SubmissionsGrid({
                         <button
                           className={`btn btn-ghost btn-sm vote-btn${iVotedThis ? ' is-armed' : ''}`}
                           data-testid="vote-btn"
-                          disabled={!canVote}
+                          disabled={pending || !canVote}
                           onClick={() => onVote?.(s.submissionId)}
                         >
                           {iVotedThis ? 'Voted' : 'Vote'}

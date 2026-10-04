@@ -756,7 +756,9 @@ export async function playSpectatorReject(base: string): Promise<SpectatorReject
   const peer = await connect(base, code, spec.json.sessionToken, 'watcher')
   const authedOk = peer.events.some((e) => e.type === 'auth_ok')
 
-  send(peer, { type: 'play', cardIds: [] })
+  // Use a structurally valid command so this verifies spectator policy,
+  // rather than the schema rejection for an empty cardIds array.
+  send(peer, { type: 'play', cardIds: ['unowned-card'] })
   const err = await waitFor(peer, 'error', 8_000).then(
     (e) => e,
     () => null,
@@ -973,7 +975,9 @@ async function _playToGameOver(base: string): Promise<{
     let snap: any = null
     for (let i = 0; i < 60 && !snap; i++) {
       await sleep(100)
-      snap = Object.values(peers).find((p) => p.snapshot)?.snapshot
+      // Every submitter needs its own private hand. Waiting for just
+      // the first peer races slower rejoin replies and sends empty plays.
+      if (Object.values(peers).every((p) => p.snapshot)) snap = peers.host!.snapshot
     }
     if (!snap) throw new Error(`no snapshot round ${round}`)
     const czarId = snap.czarId
