@@ -273,3 +273,110 @@ for (const [rule, phase] of [
     }
   })
 }
+
+test('a delayed partial snapshot preserves live reveals from the same round', async ({ page }) => {
+  const room = await startRoom()
+  try {
+    await page.addInitScript((member) => {
+      localStorage.setItem(
+        'cab_session',
+        JSON.stringify({
+          ...member,
+          username: 'Observer',
+          role: 'spectator',
+          anonId: 'privacy-observer',
+        }),
+      )
+      const NativeSocket = window.WebSocket
+      window.WebSocket = class extends NativeSocket {
+        constructor(url: string | URL, protocols?: string | string[]) {
+          super(url, protocols)
+          const boundary = { socket: this, holdNext: false, held: '' }
+          ;(window as unknown as { privacyBoundary: typeof boundary }).privacyBoundary = boundary
+          this.addEventListener('message', (event) => {
+            if (JSON.parse(String(event.data)).type === 'state_snapshot' && boundary.holdNext) {
+              boundary.holdNext = false
+              boundary.held = String(event.data)
+              event.stopImmediatePropagation()
+            }
+          })
+        }
+      }
+    }, room.members[4]!)
+    await page.goto(`/games/${room.members[4]!.roomCode}/session`)
+    await expect(page.locator('.score-chip')).toHaveCount(5)
+    const monitor = room.peers[room.submitters[2]!]!
+    for (const index of room.submitters) await room.play(index)
+    await monitor.wait('card_revealed')
+    await page.evaluate(() => {
+      const boundary = (
+        window as unknown as {
+          privacyBoundary: { socket: WebSocket; holdNext: boolean }
+        }
+      ).privacyBoundary
+      boundary.holdNext = true
+      boundary.socket.send(JSON.stringify({ type: 'rejoin' }))
+    })
+    await expect
+      .poll(
+        () =>
+          page.evaluate(() => {
+            const held = (window as unknown as { privacyBoundary: { held: string } })
+              .privacyBoundary.held
+            return held ? JSON.parse(held).state.revealIndex : null
+          }),
+        { intervals: [5] },
+      )
+      .toBe(1)
+    await expect
+      .poll(() => monitor.events.filter((event) => event.type === 'card_revealed').length, {
+        intervals: [5],
+      })
+      .toBe(2)
+    const pick = room.initial[0]!.prompt.pick
+    await expect(page.locator('.flip-reveal .card-response')).toHaveCount(2 * pick)
+    await page.evaluate(() => {
+      const boundary = (
+        window as unknown as {
+          privacyBoundary: { socket: WebSocket; held: string }
+        }
+      ).privacyBoundary
+      boundary.socket.dispatchEvent(new MessageEvent('message', { data: boundary.held }))
+    })
+    // Drain React's update before checking the known-live second answer.
+    await page.evaluate(
+      () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+    )
+    expect(await page.locator('.flip-reveal .card-response').count()).toBe(2 * pick)
+    await expect(page.locator('.hidden-card')).toHaveCount(pick)
+    await expect(page.locator('.flip-reveal .card-response')).toHaveCount(3 * pick)
+    await expect(page.locator('.hidden-card')).toHaveCount(0)
+    const revealed = monitor.events.filter((event) => event.type === 'card_revealed')
+    for (const event of revealed) {
+      for (const card of event.fills)
+        await expect(page.locator('.subs-grid')).toContainText(card.text)
+    }
+    // Index IDs are reused on the next round. Replaying the old snapshot
+    // must not attach its revealed answers to the new prompt.
+    const after = monitor.events.length
+    room.peers[room.czar]!.send({ type: 'pick', submissionId: '0' })
+    expect((await monitor.wait('round_started', after)).round).toBe(2)
+    await expect(page.locator('.pill').first()).toContainText('Round 2')
+    await page.evaluate(() => {
+      const boundary = (
+        window as unknown as {
+          privacyBoundary: { socket: WebSocket; held: string }
+        }
+      ).privacyBoundary
+      boundary.socket.dispatchEvent(new MessageEvent('message', { data: boundary.held }))
+    })
+    await page.evaluate(
+      () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+    )
+    expect(await page.locator('.pill').first().textContent()).toContain('Round 2')
+    expect(await page.locator('.flip-reveal .card-response').count()).toBe(0)
+  } finally {
+    await page.close()
+    await room.close()
+  }
+})
