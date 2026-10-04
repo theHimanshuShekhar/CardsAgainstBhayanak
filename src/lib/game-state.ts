@@ -432,17 +432,55 @@ export async function setRoundWinner(code: string, winnerId: string): Promise<vo
   await redis.expire(KEYS.round(code), ROOM_TTL_SECONDS)
 }
 
-// Atomic single-writer claim: only the first caller within the current round
-// gets `true`. Subsequent concurrent invocations of pickWinner / castVote /
-// eliminateSubmission / applyRanking short-circuit, preventing double scoring
-// and the racy concurrent endRound that produced 20-card hands.
-export async function claimRoundWinner(code: string, winnerId: string): Promise<boolean> {
-  const ok = await redis.hsetnx(KEYS.round(code), 'winnerId', winnerId)
-  if (ok === 1) {
-    await redis.expire(KEYS.round(code), ROOM_TTL_SECONDS)
-    return true
-  }
-  return false
+// Every terminal mode competes for this same generation-bound claim. Checking
+// phase and identity in Redis prevents a delayed command from claiming a new
+// round after its own round's resolution fields have been cleared.
+const CLAIM_ROUND_OUTCOME_LUA = `
+if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1] then return 0 end
+if redis.call('HGET', KEYS[1], 'phase') ~= ARGV[2] then return 0 end
+if redis.call('HEXISTS', KEYS[1], 'outcomeClaim') == 1 then return 0 end
+redis.call('HSET', KEYS[1], 'outcomeClaim', ARGV[1], 'winnerId', ARGV[3], 'phase', 'transition')
+redis.call('EXPIRE', KEYS[1], ARGV[4])
+return 1
+`
+
+export async function claimRoundOutcome(
+  code: string,
+  roundId: string,
+  phase: GamePhase,
+  winnerId: string,
+): Promise<boolean> {
+  return (
+    (await redis.eval(
+      CLAIM_ROUND_OUTCOME_LUA,
+      1,
+      KEYS.round(code),
+      roundId,
+      phase,
+      winnerId,
+      ROOM_TTL_SECONDS,
+    )) === 1
+  )
+}
+
+const CLAIM_ROUND_COMPLETION_LUA = `
+if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1] then return 0 end
+if redis.call('HGET', KEYS[1], 'outcomeClaim') ~= ARGV[1] then return 0 end
+local ok = redis.call('HSETNX', KEYS[1], 'completionClaim', ARGV[1])
+if ok == 1 then redis.call('EXPIRE', KEYS[1], ARGV[2]) end
+return ok
+`
+
+export async function claimRoundCompletion(code: string, roundId: string): Promise<boolean> {
+  return (
+    (await redis.eval(
+      CLAIM_ROUND_COMPLETION_LUA,
+      1,
+      KEYS.round(code),
+      roundId,
+      ROOM_TTL_SECONDS,
+    )) === 1
+  )
 }
 
 export async function getRoundWinner(code: string): Promise<string | null> {
@@ -468,7 +506,16 @@ export async function getEliminationTurn(code: string): Promise<string | null> {
 // Wipe per-round resolution fields so a fresh round's snapshot doesn't
 // surface the previous round's winner / ranking / elimination turn.
 export async function clearRoundResolution(code: string): Promise<void> {
-  await redis.hdel(KEYS.round(code), 'winnerId', 'ranking', 'eliminationTurnPlayerId')
+  await redis.hdel(
+    KEYS.round(code),
+    'winnerId',
+    'ranking',
+    'eliminationTurnPlayerId',
+    'outcomeClaim',
+    'completionClaim',
+    'voteEpoch',
+    'voteClosed',
+  )
 }
 
 const skippedKey = (code: string) => `${KEYS.round(code)}:skipped`
@@ -484,4 +531,135 @@ export async function getSkippedPlayers(code: string): Promise<string[]> {
 
 export async function clearSkippedPlayers(code: string): Promise<void> {
   await redis.del(skippedKey(code))
+}
+
+// Turn validation, card removal and turn advancement are one operation.
+// A second frame from the old actor cannot remove another submission.
+const ELIMINATE_LUA = `
+if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1] then return nil end
+if redis.call('HGET', KEYS[1], 'phase') ~= 'eliminating' then return nil end
+if redis.call('HGET', KEYS[1], 'eliminationTurnPlayerId') ~= ARGV[2] then return nil end
+local actor = redis.call('HGET', KEYS[3], ARGV[2])
+if not actor then return nil end
+actor = cjson.decode(actor)
+if actor.status ~= 'active' or actor.role ~= 'player' or actor.isRando then return nil end
+local raw = redis.call('HGET', KEYS[2], ARGV[3])
+if not raw then return nil end
+local submission = cjson.decode(raw)
+if submission.eliminated then return nil end
+submission.eliminated = true
+redis.call('HSET', KEYS[2], ARGV[3], cjson.encode(submission))
+redis.call('EXPIRE', KEYS[1], ARGV[5])
+redis.call('EXPIRE', KEYS[2], ARGV[5])
+local remaining = {}
+local entries = redis.call('HGETALL', KEYS[2])
+for i = 1, #entries, 2 do
+  if not cjson.decode(entries[i + 1]).eliminated then table.insert(remaining, entries[i]) end
+end
+if #remaining == 1 then
+  redis.call('HSET', KEYS[1], 'eliminationTurnPlayerId', '')
+  return remaining[1]
+end
+redis.call('HSET', KEYS[1], 'eliminationTurnPlayerId', ARGV[4])
+return ''
+`
+
+export async function commitElimination(
+  code: string,
+  roundId: string,
+  actorId: string,
+  submissionKey: string,
+  nextActorId: string,
+): Promise<string | null> {
+  return (await redis.eval(
+    ELIMINATE_LUA,
+    3,
+    KEYS.round(code),
+    submissionsKey(code),
+    KEYS.players(code),
+    roundId,
+    actorId,
+    submissionKey,
+    nextActorId,
+    ROOM_TTL_SECONDS,
+  )) as string | null
+}
+
+// Register a ballot and close its election in one Redis operation. Only
+// the last accepted ballot can decide a winner or open the next revote.
+const VOTE_LUA = `
+if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1] then return nil end
+if redis.call('HGET', KEYS[1], 'phase') ~= 'waiting' then return nil end
+if (redis.call('HGET', KEYS[1], 'voteEpoch') or '0') ~= ARGV[2] then return nil end
+if redis.call('HEXISTS', KEYS[1], 'voteClosed') == 1 then return nil end
+local actor = redis.call('HGET', KEYS[2], ARGV[3])
+if not actor then return nil end
+actor = cjson.decode(actor)
+if actor.status ~= 'active' or actor.role ~= 'player' or actor.isRando then return nil end
+if ARGV[3] == ARGV[5] then return nil end
+local submission = redis.call('HGET', KEYS[3], ARGV[5])
+if not submission or cjson.decode(submission).eliminated then return nil end
+if redis.call('SADD', KEYS[4], ARGV[3]) == 0 then return nil end
+redis.call('HSET', KEYS[5], ARGV[3], ARGV[4])
+redis.call('HINCRBY', KEYS[6], ARGV[4], 1)
+redis.call('EXPIRE', KEYS[1], ARGV[6])
+for i = 4, 7 do redis.call('EXPIRE', KEYS[i], ARGV[6]) end
+local tally = {}
+local total = 0
+local max = 0
+local entries = redis.call('HGETALL', KEYS[6])
+for i = 1, #entries, 2 do
+  local n = tonumber(entries[i + 1])
+  tally[entries[i]] = n
+  total = total + n
+  if n > max then max = n end
+end
+local voters = 0
+for _, raw in ipairs(redis.call('HVALS', KEYS[2])) do
+  local player = cjson.decode(raw)
+  if player.status == 'active' and player.role == 'player' and not player.isRando then voters = voters + 1 end
+end
+if total < voters then return cjson.encode({tally = tally}) end
+local leaders = {}
+for sid, n in pairs(tally) do if n == max then table.insert(leaders, sid) end end
+local attempts = 0
+if #leaders > 1 then
+  attempts = redis.call('INCR', KEYS[7])
+  redis.call('EXPIRE', KEYS[7], ARGV[6])
+end
+if #leaders > 1 and attempts <= 2 then
+  redis.call('HINCRBY', KEYS[1], 'voteEpoch', 1)
+  redis.call('DEL', KEYS[4], KEYS[5], KEYS[6])
+  return cjson.encode({tally = tally, revote = true})
+end
+redis.call('HSET', KEYS[1], 'voteClosed', '1')
+return cjson.encode({tally = tally, leaders = leaders})
+`
+
+export async function commitVote(
+  code: string,
+  roundId: string,
+  epoch: string,
+  voterId: string,
+  submissionId: string,
+  submissionKey: string,
+): Promise<{ tally: Record<string, number>; leaders?: string[]; revote?: boolean } | null> {
+  const raw = await redis.eval(
+    VOTE_LUA,
+    7,
+    KEYS.round(code),
+    KEYS.players(code),
+    submissionsKey(code),
+    `${KEYS.round(code)}:voters`,
+    `${KEYS.round(code)}:voterchoices`,
+    `${KEYS.round(code)}:votetally`,
+    `${KEYS.round(code)}:tiebreak`,
+    roundId,
+    epoch,
+    voterId,
+    submissionId,
+    submissionKey,
+    ROOM_TTL_SECONDS,
+  )
+  return raw ? JSON.parse(raw as string) : null
 }
