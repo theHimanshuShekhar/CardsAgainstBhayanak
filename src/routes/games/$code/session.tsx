@@ -273,6 +273,7 @@ function SessionScreen() {
         setHostId(event.hostId)
       }
       if (event.type === 'hand_update' && event.playerId === myId) {
+        // Includes round refills; round_end carries only public metadata.
         setHand(event.hand)
         if (event.discardsUsed !== undefined) setDiscardsUsed(event.discardsUsed)
       }
@@ -377,8 +378,6 @@ function SessionScreen() {
       }
       if (event.type === 'round_end') {
         clearPending()
-        const myHand = event.handsRefilled[myId]
-        if (myHand) setHand(myHand)
       }
       // S3-NEW-B: a voided round (czar dropped, or timer expiry with <2
       // submitters) is followed immediately by a fresh round_started from

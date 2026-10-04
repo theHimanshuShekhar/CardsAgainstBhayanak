@@ -877,16 +877,16 @@ export async function endRound(code: string, submitterIds: string[]): Promise<vo
       ? await db.select().from(whiteCards).where(inArray(whiteCards.id, allCardIds))
       : []
   const cardMap = new Map(cardRows.map((c) => [c.id, { id: c.id, text: c.text }]))
-  const handsRefilled: Record<string, Card[]> = {}
+  await state.setPhase(code, 'transition')
   for (const [pid, ids] of Object.entries(rawHands)) {
-    handsRefilled[pid] = ids.map((id) => cardMap.get(id) ?? { id, text: '' })
+    const hand = ids.map((id) => cardMap.get(id) ?? { id, text: '' })
+    await state.publishEvent(code, { type: 'hand_update', playerId: pid, hand })
   }
 
-  await state.setPhase(code, 'transition')
-  await state.publishEvent(code, { type: 'round_end', activatedPlayers: activated, handsRefilled })
+  await state.publishEvent(code, { type: 'round_end', activatedPlayers: activated })
 
   // Hold on the resolved round (winner highlighted via round_won, hands
-  // refilled via round_end) before *anything* that wipes the board —
+  // refilled privately via hand_update) before *anything* that wipes the board —
   // whether that's the next round_started or game_over on the deciding
   // round. Hoisted above the game-over branches so the FINAL round gets
   // the same paced reveal as every other round (it used to skip straight
