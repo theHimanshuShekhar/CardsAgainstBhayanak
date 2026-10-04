@@ -1541,6 +1541,7 @@ export async function applyRanking(code: string, czarId: string, ranking: string
   for (let i = 0; i < ranking.length && i < 3; i++) {
     const sid = ranking[i]!
     const key = keys[i]!
+    const submission = submissions[key]!
     const pid = resolvePlayerId(key)
     const pts = points[i] ?? 1
     scoresDelta[pid] = pts
@@ -1548,9 +1549,9 @@ export async function applyRanking(code: string, czarId: string, ranking: string
     if (player) await state.updatePlayer(code, pid, { score: player.score + pts })
     if (rankedSubmissions.length === 0) {
       topWinnerId = pid
-      topFills = submissions[key].fills
+      topFills = submission.fills
     }
-    rankedSubmissions.push({ ...submissions[key], submissionId: sid, rank: (i + 1) as 1 | 2 | 3 })
+    rankedSubmissions.push({ ...submission, submissionId: sid, rank: (i + 1) as 1 | 2 | 3 })
   }
 
   await state.setRoundRanking(code, rankedSubmissions)
