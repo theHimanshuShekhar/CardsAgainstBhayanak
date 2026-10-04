@@ -784,7 +784,7 @@ async function authorizeCzarResolution(
   code: string,
   playerId: string,
   action: 'pick' | 'rank',
-): Promise<void> {
+): Promise<string> {
   const [[session], player, round, phase] = await Promise.all([
     db.select().from(gameSessions).where(eq(gameSessions.code, code)),
     state.getPlayer(code, playerId),
@@ -811,6 +811,9 @@ async function authorizeCzarResolution(
       : !rules.some((rule) => ['godmode', 'survival', 'serious_business'].includes(rule))
   if (!allowedMode || phase !== (action === 'pick' ? 'judging' : 'ranking'))
     throw new GameCommandError('invalid_state', 'This action is not allowed in the current round')
+  if (!(await state.ensureRoundIdentity(code, round, roundRow.id, roundRow.czarPlayerId)))
+    throw new GameCommandError('invalid_state', 'The round has already advanced')
+  return roundRow.id
 }
 
 export async function pickWinner(
@@ -819,7 +822,7 @@ export async function pickWinner(
   submissionId: string,
   onOutcome?: (accepted: boolean) => void,
 ): Promise<void> {
-  await authorizeCzarResolution(code, czarId, 'pick')
+  const roundId = await authorizeCzarResolution(code, czarId, 'pick')
   const submissions = await state.getSubmissions(code)
   const winnerKey = await resolveSubmissionKey(code, submissionId)
   if (!winnerKey || !submissions[winnerKey])
@@ -831,7 +834,7 @@ export async function pickWinner(
   // async task. Without a single-writer claim, scoring runs twice and
   // endRound interleaves through the non-atomic setHand (del + rpush),
   // producing 20-card hands.
-  const claimed = await state.claimRoundWinner(code, winnerPlayerId)
+  const claimed = await state.claimRoundOutcome(code, roundId, 'judging', winnerPlayerId)
   if (!claimed) {
     onOutcome?.(false)
     return
@@ -863,7 +866,7 @@ export async function pickWinner(
     winnerPlayerId,
     winningFills: submissions[winnerKey]!.fills,
   })
-  await endRound(code, Object.keys(submissions))
+  await endRound(code, Object.keys(submissions), roundId)
 }
 
 // Round outcomes live in Redis during play; the game_rounds row is
@@ -901,7 +904,12 @@ async function persistRoundOutcome(
   await touchSessionActivity(code)
 }
 
-export async function endRound(code: string, submitterIds: string[]): Promise<void> {
+export async function endRound(
+  code: string,
+  submitterIds: string[],
+  roundId: string,
+): Promise<void> {
+  if (!(await state.claimRoundCompletion(code, roundId))) return
   const submissions = await state.getSubmissions(code)
   const allFillIds: string[] = []
   for (const s of Object.values(submissions)) for (const f of s.fills) allFillIds.push(f.id)
@@ -1393,83 +1401,75 @@ async function settleGambles(code: string, winnerPlayerId: string): Promise<numb
   return transfer
 }
 
+// Recovery and runtime commands share missing-only identity hydration so a
+// room already active during deployment can resolve without resetting claims.
+async function currentRoundIdentity(code: string): Promise<string | null> {
+  const persisted = await redis.hget(KEYS.round(code), 'roundId')
+  if (persisted) return persisted
+  const round = await state.getCurrentRound(code)
+  const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
+  if (!session || session.status !== 'active') return null
+  const [row] = await db
+    .select()
+    .from(gameRounds)
+    .where(and(eq(gameRounds.sessionId, session.id), eq(gameRounds.roundNum, round)))
+  if (!row || !(await state.ensureRoundIdentity(code, round, row.id, row.czarPlayerId))) return null
+  return row.id
+}
+
 export async function castVote(
   code: string,
   voterId: string,
   submissionId: string,
   onOutcome?: (accepted: boolean) => void,
 ): Promise<void> {
-  const voteTallyKey = voteTallyKeyFor(code)
-  const tieKey = tieKeyFor(code)
-  const votersKey = votersKeyFor(code)
-
-  // Can't vote for your own submission (God Is Dead house rule).
+  const roundId = await currentRoundIdentity(code)
+  if (!roundId) return
+  const epoch = (await redis.hget(KEYS.round(code), 'voteEpoch')) ?? '0'
+  const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
+  if (
+    !session ||
+    session.status !== 'active' ||
+    !(session.config as GameConfig).rules.includes('godmode')
+  ) {
+    onOutcome?.(false)
+    return
+  }
   const votedKey = await resolveSubmissionKey(code, submissionId)
-  if (!votedKey || resolvePlayerId(votedKey) === voterId) {
+  if (!votedKey) {
     onOutcome?.(false)
     return
   }
-
-  // One vote per player per round.
-  const fresh = await redis.sadd(votersKey, voterId)
-  await redis.expire(votersKey, ROOM_TTL_SECONDS)
-  if (fresh === 0) {
-    onOutcome?.(false)
-    return
-  }
-
-  await redis.hset(voterChoicesKeyFor(code), voterId, submissionId)
-  await redis.expire(voterChoicesKeyFor(code), ROOM_TTL_SECONDS)
-  await redis.hincrby(voteTallyKey, submissionId, 1)
-  await redis.expire(voteTallyKey, ROOM_TTL_SECONDS)
-  onOutcome?.(true)
-
-  const players = await state.getAllPlayers(code)
-  const voters = players.filter((p) => p.status === 'active' && !p.isRando)
-  const submissions = await state.getSubmissions(code)
-
-  const tallyRaw = await redis.hgetall(voteTallyKey)
-  const tally: Record<string, number> = {}
-  for (const [sid, n] of Object.entries(tallyRaw)) tally[sid] = Number(n)
-  const totalVotes = Object.values(tally).reduce((a, b) => a + b, 0)
-
+  // Canonical public IDs make "0" and "00" the same ballot target.
+  const order = await getSubOrder(code)
+  const canonicalId = publicIdForKey(order, votedKey)
+  const result = await state.commitVote(code, roundId, epoch, voterId, canonicalId, votedKey)
+  onOutcome?.(result !== null)
+  if (!result) return
+  const { tally, leaders, revote } = result
   await state.publishEvent(code, { type: 'vote_tally', votes: tally })
-
-  if (totalVotes < voters.length) return
-
-  const maxVotes = Math.max(...Object.values(tally))
-  const leaders = Object.entries(tally)
-    .filter(([, n]) => n === maxVotes)
-    .map(([sid]) => sid)
-
-  if (leaders.length > 1) {
-    // Tied — re-vote up to ×2 before falling back to random (spec: "tie re-vote ×2 then random")
-    const attempts = await redis.incr(tieKey)
-    await redis.expire(tieKey, ROOM_TTL_SECONDS)
-    if (attempts <= 2) {
-      await redis.del(voteTallyKey, votersKey, voterChoicesKeyFor(code))
-      await state.publishEvent(code, { type: 'vote_tally', votes: {} })
-      return
-    }
-    await redis.del(tieKey)
+  if (revote) {
+    await state.publishEvent(code, { type: 'vote_tally', votes: {} })
+    return
   }
-
+  if (!leaders) return
+  const submissions = await state.getSubmissions(code)
   const winnerSubmissionId =
-    leaders.length === 1 ? leaders[0]! : leaders[Math.floor(Math.random() * leaders.length)]!
-
+    leaders.length === 1 ? leaders[0]! : leaders[randomInt(0, leaders.length)]!
   const winnerKey = await resolveSubmissionKey(code, winnerSubmissionId)
   if (!winnerKey) return
   const winnerPlayerId = resolvePlayerId(winnerKey)
 
   const winner = await state.getPlayer(code, winnerPlayerId)
   if (!winner) return
+  if (!(await state.claimRoundOutcome(code, roundId, 'waiting', winnerPlayerId))) return
   const transfer = await settleGambles(code, winnerPlayerId)
   await state.updatePlayer(code, winnerPlayerId, { score: winner.score + 1 + transfer })
 
   const allPlayers = await state.getAllPlayers(code)
   const scores = toPlayerScores(allPlayers, null)
 
-  await state.setRoundWinner(code, winnerPlayerId)
+  // Winner and terminal phase were persisted by the common outcome claim.
   await state.publishEvent(code, {
     type: 'round_won',
     winnerId: winnerPlayerId,
@@ -1481,13 +1481,13 @@ export async function castVote(
     winnerId: winnerPlayerId,
     voteSpread: tally,
   })
-  await redis.del(voteTallyKey)
+  await redis.del(voteTallyKeyFor(code))
   await persistRoundOutcome(code, {
     winnerPlayerId,
     winningFills: submissions[winnerKey]?.fills ?? [],
     voteTally: tally,
   })
-  await endRound(code, Object.keys(submissions))
+  await endRound(code, Object.keys(submissions), roundId)
 }
 
 export async function eliminateSubmission(
@@ -1495,35 +1495,51 @@ export async function eliminateSubmission(
   byPlayerId: string,
   submissionId: string,
 ): Promise<void> {
-  // Only the player whose turn it is may eliminate (Survival).
-  const turnPlayerId = await redis.hget(KEYS.round(code), 'eliminationTurnPlayerId')
-  if (turnPlayerId && byPlayerId !== turnPlayerId) return
-
+  const roundId = await currentRoundIdentity(code)
+  if (!roundId) return
   const submissions = await state.getSubmissions(code)
   const order = await getSubOrder(code)
   const pid = await resolveSubmissionKey(code, submissionId)
   if (!pid || !submissions[pid]) return
-  const updated: Submission = { ...submissions[pid], eliminated: true }
-  await state.setSubmission(code, pid, updated)
-
-  await state.publishEvent(code, { type: 'card_eliminated', submissionId, byPlayerId })
-
-  const remaining = Object.entries(await state.getSubmissions(code)).filter(
-    ([, s]) => !s.eliminated,
+  const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
+  if (
+    !session ||
+    session.status !== 'active' ||
+    !(session.config as GameConfig).rules.includes('survival')
   )
-  if (remaining.length === 1) {
-    const firstRemaining = remaining[0]
-    if (!firstRemaining) return
-    const [winnerKey] = firstRemaining
+    return
+  const [roundRow] = await db
+    .select()
+    .from(gameRounds)
+    .where(eq(gameRounds.sessionId, session.id))
+    .orderBy(desc(gameRounds.roundNum))
+    .limit(1)
+  const czarId = roundRow?.czarPlayerId ?? null
+  const activePlayers = (await state.getAllPlayers(code)).filter(
+    (p) => p.status === 'active' && p.role === 'player' && !p.isRando && p.id !== czarId,
+  )
+  const currentIdx = activePlayers.findIndex((p) => p.id === byPlayerId)
+  const nextPlayer = activePlayers[(currentIdx + 1) % activePlayers.length]
+  const winnerKey = await state.commitElimination(
+    code,
+    roundId,
+    byPlayerId,
+    pid,
+    nextPlayer?.id ?? '',
+  )
+  if (winnerKey === null) return
+  await state.publishEvent(code, { type: 'card_eliminated', submissionId, byPlayerId })
+  if (winnerKey) {
     const winnerPlayerId = resolvePlayerId(winnerKey)
     const winner = await state.getPlayer(code, winnerPlayerId)
     if (!winner) return
+    if (!(await state.claimRoundOutcome(code, roundId, 'eliminating', winnerPlayerId))) return
     const transfer = await settleGambles(code, winnerPlayerId)
     await state.updatePlayer(code, winnerPlayerId, { score: winner.score + 1 + transfer })
 
     const allPlayers = await state.getAllPlayers(code)
     const scores = toPlayerScores(allPlayers, null)
-    await state.setRoundWinner(code, winnerPlayerId)
+    // Winner and terminal phase were persisted by the common outcome claim.
     await state.publishEvent(code, {
       type: 'round_won',
       winnerId: winnerPlayerId,
@@ -1539,36 +1555,14 @@ export async function eliminateSubmission(
       winnerPlayerId,
       winningFills: submissions[winnerKey]?.fills ?? [],
     })
-    await endRound(code, Object.keys(submissions))
-  } else {
-    // Same turn set as checkRoundReady's Survival branch: active, not
-    // rando, not the Czar.
-    const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
-    const [roundRow] = session
-      ? await db
-          .select()
-          .from(gameRounds)
-          .where(eq(gameRounds.sessionId, session.id))
-          .orderBy(desc(gameRounds.roundNum))
-          .limit(1)
-      : []
-    const czarId = roundRow?.czarPlayerId ?? null
-    const activePlayers = (await state.getAllPlayers(code)).filter(
-      (p) => p.status === 'active' && !p.isRando && p.id !== czarId,
-    )
-    const currentIdx = activePlayers.findIndex((p) => p.id === byPlayerId)
-    const nextPlayer = activePlayers[(currentIdx + 1) % activePlayers.length]
-    if (nextPlayer) {
-      // Persist the turn so it survives reconnects, not just broadcast.
-      await redis.hset(KEYS.round(code), 'eliminationTurnPlayerId', nextPlayer.id)
-      await redis.expire(KEYS.round(code), ROOM_TTL_SECONDS)
-      await state.publishEvent(code, { type: 'elimination_turn', playerId: nextPlayer.id })
-    }
+    await endRound(code, Object.keys(submissions), roundId)
+  } else if (nextPlayer) {
+    await state.publishEvent(code, { type: 'elimination_turn', playerId: nextPlayer.id })
   }
 }
 
 export async function applyRanking(code: string, czarId: string, ranking: string[]): Promise<void> {
-  await authorizeCzarResolution(code, czarId, 'rank')
+  const roundId = await authorizeCzarResolution(code, czarId, 'rank')
   const submissions = await state.getSubmissions(code)
   // Validate the entire command before crediting any submission. A stale
   // target in a later podium slot must not leave a partially scored round.
@@ -1580,6 +1574,7 @@ export async function applyRanking(code: string, czarId: string, ranking: string
     new Set(keys).size !== keys.length
   )
     throw new GameCommandError('invalid_state', 'Ranking must use distinct current submissions')
+  if (!(await state.claimRoundOutcome(code, roundId, 'ranking', resolvePlayerId(keys[0]!)))) return
   const points = [3, 2, 1] as const
   const scoresDelta: Record<string, number> = {}
   const rankedSubmissions: Submission[] = []
@@ -1615,7 +1610,7 @@ export async function applyRanking(code: string, czarId: string, ranking: string
     winningFills: topFills,
     ranking: rankedSubmissions,
   })
-  await endRound(code, Object.keys(submissions))
+  await endRound(code, Object.keys(submissions), roundId)
 }
 
 // Push the player's current hand to its owner as a private `hand_update`.
