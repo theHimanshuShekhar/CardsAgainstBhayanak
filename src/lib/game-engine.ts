@@ -3,7 +3,6 @@ import { blackCards, whiteCards, gameSessions, gamePlayers, gameRounds, packs } 
 import { inArray, eq, sql, desc, and } from 'drizzle-orm'
 import { randomInt, shuffle } from './rng'
 import { redis, KEYS, ROOM_TTL_SECONDS } from './redis'
-import { GameCommandError } from './game-command-error'
 import * as state from './game-state'
 import { engineLogger } from './logger'
 import { captureServerEvent, distinctIdFor, distinctIdForHost } from './posthog-server'

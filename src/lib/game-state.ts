@@ -187,6 +187,7 @@ local legacyRound = not storedRoundId
   and redis.call('HGET', KEYS[5], 'currentRound') == ARGV[6]
 local status = redis.call('HGET', KEYS[5], 'status')
 if redis.call('HGET', KEYS[4], 'phase') ~= 'picking'
+  or redis.call('HGET', KEYS[5], 'currentRound') ~= ARGV[6]
   or (storedRoundId ~= ARGV[5] and not legacyRound)
   or (status ~= 'active' and not (legacyRound and status == 'lobby'))
   or redis.call('EXISTS', KEYS[7]) == 1 then return 'phase' end
@@ -224,6 +225,8 @@ if redis.call('HEXISTS', KEYS[1], slot) == 1 then return 'submitted' end
 if legacyRound then
   redis.call('HSET', KEYS[4], 'roundId', ARGV[5], 'czarId', czarId)
   redis.call('HSET', KEYS[5], 'status', 'active')
+  redis.call('EXPIRE', KEYS[4], ARGV[3])
+  redis.call('EXPIRE', KEYS[5], ARGV[3])
 end
 redis.call('HSET', KEYS[1], slot, ARGV[2])
 for _, card in ipairs(submission.fills) do
@@ -329,8 +332,10 @@ export async function ensureRoundIdentity(
     if current and current ~= ARGV[2] then return 0 end
     redis.call('HSETNX', KEYS[2], 'roundId', ARGV[2])
     redis.call('HSETNX', KEYS[2], 'czarId', ARGV[3])
+    redis.call('EXPIRE', KEYS[2], ARGV[4])
     if not current and redis.call('HGET', KEYS[1], 'status') == 'lobby' then
       redis.call('HSET', KEYS[1], 'status', 'active')
+      redis.call('EXPIRE', KEYS[1], ARGV[4])
     end
     return 1
     `,
@@ -340,6 +345,7 @@ export async function ensureRoundIdentity(
     round,
     roundId,
     czarId ?? '',
+    ROOM_TTL_SECONDS,
   )
   return ok === 1
 }

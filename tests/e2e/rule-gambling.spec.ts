@@ -102,8 +102,14 @@ test('Gambling — winner wagers on round 2, submits twice, round resolves', asy
 
   // First play: submit the first `pick` cards. UI must stay in
   // `picking` (hand dock still visible, no waiting screen).
+  const primaryTexts = (
+    await gambler!.page.locator('.hand-card-wrap .card-text').allTextContents()
+  ).slice(0, pick)
   await submitCards(gambler!, pick)
   await expect(gambler!.page.locator('.hand-dock')).toBeVisible({ timeout: 5_000 })
+  await expect(gambler!.page.locator('.hand-card-wrap')).toHaveCount(10)
+  const remainingTexts = await gambler!.page.locator('.hand-card-wrap .card-text').allTextContents()
+  for (const text of primaryTexts) expect(remainingTexts).not.toContain(text)
 
   // Second play: submit the next `pick` cards. Now we move to waiting.
   await submitCards(gambler!, pick)

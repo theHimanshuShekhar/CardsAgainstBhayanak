@@ -298,14 +298,24 @@ for (const playsLast of [true, false]) {
       gambler.send({ type: 'play', cardIds: second, commandId: 'second' })
       gambler.send({
         type: 'play',
-        cardIds: wager
-          .hand!.slice(round.prompt.pick * 2, round.prompt.pick * 3)
-          .map((card) => card.id),
+        cardIds: second,
         commandId: 'second-retry',
       })
       expect(await gambler.outcome('primary-retry')).toMatchObject({ type: 'error' })
-      expect(await gambler.outcome('second')).toMatchObject({ type: 'command_accepted' })
-      expect(await gambler.outcome('second-retry')).toMatchObject({ type: 'error' })
+      const secondOutcomes = await Promise.all([
+        gambler.outcome('second'),
+        gambler.outcome('second-retry'),
+      ])
+      expect(secondOutcomes.filter((event) => event.type === 'command_accepted')).toHaveLength(1)
+      expect(secondOutcomes.filter((event) => event.type === 'error')).toHaveLength(1)
+      gambler.send({
+        type: 'play',
+        cardIds: wager
+          .hand!.slice(round.prompt.pick * 2, round.prompt.pick * 3)
+          .map((card) => card.id),
+        commandId: 'third',
+      })
+      expect(await gambler.outcome('third')).toMatchObject({ type: 'error' })
       if (!playsLast) other.send({ type: 'play', cardIds: otherCards })
       await expect
         .poll(async () => (await gambler.snapshot()).phase, { timeout: 15_000 })

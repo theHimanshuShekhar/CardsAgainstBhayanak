@@ -30,6 +30,7 @@ function SessionScreen() {
   type PendingAction = {
     commandId: string
     type: 'play' | 'vote' | 'pick'
+    cardIds?: string[]
     submissionId?: string
     firstGamble: boolean
   }
@@ -170,6 +171,7 @@ function SessionScreen() {
         const action = pendingRef.current
         clearPending()
         if (action.type === 'play') {
+          setHand((current) => current.filter((card) => !action.cardIds?.includes(card.id)))
           setSelected([])
           setMySubmissionsSent((count) => count + 1)
           if (!action.firstGamble)
@@ -531,6 +533,7 @@ function SessionScreen() {
         type: event.type,
         submissionId: 'submissionId' in event ? event.submissionId : undefined,
         firstGamble: event.type === 'play' && hasGambled && mySubmissionsSent === 0,
+        ...(event.type === 'play' ? { cardIds: event.cardIds } : {}),
       }
       setActionError(null)
       pendingRef.current = action
