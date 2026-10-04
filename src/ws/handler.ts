@@ -47,6 +47,8 @@ type PeerCtx = {
   anonId?: string
   role?: Role
   lastPing: number
+  authenticating?: boolean
+  authSetup?: Promise<void>
 }
 
 async function buildSnapshot(code: string, playerId: string): Promise<SessionState | null> {
@@ -184,18 +186,18 @@ async function buildLobbySnapshot(code: string): Promise<{
 }
 
 const peerContext = new WeakMap<Peer, PeerCtx>()
+// Pending sockets need keepalive enforcement but must never receive room events.
+const openPeers = new Set<Peer>()
 const roomPeers = new Map<string, Set<Peer>>()
 
 export function startKeepaliveEnforcer(): void {
   setInterval(() => {
     const now = Date.now()
-    for (const peers of roomPeers.values()) {
-      for (const peer of peers) {
-        const ctx = peerContext.get(peer)
-        if (ctx && now - ctx.lastPing > TIMING.KEEPALIVE_TIMEOUT_MS) {
-          wsLogger.warn({ code: ctx.code, playerId: ctx.playerId }, 'keepalive timeout, closing')
-          peer.close(1001, 'keepalive timeout')
-        }
+    for (const peer of openPeers) {
+      const ctx = peerContext.get(peer)
+      if (ctx && now - ctx.lastPing > TIMING.KEEPALIVE_TIMEOUT_MS) {
+        wsLogger.warn({ code: ctx.code, playerId: ctx.playerId }, 'keepalive timeout, closing')
+        peer.close(1001, 'keepalive timeout')
       }
     }
   }, TIMING.KEEPALIVE_INTERVAL_MS)
@@ -268,9 +270,7 @@ export const wsHooks = {
       return
     }
     peerContext.set(peer, { code, lastPing: Date.now() })
-    if (!roomPeers.has(code)) roomPeers.set(code, new Set())
-    roomPeers.get(code)!.add(peer)
-    await ensureSubscriber(code)
+    openPeers.add(peer)
     wsLogger.info({ code }, 'peer opened')
   },
 
@@ -280,6 +280,8 @@ export const wsHooks = {
 
     let eventType: ClientToServerEvent['type'] | undefined
     try {
+      if (ctx.authenticating)
+        return send(peer, { type: 'error', code: 'not_authorized', message: 'auth first' })
       let input: unknown
       try {
         input = JSON.parse(msg.text())
@@ -298,25 +300,47 @@ export const wsHooks = {
       if (!ctx.playerId) {
         if (parsed.type !== 'auth')
           return send(peer, { type: 'error', code: 'not_authorized', message: 'auth first' })
+        ctx.authenticating = true
         const auth = await authenticateSocket(ctx.code, parsed)
-        if (!auth.ok)
-          return send(peer, {
+        if (peerContext.get(peer) !== ctx) return
+        if (!auth.ok) {
+          send(peer, {
             type: 'auth_error',
             code: auth.code,
             message: auth.code === 'player_dropped' ? 'player dropped' : 'invalid token',
           })
-        ctx.playerId = auth.playerId
-        ctx.anonId = auth.anonId
+          roomPeers.get(ctx.code)?.delete(peer)
+          openPeers.delete(peer)
+          peerContext.delete(peer)
+          peer.close(1008, 'authentication failed')
+          return
+        }
         // Bind role + clear grace BEFORE acking. The client fires its next
         // message (e.g. `play`) the instant it sees auth_ok; acking first
         // left a window where ctx.role was still undefined and the
         // spectator action guard below was skipped (S2-3).
         const player = await state.getPlayer(ctx.code, auth.playerId)
+        if (peerContext.get(peer) !== ctx) return
+        await ensureSubscriber(ctx.code)
+        // Authentication can finish after a pending socket disconnected.
+        if (peerContext.get(peer) !== ctx) return
+        ctx.playerId = auth.playerId
+        ctx.anonId = auth.anonId
         ctx.role = player?.role
         if (player?.status === 'grace') {
-          await state.updatePlayer(ctx.code, auth.playerId, { status: 'active' })
-          await state.clearGrace(ctx.code, auth.playerId)
+          // close waits for these writes before restoring grace if the
+          // reconnect disconnects while authentication is finishing.
+          ctx.authSetup = (async () => {
+            await state.updatePlayer(ctx.code, auth.playerId, { status: 'active' })
+            await state.clearGrace(ctx.code, auth.playerId)
+          })()
+          await ctx.authSetup
+          if (peerContext.get(peer) !== ctx) return
         }
+        ctx.lastPing = Date.now()
+        if (!roomPeers.has(ctx.code)) roomPeers.set(ctx.code, new Set())
+        roomPeers.get(ctx.code)!.add(peer)
+        ctx.authenticating = false
         send(peer, { type: 'auth_ok' })
         return
       }
@@ -389,6 +413,13 @@ export const wsHooks = {
         'WebSocket command failed',
       )
       send(peer, { type: 'error', code: 'internal_error', message: 'Command failed' })
+      if (ctx.authenticating) {
+        // Setup may have bound the identity before a grace write failed.
+        // Keep commands blocked until close restores grace for that identity.
+        roomPeers.get(ctx.code)?.delete(peer)
+        openPeers.delete(peer)
+        peer.close(1011, 'authentication setup failed')
+      }
       captureServerException(
         ctx.playerId ? await distinctIdFor(ctx.code, ctx.playerId) : ctx.code,
         safeError,
@@ -401,12 +432,16 @@ export const wsHooks = {
   },
 
   async close(peer: Peer) {
+    openPeers.delete(peer)
     const ctx = peerContext.get(peer)
     if (!ctx) return
     roomPeers.get(ctx.code)?.delete(peer)
     peerContext.delete(peer)
 
     if (!ctx.playerId) return
+    // The command handler reports setup failures. They must not prevent
+    // close from restoring grace and releasing the connection.
+    await ctx.authSetup?.catch(() => {})
     const playerId = ctx.playerId
     const code = ctx.code
 
