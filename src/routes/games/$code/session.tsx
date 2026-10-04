@@ -42,6 +42,8 @@ function SessionScreen() {
   }, [])
 
   const [round, setRound] = useState(0)
+  // Update at the socket boundary so queued frames agree on round identity.
+  const roundRef = useRef(0)
   const [phase, setPhase] = useState<GamePhase>('picking')
   const [prompt, setPrompt] = useState<BlackCard | null>(null)
   const [czarId, setCzarId] = useState<string | null>(null)
@@ -97,13 +99,6 @@ function SessionScreen() {
   // `round_ranked` arrives with the full ranking. We display the engine's
   // resolved order in the rank badge by storing it; non-czars need it too.
   const [serverRanking, setServerRanking] = useState<Submission[] | null>(null)
-  // Read inside the socket handler without putting `round` in the effect
-  // deps — re-subscribing mid-game drops WS frames in the cleanup→setup gap.
-  const roundRef = useRef(round)
-  useEffect(() => {
-    roundRef.current = round
-  }, [round])
-
   const myId = session?.playerId ?? ''
   const isCzar = czarId === myId
   const isHost = hostId !== null && hostId === myId
@@ -189,19 +184,41 @@ function SessionScreen() {
         }
       }
       if (event.type === 'state_snapshot') {
+        const s = event.state
+        // A round_started frame may overtake a snapshot being built.
+        // Submission IDs are reused each round; never merge across rounds.
+        if (s.round < roundRef.current) return
+        const sameRound = roundRef.current === 0 || s.round === roundRef.current
+        roundRef.current = s.round
         clearPending()
         // Hydration path: the session WS connects after navigation, so the
         // live game_started/round_started already fired on the lobby socket.
         // The rejoin reply carries the authoritative round state.
-        const s = event.state
         setRound(s.round)
         setPrompt(s.prompt)
         setCzarId(s.czarId)
         setHostId(s.hostId)
         setConfig(s.config)
         setScores(s.scores)
-        setSubmissions(s.submissions)
-        setRevealIndex(s.revealIndex)
+        setSubmissions((current) => {
+          if (!sameRound) return s.submissions
+          const merged = [...s.submissions]
+          // A live reveal can arrive after the snapshot's cursor was read.
+          // Keep those already-public fills when the snapshot has a hidden
+          // slot (or was built before the shuffled slots existed).
+          current.forEach((live, index) => {
+            if (!live?.fills.length) return
+            const incoming = merged[index]
+            if (
+              !incoming ||
+              (incoming.submissionId === live.submissionId && incoming.fills.length === 0)
+            ) {
+              merged[index] = { ...incoming, submissionId: live.submissionId, fills: live.fills }
+            }
+          })
+          return merged
+        })
+        setRevealIndex((current) => (sameRound ? Math.max(current, s.revealIndex) : s.revealIndex))
         setWinnerId(s.winnerId)
         // Snapshot winnerId is a playerId (server's getRoundWinner);
         // resolve its handle from the snapshot scores.
@@ -233,11 +250,18 @@ function SessionScreen() {
                   (s.config.rules.includes('godmode') && s.phase === 'waiting'))
               ? 'reveal'
               : s.phase
-        setPhase(snapshotPhase)
+        setPhase((current) =>
+          sameRound &&
+          current === 'reveal' &&
+          (snapshotPhase === 'picking' || snapshotPhase === 'waiting')
+            ? current
+            : snapshotPhase,
+        )
       }
       if (event.type === 'round_started') {
         clearPending()
         setActionError(null)
+        roundRef.current = event.round
         setRound(event.round)
         setPrompt(event.prompt)
         setCzarId(event.czarId)
@@ -353,7 +377,7 @@ function SessionScreen() {
         setSubmissions([])
       }
       if (event.type === 'card_revealed') {
-        setRevealIndex(event.submissionIndex + 1)
+        setRevealIndex((current) => Math.max(current, event.submissionIndex + 1))
         setSubmissions((prev) => {
           const next = [...prev]
           next[event.submissionIndex] = {
@@ -400,6 +424,7 @@ function SessionScreen() {
         if (event.mode === 'lobby') {
           void navigate({ to: '/games/$code/lobby', params: { code } })
         } else {
+          roundRef.current = 0
           setRound(0)
           setPrompt(null)
           setSelected([])
@@ -630,6 +655,7 @@ function SessionScreen() {
                 {(phase === 'judging' || phase === 'reveal') && (
                   <SubmissionsGrid
                     submissions={submissions}
+                    pickCount={prompt.pick}
                     phase={phase as 'judging' | 'reveal'}
                     revealIndex={revealIndex}
                     winnerId={winnerId}
