@@ -259,7 +259,7 @@ test('vote restores controls on rejection and disconnect, then confirms only the
     // the first slot; the badge groups that slot with any matching fill.
     const own = await submissionVote(page, ownText!)
     await own.click()
-    await expect(page.getByRole('alert')).toHaveText('Action was not accepted. Try again.')
+    await expect(page.getByRole('alert')).toHaveText('This vote is no longer available')
     await expect(page.getByTestId('vote-btn').first()).toBeEnabled()
     await disconnectBeforeClick(page, '[data-testid="vote-btn"]')
     await expect(page.getByRole('alert')).toContainText('Disconnected')

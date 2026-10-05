@@ -601,7 +601,8 @@ export async function clearSkippedPlayers(code: string): Promise<void> {
 const ELIMINATE_LUA = `
 if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1] then return nil end
 if redis.call('HGET', KEYS[1], 'phase') ~= 'eliminating' then return nil end
-if redis.call('HGET', KEYS[1], 'eliminationTurnPlayerId') ~= ARGV[2] then return nil end
+if ARGV[2] == '' or redis.call('HGET', KEYS[1], 'eliminationTurnPlayerId') ~= ARGV[2] then return nil end
+if redis.call('HGET', KEYS[1], 'czarId') == ARGV[2] then return nil end
 local actor = redis.call('HGET', KEYS[3], ARGV[2])
 if not actor then return nil end
 actor = cjson.decode(actor)
