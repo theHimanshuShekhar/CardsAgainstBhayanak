@@ -13,7 +13,7 @@ export const Route = createFileRoute('/api/games/$code/start')({
   server: {
     handlers: {
       POST: async ({ request, params }) => {
-        const auth = await authenticate(request)
+        const auth = await authenticate(request, params.code.toUpperCase())
         if (!auth) return errorResponse(401, 'not_authorized', 'Missing or invalid token')
 
         // S3-1: room codes are stored raw-uppercase; normalize the URL param

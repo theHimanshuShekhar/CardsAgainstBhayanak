@@ -16,7 +16,7 @@ export const Route = createFileRoute('/api/games/$code/reset')({
       // #3: host replays the same room after game_over — 'rematch' starts
       // a fresh game immediately, 'lobby' returns everyone to the lobby.
       POST: async ({ request, params }) => {
-        const auth = await authenticate(request)
+        const auth = await authenticate(request, params.code.toUpperCase())
         if (!auth) return errorResponse(401, 'not_authorized', 'Missing or invalid token')
 
         const code = params.code.toUpperCase()

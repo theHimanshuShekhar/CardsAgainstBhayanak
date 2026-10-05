@@ -619,6 +619,7 @@ export async function reconnectPlayer(code: string, playerId: string): Promise<b
   return Boolean(
     await redis.eval(
       `
+      if not redis.call('HGET', KEYS[4], 'status') then return 0 end
       local raw = redis.call('HGET', KEYS[1], ARGV[1])
       if not raw then return 0 end
       local player = cjson.decode(raw)
@@ -631,10 +632,11 @@ export async function reconnectPlayer(code: string, playerId: string): Promise<b
       redis.call('EXPIRE', KEYS[1], ARGV[2])
       return 1
       `,
-      3,
+      4,
       KEYS.players(code),
       KEYS.grace(code, playerId),
       KEYS.graceConnection(code, playerId),
+      KEYS.game(code),
       playerId,
       ROOM_TTL_SECONDS,
     ),
@@ -650,6 +652,7 @@ export async function disconnectPlayer(
   return Boolean(
     await redis.eval(
       `
+      if not redis.call('HGET', KEYS[4], 'status') then return 0 end
       local raw = redis.call('HGET', KEYS[1], ARGV[1])
       if not raw then return 0 end
       local player = cjson.decode(raw)
@@ -664,10 +667,11 @@ export async function disconnectPlayer(
       redis.call('EXPIRE', KEYS[1], ARGV[4])
       return 1
       `,
-      3,
+      4,
       KEYS.players(code),
       KEYS.grace(code, playerId),
       KEYS.graceConnection(code, playerId),
+      KEYS.game(code),
       playerId,
       deadline,
       ms,
@@ -684,6 +688,7 @@ export async function claimPlayerDrop(
   return Boolean(
     await redis.eval(
       `
+      if not redis.call('HGET', KEYS[4], 'status') then return 0 end
       local raw = redis.call('HGET', KEYS[1], ARGV[1])
       if not raw then return 0 end
       local player = cjson.decode(raw)
@@ -697,10 +702,11 @@ export async function claimPlayerDrop(
       redis.call('PUBLISH', ARGV[4], ARGV[5])
       return 1
       `,
-      3,
+      4,
       KEYS.players(code),
       KEYS.grace(code, playerId),
       KEYS.graceConnection(code, playerId),
+      KEYS.game(code),
       playerId,
       connection ?? '',
       ROOM_TTL_SECONDS,
