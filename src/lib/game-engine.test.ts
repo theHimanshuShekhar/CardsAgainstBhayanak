@@ -1,6 +1,11 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { seedRng } from './rng'
-import { chooseFirstCzar, toPlayerScores, dedupeCardIdsByText } from './game-engine'
+import {
+  chooseFirstCzar,
+  toPlayerScores,
+  dedupeCardIdsByText,
+  chooseVoteWinner,
+} from './game-engine'
 import type { GamePlayer } from './types'
 
 describe('game-engine', () => {
@@ -33,6 +38,18 @@ describe('game-engine', () => {
     for (let i = 0; i < 6; i++) {
       expect(counts[i]).toBeGreaterThan(0)
     }
+  })
+
+  it('a seeded final tied ballot chooses the same submission regardless of tally order', () => {
+    const winners = [
+      ['0', '1', '2'],
+      ['2', '0', '1'],
+      ['1', '2', '0'],
+    ].map((leaders) => {
+      seedRng('final-tie')
+      return chooseVoteWinner(leaders)
+    })
+    expect(winners).toEqual(['2', '2', '2'])
   })
 
   describe('toPlayerScores', () => {

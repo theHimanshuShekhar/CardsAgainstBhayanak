@@ -1,7 +1,7 @@
 import { db } from '~/db'
 import { blackCards, whiteCards, gameSessions, gamePlayers, gameRounds, packs } from '~/db/schema'
 import { inArray, eq, sql, desc, and } from 'drizzle-orm'
-import { randomInt, shuffle } from './rng'
+import { randomInt, shuffle, pick } from './rng'
 import { redis, KEYS, ROOM_TTL_SECONDS } from './redis'
 import * as state from './game-state'
 import { engineLogger } from './logger'
@@ -1397,6 +1397,13 @@ async function currentRoundIdentity(code: string): Promise<string | null> {
   return row.id
 }
 
+// Redis tally iteration has no stable order. Canonical public submission IDs
+// ensure a seeded draw maps to the same candidate for equivalent ballots.
+export function chooseVoteWinner(leaders: string[]): string {
+  const candidates = [...leaders].sort((a, b) => Number(a) - Number(b))
+  return candidates.length === 1 ? candidates[0]! : pick(candidates)
+}
+
 export async function castVote(
   code: string,
   voterId: string,
@@ -1437,8 +1444,7 @@ export async function castVote(
   }
   if (!leaders) return
   const submissions = await state.getSubmissions(code)
-  const winnerSubmissionId =
-    leaders.length === 1 ? leaders[0]! : leaders[randomInt(0, leaders.length)]!
+  const winnerSubmissionId = chooseVoteWinner(leaders)
   const winnerKey = await resolveSubmissionKey(code, winnerSubmissionId)
   if (!winnerKey) return
   const winnerPlayerId = resolvePlayerId(winnerKey)
