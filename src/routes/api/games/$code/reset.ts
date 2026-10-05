@@ -5,10 +5,10 @@ import { authenticate } from '~/lib/api-auth'
 import { errorResponse } from '~/lib/api-helpers'
 import { apiLogger } from '~/lib/logger'
 import { eq } from 'drizzle-orm'
+import { z } from 'zod'
 import * as engine from '~/lib/game-engine'
-import type { ResetMode } from '~/lib/types'
 
-const RESET_MODES: readonly ResetMode[] = ['rematch', 'lobby']
+const ResetRequestSchema = z.object({ mode: z.enum(['rematch', 'lobby']) })
 
 export const Route = createFileRoute('/api/games/$code/reset')({
   server: {
@@ -27,9 +27,10 @@ export const Route = createFileRoute('/api/games/$code/reset')({
         } catch {
           return errorResponse(400, 'internal_error', 'Invalid JSON body')
         }
-        const mode = (body as { mode?: unknown }).mode
-        if (typeof mode !== 'string' || !(RESET_MODES as readonly string[]).includes(mode))
+        const parsed = ResetRequestSchema.safeParse(body)
+        if (!parsed.success)
           return errorResponse(400, 'internal_error', "mode must be 'rematch' or 'lobby'")
+        const { mode } = parsed.data
 
         const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
         if (!session) return errorResponse(404, 'room_not_found', 'Room not found')
@@ -39,7 +40,7 @@ export const Route = createFileRoute('/api/games/$code/reset')({
         if (session.status !== 'ended')
           return errorResponse(409, 'invalid_state', 'Game is not over')
 
-        await engine.resetGame(code, mode as ResetMode)
+        await engine.resetGame(code, mode)
         apiLogger.info({ roomCode: code, mode }, 'game reset')
         return new Response(null, { status: 204 })
       },
