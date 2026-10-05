@@ -7,6 +7,7 @@ import { HandDock } from '~/components/game/HandDock'
 import { SubmissionsGrid } from '~/components/game/SubmissionsGrid'
 import { PromptStage } from '~/components/game/PromptStage'
 import { useSession } from '~/hooks/useSession'
+import { useLeaveGame } from '~/hooks/useLeaveGame'
 import { useGameSocket } from '~/hooks/useGameSocket'
 import type {
   BlackCard,
@@ -26,6 +27,7 @@ function SessionScreen() {
   const navigate = useNavigate()
   const { code } = Route.useParams()
   const { session, setSession } = useSession()
+  const { leaveGame, leaving, leaveError } = useLeaveGame()
 
   type PendingAction = {
     commandId: string
@@ -297,6 +299,9 @@ function SessionScreen() {
       }
       if (event.type === 'host_changed') {
         setHostId(event.hostId)
+      }
+      if (event.type === 'player_left') {
+        setScores((current) => current.filter((player) => player.playerId !== event.playerId))
       }
       if (event.type === 'hand_update' && event.playerId === myId) {
         // Includes round refills; round_end carries only public metadata.
@@ -611,15 +616,21 @@ function SessionScreen() {
             {showHappyEndingTrigger && <HostMenu onEndEarly={handleHappyEnding} />}
             <button
               className="btn btn-ghost btn-sm"
-              onClick={() => navigate({ to: '/games/$code/lobby', params: { code } })}
+              onClick={() => void leaveGame()}
+              disabled={leaving || !session}
             >
-              Leave
+              {leaving ? 'Leaving…' : 'Leave'}
             </button>
           </>
         }
       />
 
       <div className="game-wrap">
+        {leaveError && (
+          <div role="alert" className="muted">
+            {leaveError}
+          </div>
+        )}
         {actionError && (
           <div role="alert" className="muted">
             {actionError}

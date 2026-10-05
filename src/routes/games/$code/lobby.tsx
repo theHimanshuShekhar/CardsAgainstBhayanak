@@ -5,6 +5,7 @@ import { Avatar } from '~/components/ui/Avatar'
 import { GameConfigEditor } from '~/components/game/GameConfigEditor'
 import { formatRoomCode } from '~/lib/code-gen'
 import { useSession } from '~/hooks/useSession'
+import { useLeaveGame } from '~/hooks/useLeaveGame'
 import { useGameSocket } from '~/hooks/useGameSocket'
 import { captureEvent } from '~/lib/posthog-client'
 import type { GameConfig, GamePlayer, Pack } from '~/lib/types'
@@ -17,6 +18,7 @@ function LobbyScreen() {
   const navigate = useNavigate()
   const { code } = Route.useParams()
   const { session, setSession } = useSession()
+  const { leaveGame, leaving, leaveError } = useLeaveGame()
   const formatted = formatRoomCode(code)
 
   const [players, setPlayers] = useState<GamePlayer[]>([])
@@ -145,11 +147,6 @@ function LobbyScreen() {
     captureEvent('cab_room_code_copied', { roomCode: code, format: 'link' })
   }
 
-  async function handleLeave() {
-    setSession(null)
-    void navigate({ to: '/' })
-  }
-
   return (
     <div className="scene">
       <Topbar
@@ -159,13 +156,22 @@ function LobbyScreen() {
               <span className="dot live" />
               Lobby
             </div>
-            <button className="btn btn-ghost btn-sm" onClick={() => void handleLeave()}>
-              Leave
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={() => void leaveGame()}
+              disabled={leaving || !session}
+            >
+              {leaving ? 'Leaving…' : 'Leave'}
             </button>
           </>
         }
       />
       <div className="lobby-wrap fade-in">
+        {leaveError && (
+          <div role="alert" className="muted">
+            {leaveError}
+          </div>
+        )}
         <div className="lobby-hd">
           <div>
             <div className="eyebrow">Waiting for players</div>
