@@ -56,6 +56,27 @@ export async function updatePlayer(
   await redis.eval(UPDATE_PLAYER_LUA, 1, KEYS.players(code), playerId, JSON.stringify(patch))
 }
 
+// Round awards and wager settlement may overlap a legal transition redraw.
+// Apply the delta to the live score so an earlier read cannot undo its cost.
+export async function adjustScore(code: string, playerId: string, delta: number): Promise<void> {
+  await redis.eval(
+    `
+    local raw = redis.call('HGET', KEYS[1], ARGV[1])
+    if not raw then return 0 end
+    local player = cjson.decode(raw)
+    player.score = math.max(0, (player.score or 0) + tonumber(ARGV[2]))
+    redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(player))
+    redis.call('EXPIRE', KEYS[1], ARGV[3])
+    return 1
+    `,
+    1,
+    KEYS.players(code),
+    playerId,
+    delta,
+    ROOM_TTL_SECONDS,
+  )
+}
+
 // Eligibility, wager ownership, and extra-card delivery share the submission
 // commit's Redis boundary. A concurrent play sees either the whole wager or
 // none of it, and cannot have consumed cards restored by a hand replacement.
@@ -177,16 +198,38 @@ export async function pushDeck(
 }
 
 export async function reshuffleWhiteIfLow(code: string, minCards: number): Promise<void> {
-  const deckSize = await redis.llen(KEYS.deckWhite(code))
-  if (deckSize >= minCards) return
-  const discarded = await redis.lrange(KEYS.discardWhite(code), 0, -1)
-  if (discarded.length === 0) return
-  // Shuffle discarded cards back into the white deck
   const { shuffle } = await import('./rng')
-  const reshuffled = shuffle(discarded)
-  await redis.del(KEYS.discardWhite(code))
-  await redis.rpush(KEYS.deckWhite(code), ...reshuffled)
-  await redis.expire(KEYS.deckWhite(code), ROOM_TTL_SECONDS)
+  while (true) {
+    if ((await redis.llen(KEYS.deckWhite(code))) >= minCards) return
+    const discarded = await redis.lrange(KEYS.discardWhite(code), 0, -1)
+    if (discarded.length === 0) return
+    // Keep the seeded shuffle, but never delete discards added since its
+    // snapshot (for example, by a legal transition redraw).
+    const committed = await redis.eval(
+      `
+      if redis.call('LLEN', KEYS[1]) >= tonumber(ARGV[1]) then return 1 end
+      local expected = cjson.decode(ARGV[2])
+      local current = redis.call('LRANGE', KEYS[2], 0, -1)
+      if #expected ~= #current then return 0 end
+      for i, id in ipairs(current) do
+        if expected[i] ~= id then return 0 end
+      end
+      local shuffled = cjson.decode(ARGV[3])
+      redis.call('DEL', KEYS[2])
+      for _, id in ipairs(shuffled) do redis.call('RPUSH', KEYS[1], id) end
+      redis.call('EXPIRE', KEYS[1], ARGV[4])
+      return 1
+      `,
+      2,
+      KEYS.deckWhite(code),
+      KEYS.discardWhite(code),
+      minCards,
+      JSON.stringify(discarded),
+      JSON.stringify(shuffle(discarded)),
+      ROOM_TTL_SECONDS,
+    )
+    if (committed === 1) return
+  }
 }
 
 export async function drawCards(
@@ -228,6 +271,147 @@ export async function setHand(code: string, playerId: string, cardIds: string[])
 
 export async function getHand(code: string, playerId: string): Promise<string[]> {
   return await redis.lrange(KEYS.hand(code, playerId), 0, -1)
+}
+
+// Returning submitted cards must preserve a concurrent redraw's live hand.
+export async function appendToHand(code: string, playerId: string, ids: string[]): Promise<void> {
+  if (ids.length === 0) return
+  await redis
+    .multi()
+    .rpush(KEYS.hand(code, playerId), ...ids)
+    .expire(KEYS.hand(code, playerId), ROOM_TTL_SECONDS)
+    .exec()
+}
+
+// Packing Heat draws append to the live hand, sharing redraw's card boundary.
+export async function drawToHand(code: string, playerId: string, count: number): Promise<void> {
+  await redis.eval(
+    `
+    for i = 1, tonumber(ARGV[1]) do
+      local id = redis.call('LPOP', KEYS[1])
+      if not id then break end
+      redis.call('RPUSH', KEYS[2], id)
+    end
+    redis.call('EXPIRE', KEYS[1], ARGV[2])
+    redis.call('EXPIRE', KEYS[2], ARGV[2])
+    `,
+    2,
+    KEYS.deckWhite(code),
+    KEYS.hand(code, playerId),
+    count,
+    ROOM_TTL_SECONDS,
+  )
+}
+
+// Top up the live hand without replacing surviving cards read before a
+// concurrent redraw. Card movement and the size check share one boundary.
+export async function refillHand(code: string, playerId: string, size: number): Promise<void> {
+  await redis.eval(
+    `
+    local needed = tonumber(ARGV[1]) - redis.call('LLEN', KEYS[1])
+    for i = 1, needed do
+      local id = redis.call('LPOP', KEYS[2])
+      if not id then break end
+      redis.call('RPUSH', KEYS[1], id)
+    end
+    redis.call('EXPIRE', KEYS[1], ARGV[2])
+    redis.call('EXPIRE', KEYS[2], ARGV[2])
+    return 1
+    `,
+    2,
+    KEYS.hand(code, playerId),
+    KEYS.deckWhite(code),
+    size,
+    ROOM_TTL_SECONDS,
+  )
+}
+
+// Validate the live room/player and exchange the entire hand in the same
+// operation as the point debit. Submission and wager commits use these
+// same keys, so no request can restore or discard a stale copy of the hand.
+const REDRAW_LUA = `
+local phase = redis.call('HGET', KEYS[2], 'phase')
+if redis.call('HGET', KEYS[1], 'status') ~= 'active'
+  or (phase ~= 'picking' and phase ~= 'transition') then return 'phase' end
+local config = cjson.decode(redis.call('HGET', KEYS[1], 'config') or '{}')
+local enabled = false
+for _, rule in ipairs(config.rules or {}) do
+  if rule == 'rebooting' then enabled = true end
+end
+if not enabled then return 'rule' end
+local player = cjson.decode(redis.call('HGET', KEYS[3], ARGV[1]) or '{}')
+if player.role == 'spectator' then return 'spectator' end
+if player.role ~= 'player' or player.status ~= 'active' or player.isRando then return 'actor' end
+if (player.score or 0) < 1 then return 'score' end
+if redis.call('LLEN', KEYS[5]) < 10 then return 'deck' end
+local old = redis.call('LRANGE', KEYS[4], 0, -1)
+player.score = player.score - 1
+redis.call('HSET', KEYS[3], ARGV[1], cjson.encode(player))
+for _, id in ipairs(old) do redis.call('RPUSH', KEYS[6], id) end
+redis.call('DEL', KEYS[4])
+for i = 1, 10 do redis.call('RPUSH', KEYS[4], redis.call('LPOP', KEYS[5])) end
+for i = 1, 6 do redis.call('EXPIRE', KEYS[i], ARGV[2]) end
+return 1
+`
+
+export async function commitRedraw(code: string, playerId: string): Promise<void> {
+  const result = await redis.eval(
+    REDRAW_LUA,
+    6,
+    KEYS.game(code),
+    KEYS.round(code),
+    KEYS.players(code),
+    KEYS.hand(code, playerId),
+    KEYS.deckWhite(code),
+    KEYS.discardWhite(code),
+    playerId,
+    ROOM_TTL_SECONDS,
+  )
+  if (result === 'spectator')
+    throw new GameCommandError('spectator_action', 'Spectators cannot redraw')
+  if (result === 'actor')
+    throw new GameCommandError('not_authorized', 'Only active players can redraw')
+  if (result === 'score')
+    throw new GameCommandError('score_too_low', 'You need an Awesome Point to redraw')
+  if (result !== 1)
+    throw new GameCommandError('invalid_state', 'Redraw is not available in this round')
+}
+
+// Hydration queries may complete out of order. Publish only while this is
+// still the authoritative hand/counter; callers retry with the latest state.
+const PUBLISH_HAND_IF_CURRENT_LUA = `
+local player = cjson.decode(redis.call('HGET', KEYS[1], ARGV[1]) or '{}')
+if (player.discardsUsed or 0) ~= tonumber(ARGV[3]) then return 0 end
+local expected = cjson.decode(ARGV[2])
+local current = redis.call('LRANGE', KEYS[2], 0, -1)
+if #expected ~= #current then return 0 end
+for i, id in ipairs(current) do
+  if expected[i] ~= id then return 0 end
+end
+redis.call('PUBLISH', ARGV[4], ARGV[5])
+return 1
+`
+
+export async function publishHandUpdateIfCurrent(
+  code: string,
+  playerId: string,
+  ids: string[],
+  discardsUsed: number,
+  event: unknown,
+): Promise<boolean> {
+  return (
+    (await redis.eval(
+      PUBLISH_HAND_IF_CURRENT_LUA,
+      2,
+      KEYS.players(code),
+      KEYS.hand(code, playerId),
+      playerId,
+      JSON.stringify(ids),
+      discardsUsed,
+      KEYS.channel(code),
+      JSON.stringify(event),
+    )) === 1
+  )
 }
 
 export async function removeFromHand(
