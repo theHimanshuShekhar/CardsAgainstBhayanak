@@ -1308,13 +1308,10 @@ export async function dropPlayer(
   code: string,
   playerId: string,
   reason: 'grace' | 'leave',
+  connection?: string,
 ): Promise<void> {
-  const player = await state.getPlayer(code, playerId)
-  if (!player || player.status === 'dropped') return
-
-  await state.updatePlayer(code, playerId, { status: 'dropped' })
+  if (!(await state.claimPlayerDrop(code, playerId, connection))) return
   await touchSessionActivity(code)
-  await state.publishEvent(code, { type: 'player_left', playerId })
   captureServerEvent(await distinctIdFor(code, playerId), 'cab_player_dropped', {
     roomCode: code,
     playerId,
