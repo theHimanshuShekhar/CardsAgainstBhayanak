@@ -85,6 +85,7 @@ Client clears `cab_session` on **explicit Leave button**, on **"Go home" from th
 - **CSRF:** Not required. `sessionToken` lives in `localStorage` and is sent via `Authorization: Bearer` header (not cookies). Same-origin policy + bearer token = no CSRF attack surface.
 - **Token replay (accepted risk):** Tokens are HMAC-bound to `playerId` for 24h. If leaked (e.g. shared screenshot, browser extension), an attacker can impersonate that player until the room expires. This is acceptable for a party game's threat model; not worth adding rotation or IP-binding which would break mobile users on flaky networks.
 - **Rate limiting:** Per-IP sliding-window limits using Redis: `10 join attempts/min/IP`, `5 game-create attempts/hour/IP`, `60 WS messages/min/connection`. Exceeding returns HTTP 429 / WS `error` with code `rate_limited`. Cloudflare's WAF provides upstream DDoS protection; app-level limits handle abuse from legitimate clients.
+  - HTTP client identity uses the socket peer. Only immediate peers explicitly listed in `CAB_TRUSTED_PROXY_IPS` may supply a validated `CF-Connecting-IP`; the allowlist defaults to empty. Missing/invalid CF identity falls back to the socket peer. Equivalent IPv6/IPv4-mapped spellings share budgets. `X-Forwarded-For` and `Forwarded` are ignored. Trusted ingress must overwrite incoming CF identity and restrict access through trusted peers; see README for the host/Docker NAT trust boundary.
 
 ---
 
@@ -963,7 +964,7 @@ services:
   redis: # valkey/valkey:8-alpine (pinned major), AOF enabled, named volume, healthcheck
 ```
 
-Cloudflare Tunnel runs **outside** the Compose stack — user manages it independently on the host. The app container exposes port 3000 to the host; `cloudflared` on the host (systemd unit or separate container) accesses the app at `http://localhost:3000`.
+Cloudflare Tunnel runs **outside** the Compose stack — user manages it independently on the host. The app container publishes port 3000 on host loopback; `cloudflared` on the host accesses the app at `http://localhost:3000`. A separately managed tunnel container may instead reach the app on a restricted Docker network. Explicitly configure `CAB_TRUSTED_PROXY_IPS` for the immediate tunnel peer as observed by the app socket (host Docker NAT may present the bridge gateway).
 
 ### Dockerfile (multi-stage)
 
@@ -972,23 +973,25 @@ Cloudflare Tunnel runs **outside** the Compose stack — user manages it indepen
 
 ### Environment variables
 
-| Var                        | Purpose                                                          |
-| -------------------------- | ---------------------------------------------------------------- |
-| `DATABASE_URL`             | Postgres connection string                                       |
-| `REDIS_URL`                | Redis/Valkey connection string                                   |
-| `SESSION_SECRET`           | HMAC secret for sessionToken                                     |
-| `PORT`                     | App port (default 3000)                                          |
-| `NODE_ENV`                 | `development` \| `production`                                    |
-| `AXIOM_TOKEN`              | API token for Axiom log shipping (prod only)                     |
-| `AXIOM_DATASET`            | Axiom dataset name (default `cab-prod`)                          |
-| `POSTHOG_API_KEY`          | PostHog project API key (public; used by both client and server) |
-| `POSTHOG_HOST`             | PostHog host (default `https://us.i.posthog.com`)                |
-| `POSTHOG_PERSONAL_API_KEY` | PostHog personal API key (build-time only, for sourcemap upload) |
-| `CAB_RNG_SEED`             | Seedable PRNG seed (tests only; unset in prod = crypto-seeded)   |
+| Var                        | Purpose                                                                       |
+| -------------------------- | ----------------------------------------------------------------------------- |
+| `DATABASE_URL`             | Postgres connection string                                                    |
+| `REDIS_URL`                | Redis/Valkey connection string                                                |
+| `SESSION_SECRET`           | HMAC secret for sessionToken                                                  |
+| `PORT`                     | App port (default 3000)                                                       |
+| `APP_BIND_IP`              | Compose host bind address (default `127.0.0.1`)                               |
+| `CAB_TRUSTED_PROXY_IPS`    | Literal immediate tunnel peer IP allowlist, comma-separated; empty by default |
+| `NODE_ENV`                 | `development` \| `production`                                                 |
+| `AXIOM_TOKEN`              | API token for Axiom log shipping (prod only)                                  |
+| `AXIOM_DATASET`            | Axiom dataset name (default `cab-prod`)                                       |
+| `POSTHOG_API_KEY`          | PostHog project API key (public; used by both client and server)              |
+| `POSTHOG_HOST`             | PostHog host (default `https://us.i.posthog.com`)                             |
+| `POSTHOG_PERSONAL_API_KEY` | PostHog personal API key (build-time only, for sourcemap upload)              |
+| `CAB_RNG_SEED`             | Seedable PRNG seed (tests only; unset in prod = crypto-seeded)                |
 
 ### Notes
 
-- App port binding: default `ports: ["3000:3000"]` in compose exposes the app to the host's network interface — **firewall the port or bind to loopback only (`127.0.0.1:3000:3000`)** to avoid public exposure. With Cloudflare Tunnel running on the host, `127.0.0.1:3000:3000` is the safer choice; otherwise the app is reachable on the host's public IP.
+- App port binding defaults to `127.0.0.1:3000:3000`; `APP_BIND_IP` may override it for an intentionally restricted ingress network. Allowlisting a host/NAT gateway trusts all traffic originating through that peer, so restrict local/network access and require ingress to overwrite `CF-Connecting-IP`.
 - Cloudflare Tunnel natively proxies WebSocket upgrades — no special config needed on the app side.
 - A single `docker-compose.yml` is used for dev and prod; production settings (`restart: unless-stopped`, memory limits — app: 512M, postgres: 1G, redis: 256M — and `NODE_ENV=production`) are applied via environment overrides rather than a separate `docker-compose.prod.yml`
 - Health checks: postgres `pg_isready`, redis `redis-cli ping`, app `GET /healthz` (returns 200 with `{ db, redis, activeGames, uptime }` or 503 if any dependency is down)

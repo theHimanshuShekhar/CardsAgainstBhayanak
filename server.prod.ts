@@ -10,6 +10,9 @@ import { serve } from 'srvx'
 import { plugin as ws } from 'crossws/server'
 import tssServer from './dist/server/server.js'
 import { wsHooks } from './src/ws/handler'
+// Validate the ingress allowlist before listening, including when API route
+// chunks have not yet been loaded by the SSR handler.
+import './src/lib/client-identity.server'
 
 const port = Number(process.env['PORT'] ?? 3000)
 
