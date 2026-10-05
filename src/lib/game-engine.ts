@@ -1719,20 +1719,14 @@ export async function confessDiscard(
   playerId: string,
   cardId: string,
 ): Promise<void> {
-  const player = await state.getPlayer(code, playerId)
-  if (!player || player.discardsUsed >= 3) return
-  await state.removeFromHand(code, playerId, [cardId])
-  await state.discardCards(code, 'white', [cardId])
-  const replacement = await state.drawCards(code, 'white', 1)
-  if (replacement.length > 0) {
-    const current = await state.getHand(code, playerId)
-    await state.setHand(code, playerId, [...current, ...replacement])
-  }
-  const newDiscardsUsed = player.discardsUsed + 1
-  await state.updatePlayer(code, playerId, { discardsUsed: newDiscardsUsed })
-  // The new card replaces the discarded one in the player's hand; the
-  // discardsUsed echo lets the client disable the button at 3 without
-  // tracking its own counter.
+  const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
+  if (
+    !session ||
+    session.status !== 'active' ||
+    !(session.config as GameConfig).rules.includes('never_have_i_ever')
+  )
+    throw new GameCommandError('invalid_state', 'Confession discards are not enabled')
+  await state.commitConfession(code, playerId, cardId)
   await publishHandUpdate(code, playerId)
   captureServerEvent(await distinctIdFor(code, playerId), 'cab_rule_triggered', {
     roomCode: code,

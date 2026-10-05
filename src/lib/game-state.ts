@@ -377,6 +377,63 @@ export async function commitRedraw(code: string, playerId: string): Promise<void
     throw new GameCommandError('invalid_state', 'Redraw is not available in this round')
 }
 
+// Confession eligibility and the replacement share one Redis commit with
+// submissions/redraws. Failed requests leave every card and allowance intact.
+const COMMIT_CONFESSION_LUA = `
+local player = cjson.decode(redis.call('HGET', KEYS[1], ARGV[1]) or '{}')
+if player.role == 'spectator' then return 'spectator' end
+if player.role ~= 'player' or player.status ~= 'active' or player.isRando then return 'actor' end
+local config = cjson.decode(redis.call('HGET', KEYS[2], 'config') or '{}')
+local enabled = false
+for _, rule in ipairs(config.rules or {}) do
+  if rule == 'never_have_i_ever' then enabled = true end
+end
+local phase = redis.call('HGET', KEYS[3], 'phase')
+if not enabled or redis.call('HGET', KEYS[2], 'status') ~= 'active'
+  or (phase ~= 'picking' and phase ~= 'transition') then return 'phase' end
+if (player.discardsUsed or 0) >= 3 then return 'allowance' end
+local owned = false
+for _, id in ipairs(redis.call('LRANGE', KEYS[4], 0, -1)) do
+  if id == ARGV[2] then owned = true end
+end
+if not owned then return 'card' end
+if redis.call('LLEN', KEYS[5]) < 1 then return 'deck' end
+player.discardsUsed = (player.discardsUsed or 0) + 1
+redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(player))
+redis.call('LREM', KEYS[4], 1, ARGV[2])
+redis.call('RPUSH', KEYS[6], ARGV[2])
+redis.call('RPUSH', KEYS[4], redis.call('LPOP', KEYS[5]))
+for i = 1, 6 do redis.call('EXPIRE', KEYS[i], ARGV[3]) end
+return player.discardsUsed
+`
+
+export async function commitConfession(
+  code: string,
+  playerId: string,
+  cardId: string,
+): Promise<number> {
+  const result = await redis.eval(
+    COMMIT_CONFESSION_LUA,
+    6,
+    KEYS.players(code),
+    KEYS.game(code),
+    KEYS.round(code),
+    KEYS.hand(code, playerId),
+    KEYS.deckWhite(code),
+    KEYS.discardWhite(code),
+    playerId,
+    cardId,
+    ROOM_TTL_SECONDS,
+  )
+  if (result === 'spectator')
+    throw new GameCommandError('spectator_action', 'Spectators cannot discard cards')
+  if (result === 'actor')
+    throw new GameCommandError('not_authorized', 'Only active players can discard cards')
+  if (typeof result !== 'number')
+    throw new GameCommandError('invalid_state', 'This card cannot be discarded now')
+  return result
+}
+
 // Hydration queries may complete out of order. Publish only while this is
 // still the authoritative hand/counter; callers retry with the latest state.
 const PUBLISH_HAND_IF_CURRENT_LUA = `
