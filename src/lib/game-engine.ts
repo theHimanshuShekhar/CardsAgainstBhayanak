@@ -1424,7 +1424,7 @@ export async function castVote(
   onOutcome?: (accepted: boolean) => void,
 ): Promise<void> {
   const roundId = await currentRoundIdentity(code)
-  if (!roundId) return
+  if (!roundId) throw new GameCommandError('invalid_state', 'No active round')
   const epoch = (await redis.hget(KEYS.round(code), 'voteEpoch')) ?? '0'
   const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
   if (
@@ -1432,20 +1432,23 @@ export async function castVote(
     session.status !== 'active' ||
     !(session.config as GameConfig).rules.includes('godmode')
   ) {
-    onOutcome?.(false)
-    return
+    throw new GameCommandError('invalid_state', 'Voting requires an active God Is Dead round')
   }
+  if ((await state.getPhase(code)) !== 'waiting')
+    throw new GameCommandError('invalid_state', 'The round is not accepting votes')
+  const voter = await state.getPlayer(code, voterId)
+  if (!voter || voter.status !== 'active' || voter.role !== 'player' || voter.isRando)
+    throw new GameCommandError('not_authorized', 'Only active players can vote')
   const votedKey = await resolveSubmissionKey(code, submissionId)
   if (!votedKey) {
-    onOutcome?.(false)
-    return
+    throw new GameCommandError('invalid_state', 'Choose a current submission')
   }
   // Canonical public IDs make "0" and "00" the same ballot target.
   const order = await getSubOrder(code)
   const canonicalId = publicIdForKey(order, votedKey)
   const result = await state.commitVote(code, roundId, epoch, voterId, canonicalId, votedKey)
-  onOutcome?.(result !== null)
-  if (!result) return
+  if (!result) throw new GameCommandError('invalid_state', 'This vote is no longer available')
+  onOutcome?.(true)
   const { tally, leaders, revote } = result
   await state.publishEvent(code, { type: 'vote_tally', votes: tally })
   if (revote) {
@@ -1496,29 +1499,35 @@ export async function eliminateSubmission(
   submissionId: string,
 ): Promise<void> {
   const roundId = await currentRoundIdentity(code)
-  if (!roundId) return
+  if (!roundId) throw new GameCommandError('invalid_state', 'No active round')
   const submissions = await state.getSubmissions(code)
   const order = await getSubOrder(code)
   const pid = await resolveSubmissionKey(code, submissionId)
-  if (!pid || !submissions[pid]) return
+  if (!pid || !submissions[pid])
+    throw new GameCommandError('invalid_state', 'Choose a current submission')
   const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
   if (
     !session ||
     session.status !== 'active' ||
     !(session.config as GameConfig).rules.includes('survival')
   )
-    return
+    throw new GameCommandError('invalid_state', 'Elimination requires an active Survival round')
+  if ((await state.getPhase(code)) !== 'eliminating')
+    throw new GameCommandError('invalid_state', 'The round is not accepting eliminations')
+  const turn = await state.getEliminationTurn(code)
+  if (!turn) throw new GameCommandError('invalid_state', 'No current elimination turn')
   const [roundRow] = await db
     .select()
     .from(gameRounds)
-    .where(eq(gameRounds.sessionId, session.id))
-    .orderBy(desc(gameRounds.roundNum))
-    .limit(1)
-  const czarId = roundRow?.czarPlayerId ?? null
+    .where(and(eq(gameRounds.sessionId, session.id), eq(gameRounds.id, roundId)))
+  if (!roundRow) throw new GameCommandError('invalid_state', 'No current round')
+  const czarId = roundRow.czarPlayerId
   const activePlayers = (await state.getAllPlayers(code)).filter(
     (p) => p.status === 'active' && p.role === 'player' && !p.isRando && p.id !== czarId,
   )
   const currentIdx = activePlayers.findIndex((p) => p.id === byPlayerId)
+  if (currentIdx < 0 || turn !== byPlayerId)
+    throw new GameCommandError('not_authorized', 'Only the current active eliminator can act')
   const nextPlayer = activePlayers[(currentIdx + 1) % activePlayers.length]
   const winnerKey = await state.commitElimination(
     code,
@@ -1527,7 +1536,8 @@ export async function eliminateSubmission(
     pid,
     nextPlayer?.id ?? '',
   )
-  if (winnerKey === null) return
+  if (winnerKey === null)
+    throw new GameCommandError('invalid_state', 'This elimination is no longer available')
   await state.publishEvent(code, { type: 'card_eliminated', submissionId, byPlayerId })
   if (winnerKey) {
     const winnerPlayerId = resolvePlayerId(winnerKey)
