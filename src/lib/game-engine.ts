@@ -1657,25 +1657,30 @@ async function broadcastScores(code: string): Promise<void> {
   await state.publishEvent(code, { type: 'scores_update', scores })
 }
 
-async function publishHandUpdate(
-  code: string,
-  playerId: string,
-  opts: { discardsUsed?: number } = {},
-): Promise<void> {
-  const ids = await state.getHand(code, playerId)
-  const rows = ids.length
-    ? await db.select().from(whiteCards).where(inArray(whiteCards.id, ids))
-    : []
-  const hand: Card[] = ids.map((id) => {
-    const c = rows.find((x) => x.id === id)
-    return c ? { id: c.id, text: c.text } : { id, text: '' }
-  })
-  await state.publishEvent(code, {
-    type: 'hand_update',
-    playerId,
-    hand,
-    ...(opts.discardsUsed !== undefined ? { discardsUsed: opts.discardsUsed } : {}),
-  })
+async function publishHandUpdate(code: string, playerId: string): Promise<void> {
+  while (true) {
+    const [ids, player] = await Promise.all([
+      state.getHand(code, playerId),
+      state.getPlayer(code, playerId),
+    ])
+    if (!player) return
+    const rows = ids.length
+      ? await db.select().from(whiteCards).where(inArray(whiteCards.id, ids))
+      : []
+    const hand: Card[] = ids.map((id) => {
+      const c = rows.find((x) => x.id === id)
+      return c ? { id: c.id, text: c.text } : { id, text: '' }
+    })
+    if (
+      await state.publishHandUpdateIfCurrent(code, playerId, ids, player.discardsUsed, {
+        type: 'hand_update',
+        playerId,
+        hand,
+        discardsUsed: player.discardsUsed,
+      })
+    )
+      return
+  }
 }
 
 export async function gamble(code: string, playerId: string): Promise<void> {
@@ -1737,21 +1742,15 @@ export async function confessDiscard(
   playerId: string,
   cardId: string,
 ): Promise<void> {
-  const player = await state.getPlayer(code, playerId)
-  if (!player || player.discardsUsed >= 3) return
-  await state.removeFromHand(code, playerId, [cardId])
-  await state.discardCards(code, 'white', [cardId])
-  const replacement = await state.drawCards(code, 'white', 1)
-  if (replacement.length > 0) {
-    const current = await state.getHand(code, playerId)
-    await state.setHand(code, playerId, [...current, ...replacement])
-  }
-  const newDiscardsUsed = player.discardsUsed + 1
-  await state.updatePlayer(code, playerId, { discardsUsed: newDiscardsUsed })
-  // The new card replaces the discarded one in the player's hand; the
-  // discardsUsed echo lets the client disable the button at 3 without
-  // tracking its own counter.
-  await publishHandUpdate(code, playerId, { discardsUsed: newDiscardsUsed })
+  const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
+  if (
+    !session ||
+    session.status !== 'active' ||
+    !(session.config as GameConfig).rules.includes('never_have_i_ever')
+  )
+    throw new GameCommandError('invalid_state', 'Confession discards are not enabled')
+  await state.commitConfession(code, playerId, cardId)
+  await publishHandUpdate(code, playerId)
   captureServerEvent(await distinctIdFor(code, playerId), 'cab_rule_triggered', {
     roomCode: code,
     playerId,
