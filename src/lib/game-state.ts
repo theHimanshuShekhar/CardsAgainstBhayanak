@@ -56,28 +56,91 @@ export async function updatePlayer(
   await redis.eval(UPDATE_PLAYER_LUA, 1, KEYS.players(code), playerId, JSON.stringify(patch))
 }
 
-// Atomic compare-and-set guard for `gamble`. The bare flow read player
-// → check `hasGambled` → drawCards → setHand → updatePlayer({ hasGambled:
-// true }) has a wide read-modify-write window: a second WS frame (e.g. a
-// double-click or a click that races a hand_update repaint) sneaks in
-// between read and write, both calls pass the guard, both deal cards →
-// hand grows by 2× pick instead of pick. The Lua flip is single-threaded,
-// so only the first caller's CAS commits; the duplicate sees `hasGambled
-// = true` and bails before drawing.
+// Eligibility, wager ownership, and extra-card delivery share the submission
+// commit's Redis boundary. A concurrent play sees either the whole wager or
+// none of it, and cannot have consumed cards restored by a hand replacement.
 const CLAIM_GAMBLE_LUA = `
-local cur = redis.call('HGET', KEYS[1], ARGV[1])
-if not cur then return 0 end
-local obj = cjson.decode(cur)
-if obj.hasGambled then return 0 end
-if (obj.score or 0) < 1 then return 0 end
+local storedRoundId = redis.call('HGET', KEYS[3], 'roundId')
+if redis.call('HGET', KEYS[2], 'status') ~= 'active'
+  or redis.call('HGET', KEYS[2], 'currentRound') ~= ARGV[3]
+  or tonumber(ARGV[3]) < 2
+  or (storedRoundId and storedRoundId ~= ARGV[2])
+  or redis.call('HGET', KEYS[3], 'phase') ~= 'picking'
+  or redis.call('EXISTS', KEYS[8]) == 1 then return 'phase' end
+local expiresAt = tonumber(redis.call('HGET', KEYS[3], 'roundTimerExpiresAt'))
+if expiresAt then
+  local now = redis.call('TIME')
+  if tonumber(now[1]) * 1000 + tonumber(now[2]) / 1000 >= expiresAt then return 'phase' end
+end
+local config = cjson.decode(redis.call('HGET', KEYS[2], 'config') or '{}')
+for _, rule in ipairs(config.rules or {}) do
+  if rule == 'godmode' or rule == 'survival' or rule == 'serious_business' then return 'mode' end
+end
+local obj = cjson.decode(redis.call('HGET', KEYS[1], ARGV[1]) or '{}')
+if obj.role == 'spectator' then return 'spectator' end
+local czarId = redis.call('HGET', KEYS[3], 'czarId') or ARGV[4]
+if obj.role ~= 'player' or obj.status ~= 'active' or obj.isRando
+  or ARGV[1] == czarId
+  or redis.call('SISMEMBER', KEYS[7], ARGV[1]) == 1 then return 'actor' end
+if obj.hasGambled then return 'duplicate' end
+if redis.call('HEXISTS', KEYS[4], ARGV[1]) == 1
+  or redis.call('HEXISTS', KEYS[4], ARGV[1] .. ':gamble') == 1 then return 'submitted' end
+if (obj.score or 0) < 1 then return 'score' end
+local pick = tonumber(ARGV[5])
+if redis.call('LLEN', KEYS[5]) < pick then return 'deck' end
 obj.hasGambled = true
 redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(obj))
+for i = 1, pick do
+  redis.call('RPUSH', KEYS[6], redis.call('LPOP', KEYS[5]))
+end
+redis.call('HSETNX', KEYS[3], 'roundId', ARGV[2])
+redis.call('HSETNX', KEYS[3], 'czarId', ARGV[4])
+for i = 1, 3 do redis.call('EXPIRE', KEYS[i], ARGV[6]) end
+redis.call('EXPIRE', KEYS[5], ARGV[6])
+redis.call('EXPIRE', KEYS[6], ARGV[6])
 return 1
 `
 
-export async function claimGamble(code: string, playerId: string): Promise<boolean> {
-  const r = await redis.eval(CLAIM_GAMBLE_LUA, 1, KEYS.players(code), playerId)
-  return r === 1
+export async function claimGamble(
+  code: string,
+  playerId: string,
+  roundId: string,
+  round: number,
+  czarId: string | null,
+  pick: number,
+): Promise<void> {
+  const result = await redis.eval(
+    CLAIM_GAMBLE_LUA,
+    8,
+    KEYS.players(code),
+    KEYS.game(code),
+    KEYS.round(code),
+    submissionsKey(code),
+    KEYS.deckWhite(code),
+    KEYS.hand(code, playerId),
+    skippedKey(code),
+    `${KEYS.round(code)}:resolving`,
+    playerId,
+    roundId,
+    round,
+    czarId ?? '',
+    pick,
+    ROOM_TTL_SECONDS,
+  )
+  if (result === 'spectator')
+    throw new GameCommandError('spectator_action', 'Spectators cannot wager')
+  if (result === 'actor')
+    throw new GameCommandError('not_authorized', 'You cannot wager in this round')
+  if (result === 'score')
+    throw new GameCommandError('score_too_low', 'You need an Awesome Point to wager')
+  if (result === 'mode')
+    throw new GameCommandError('invalid_state', 'Gambling requires normal mode')
+  if (result === 'duplicate')
+    throw new GameCommandError('invalid_state', 'You already wagered this round')
+  if (result === 'submitted')
+    throw new GameCommandError('invalid_state', 'Wager before submitting cards')
+  if (result !== 1)
+    throw new GameCommandError('invalid_state', 'This round is not accepting wagers')
 }
 
 export async function getAllPlayers(code: string): Promise<GamePlayer[]> {

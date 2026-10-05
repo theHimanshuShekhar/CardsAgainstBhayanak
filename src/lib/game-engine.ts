@@ -162,7 +162,13 @@ export async function startGame(code: string): Promise<void> {
     .update(gameSessions)
     .set({ status: 'active', lastActivityAt: new Date() })
     .where(eq(gameSessions.id, session.id))
-  await redis.hset(KEYS.game(code), 'status', 'active')
+  // Lobby edits live in PostgreSQL. Freeze that authoritative config in
+  // Redis before accepting game actions that validate rules atomically.
+  await redis
+    .multi()
+    .hset(KEYS.game(code), { status: 'active', config: JSON.stringify(config) })
+    .expire(KEYS.game(code), ROOM_TTL_SECONDS)
+    .exec()
 
   engineLogger.info({ code, firstCzarIdx, players: activePlayers.length }, 'game started')
 }
@@ -1673,37 +1679,25 @@ async function publishHandUpdate(
 }
 
 export async function gamble(code: string, playerId: string): Promise<void> {
-  // Atomically flip hasGambled=true (also gates score ≥ 1). A duplicate
-  // gamble frame — double-click, or a second click that races the first
-  // `hand_update` round-trip — would otherwise both read hasGambled=false
-  // and each deal `black.pick` extra cards, doubling the hand. The Lua
-  // CAS commits exactly once per round per player; eligibility (score)
-  // and the wager debit live where they did before (settleGambles).
-  const claimed = await state.claimGamble(code, playerId)
-  if (!claimed) return
-
+  const round = await state.getCurrentRound(code)
   const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
-  if (!session) return
+  if (!session || session.status !== 'active')
+    throw new GameCommandError('invalid_state', 'No active round')
+  const rules = (session.config as GameConfig).rules
+  if (rules.some((rule) => ['godmode', 'survival', 'serious_business'].includes(rule)))
+    throw new GameCommandError('invalid_state', 'Gambling requires normal mode')
   const [roundRow] = await db
     .select()
     .from(gameRounds)
-    .where(eq(gameRounds.sessionId, session.id))
-    .orderBy(desc(gameRounds.roundNum))
-    .limit(1)
-  if (!roundRow) return
+    .where(and(eq(gameRounds.sessionId, session.id), eq(gameRounds.roundNum, round)))
+  if (!roundRow) throw new GameCommandError('invalid_state', 'No active round')
   const [black] = await db.select().from(blackCards).where(eq(blackCards.id, roundRow.blackCardId))
-  if (!black) return
+  if (!black) throw new GameCommandError('invalid_state', 'No active prompt')
 
-  // hasGambled was set atomically by claimGamble above. The wagered point
-  // is debited at round resolution (settleGambles), not here, so a voided
-  // round leaves the wager intact.
-  const extra = await state.drawCards(code, 'white', black.pick)
-  if (extra.length > 0) {
-    const current = await state.getHand(code, playerId)
-    const next = [...current, ...extra]
-    await state.setHand(code, playerId, next)
-    await publishHandUpdate(code, playerId)
-  }
+  // The point remains reserved until settlement so voided rounds keep it.
+  // Drawing and appending here atomically also protects a simultaneous play.
+  await state.claimGamble(code, playerId, roundRow.id, round, roundRow.czarPlayerId, black.pick)
+  await publishHandUpdate(code, playerId)
   await state.publishEvent(code, { type: 'player_gambled', playerId })
   const gamblerDistinctId = await distinctIdFor(code, playerId)
   captureServerEvent(gamblerDistinctId, 'cab_gambled', {
