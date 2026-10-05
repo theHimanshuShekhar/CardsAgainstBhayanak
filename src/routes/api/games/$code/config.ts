@@ -5,8 +5,11 @@ import { authenticate } from '~/lib/api-auth'
 import { GameConfigSchema, conflictingModalRules, errorResponse } from '~/lib/api-helpers'
 import { apiLogger } from '~/lib/logger'
 import { eq, and, sql } from 'drizzle-orm'
+import { z } from 'zod'
 import * as state from '~/lib/game-state'
 import type { SessionStatus } from '~/lib/types'
+
+const ConfigRequestSchema = z.object({ config: GameConfigSchema })
 
 export const Route = createFileRoute('/api/games/$code/config')({
   server: {
@@ -25,11 +28,12 @@ export const Route = createFileRoute('/api/games/$code/config')({
         } catch {
           return errorResponse(400, 'internal_error', 'Invalid JSON body')
         }
-        const parsed = GameConfigSchema.safeParse((body as { config?: unknown }).config)
+        const parsed = ConfigRequestSchema.safeParse(body)
         if (!parsed.success)
           return errorResponse(400, 'internal_error', 'Invalid config', parsed.error.flatten())
+        const config = parsed.data.config
 
-        const activeModal = conflictingModalRules(parsed.data.rules)
+        const activeModal = conflictingModalRules(config.rules)
         if (activeModal.length > 1)
           return errorResponse(
             400,
@@ -61,24 +65,24 @@ export const Route = createFileRoute('/api/games/$code/config')({
             ),
           )
         const rosterSize = Number(activePlayers?.cnt ?? 0)
-        if (parsed.data.maxPlayers < rosterSize)
+        if (config.maxPlayers < rosterSize)
           return errorResponse(
             409,
             'invalid_state',
             `Cannot set maxPlayers below current roster (${rosterSize})`,
-            { rosterSize, requested: parsed.data.maxPlayers },
+            { rosterSize, requested: config.maxPlayers },
           )
 
         await db
           .update(gameSessions)
-          .set({ config: parsed.data, lastActivityAt: new Date() })
+          .set({ config, lastActivityAt: new Date() })
           .where(eq(gameSessions.id, session.id))
 
         // Refresh every connected lobby client with the new config.
         await state.publishEvent(code, {
           type: 'lobby_snapshot',
           players: await state.getAllPlayers(code),
-          config: parsed.data,
+          config,
           gameStatus: session.status as SessionStatus,
         })
 
