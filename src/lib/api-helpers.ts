@@ -13,14 +13,6 @@ export function errorResponse(
   })
 }
 
-export function getClientIp(request: Request): string {
-  return (
-    request.headers.get('cf-connecting-ip') ??
-    request.headers.get('x-forwarded-for')?.split(',')[0] ??
-    'unknown'
-  )
-}
-
 export const GameConfigSchema = z.object({
   maxPlayers: z.number().int().min(3).max(10),
   roundsToWin: z.number().int().min(3).max(20),

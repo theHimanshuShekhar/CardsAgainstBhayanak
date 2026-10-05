@@ -71,6 +71,8 @@ services:
       # let prod fall back to a known default.
       SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set, 32+ chars (see .env.example)}
       PORT: ${PORT:-3000}
+      # Trust only explicitly identified cloudflared transport peers.
+      CAB_TRUSTED_PROXY_IPS: ${CAB_TRUSTED_PROXY_IPS:-}
       # Prod-only image: default to production so a Dockhand deploy that
       # omits NODE_ENV still enforces rate limiting (enforceRateLimit gates
       # on 'production'). Local dev uses `pnpm dev`, not this compose.
@@ -81,7 +83,8 @@ services:
       POSTHOG_API_KEY: ${POSTHOG_API_KEY:-}
       POSTHOG_HOST: ${POSTHOG_HOST:-https://us.i.posthog.com}
     ports:
-      - '${PORT:-3000}:${PORT:-3000}'
+      # The external host tunnel reaches localhost; don't publish to the LAN.
+      - '${APP_BIND_IP:-127.0.0.1}:${PORT:-3000}:${PORT:-3000}'
     healthcheck:
       # N-6: busybox `wget` reports the container unhealthy even on HTTP 200.
       # Node is in the app image and respects the configured PORT.
