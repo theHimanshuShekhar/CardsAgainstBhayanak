@@ -848,10 +848,8 @@ export async function pickWinner(
 
   const winner = await state.getPlayer(code, winnerPlayerId)
   if (!winner) throw new Error('winner not found')
-  // Read winner score before settling so the failed-gambler debits (which
-  // skip the winner) don't race the winner's own credit.
   const transfer = await settleGambles(code, winnerPlayerId)
-  await state.updatePlayer(code, winnerPlayerId, { score: winner.score + 1 + transfer })
+  await state.adjustScore(code, winnerPlayerId, 1 + transfer)
   onOutcome?.(true)
 
   const players = await state.getAllPlayers(code)
@@ -928,20 +926,7 @@ export async function endRound(
   // Resolve to unique real playerIds (strip ':gamble' keys)
   const realSubmitterIds = [...new Set(submitterIds.map(resolvePlayerId))]
 
-  // Track raw card ID arrays per player, hydrate to Card objects after all draws
-  const rawHands: Record<string, string[]> = {}
-  for (const pid of realSubmitterIds) {
-    const current = await state.getHand(code, pid)
-    const needed = 10 - current.length
-    if (needed > 0) {
-      const drawn = await state.drawCards(code, 'white', needed)
-      const newHand = [...current, ...drawn]
-      await state.setHand(code, pid, newHand)
-      rawHands[pid] = newHand
-    } else {
-      rawHands[pid] = current
-    }
-  }
+  for (const pid of realSubmitterIds) await state.refillHand(code, pid, 10)
 
   await state.clearSubmissions(code)
   await redis.del(
@@ -965,24 +950,12 @@ export async function endRound(
       await state.updatePlayer(code, p.id, { status: 'active' })
       await state.appendCzarOrder(code, p.id)
       activated.push(p.id)
-      const dealt = await state.drawCards(code, 'white', 10)
-      await state.setHand(code, p.id, dealt)
-      rawHands[p.id] = dealt
+      await state.refillHand(code, p.id, 10)
     }
   }
 
-  // Hydrate all card IDs → Card objects in one batch query
-  const allCardIds = [...new Set(Object.values(rawHands).flat())]
-  const cardRows =
-    allCardIds.length > 0
-      ? await db.select().from(whiteCards).where(inArray(whiteCards.id, allCardIds))
-      : []
-  const cardMap = new Map(cardRows.map((c) => [c.id, { id: c.id, text: c.text }]))
   await state.setPhase(code, 'transition')
-  for (const [pid, ids] of Object.entries(rawHands)) {
-    const hand = ids.map((id) => cardMap.get(id) ?? { id, text: '' })
-    await state.publishEvent(code, { type: 'hand_update', playerId: pid, hand })
-  }
+  for (const pid of [...realSubmitterIds, ...activated]) await publishHandUpdate(code, pid)
 
   await state.publishEvent(code, { type: 'round_end', activatedPlayers: activated })
 
@@ -1186,8 +1159,12 @@ async function returnRoundCards(code: string, blackCardId: string): Promise<void
     const pid = resolvePlayerId(key)
     const p = await state.getPlayer(code, pid)
     if (!p || p.isRando) continue
-    const current = await state.getHand(code, pid)
-    await state.setHand(code, pid, [...current, ...sub.fills.map((f) => f.id)])
+    await state.appendToHand(
+      code,
+      pid,
+      sub.fills.map((f) => f.id),
+    )
+    await publishHandUpdate(code, pid)
   }
   await state.discardCards(code, 'black', [blackCardId])
 }
@@ -1401,7 +1378,7 @@ async function settleGambles(code: string, winnerPlayerId: string): Promise<numb
   let transfer = 0
   for (const p of players) {
     if (!p.hasGambled || p.id === winnerPlayerId) continue
-    await state.updatePlayer(code, p.id, { score: Math.max(0, p.score - 1) })
+    await state.adjustScore(code, p.id, -1)
     transfer += 1
   }
   return transfer
@@ -1473,7 +1450,7 @@ export async function castVote(
   if (!winner) return
   if (!(await state.claimRoundOutcome(code, roundId, 'waiting', winnerPlayerId))) return
   const transfer = await settleGambles(code, winnerPlayerId)
-  await state.updatePlayer(code, winnerPlayerId, { score: winner.score + 1 + transfer })
+  await state.adjustScore(code, winnerPlayerId, 1 + transfer)
 
   const allPlayers = await state.getAllPlayers(code)
   const scores = toPlayerScores(allPlayers, null)
@@ -1551,7 +1528,7 @@ export async function eliminateSubmission(
     if (!winner) return
     if (!(await state.claimRoundOutcome(code, roundId, 'eliminating', winnerPlayerId))) return
     const transfer = await settleGambles(code, winnerPlayerId)
-    await state.updatePlayer(code, winnerPlayerId, { score: winner.score + 1 + transfer })
+    await state.adjustScore(code, winnerPlayerId, 1 + transfer)
 
     const allPlayers = await state.getAllPlayers(code)
     const scores = toPlayerScores(allPlayers, null)
@@ -1607,7 +1584,7 @@ export async function applyRanking(code: string, czarId: string, ranking: string
     const pts = points[i] ?? 1
     scoresDelta[pid] = pts
     const player = await state.getPlayer(code, pid)
-    if (player) await state.updatePlayer(code, pid, { score: player.score + pts })
+    if (player) await state.adjustScore(code, pid, pts)
     if (rankedSubmissions.length === 0) {
       topWinnerId = pid
       topFills = submission.fills
@@ -1718,13 +1695,13 @@ export async function gamble(code: string, playerId: string): Promise<void> {
 }
 
 export async function redraw(code: string, playerId: string): Promise<void> {
-  const player = await state.getPlayer(code, playerId)
-  if (!player || player.score < 1) return
-  await state.updatePlayer(code, playerId, { score: player.score - 1 })
-  const hand = await state.getHand(code, playerId)
-  await state.discardCards(code, 'white', hand)
-  const newCards = await state.drawCards(code, 'white', 10)
-  await state.setHand(code, playerId, newCards)
+  const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
+  if (!session || !(session.config as GameConfig).rules.includes('rebooting'))
+    throw new GameCommandError('invalid_state', 'Rebooting is not enabled')
+  const phase = await state.getPhase(code)
+  if (session.status !== 'active' || (phase !== 'picking' && phase !== 'transition'))
+    throw new GameCommandError('invalid_state', 'Redraw is not allowed in this phase')
+  await state.commitRedraw(code, playerId)
   // The hand_update lets the redrawing player render the fresh ten;
   // scores_update propagates the -1 deduction to every scoreboard so
   // the Redraw button's own enable check (score ≥ 1) self-throttles.
@@ -1760,19 +1737,8 @@ export async function confessDiscard(
 
 export async function applyPackingHeat(code: string, playerIds: string[]): Promise<void> {
   for (const pid of playerIds) {
-    const extra = await state.drawCards(code, 'white', 1)
-    if (extra.length === 0) continue
-    const current = await state.getHand(code, pid)
-    const newIds = [...current, ...extra]
-    await state.setHand(code, pid, newIds)
-    // Push the +1 hand to the owning player (round_started can't carry
-    // per-player hands; the handler routes hand_update privately).
-    const rows = await db.select().from(whiteCards).where(inArray(whiteCards.id, newIds))
-    const hand: Card[] = newIds.map((id) => {
-      const c = rows.find((x) => x.id === id)
-      return c ? { id: c.id, text: c.text } : { id, text: '' }
-    })
-    await state.publishEvent(code, { type: 'hand_update', playerId: pid, hand })
+    await state.drawToHand(code, pid, 1)
+    await publishHandUpdate(code, pid)
   }
 }
 

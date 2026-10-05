@@ -405,3 +405,51 @@ test('a confession racing a play cannot replace a submitted card or restore any 
     peers.forEach((peer) => peer.ws.close())
   }
 })
+
+test('a confession on the round result survives the transition refill and the next round', async () => {
+  const { peers, players, czar } = await game()
+  try {
+    const actor = players[0]!
+    const before = await actor.snapshot()
+    const discarded = before.hand![before.prompt.pick]!.id
+    const winningCard = before.hand![0]!.id
+    for (const peer of players) {
+      const hand = await peer.snapshot()
+      peer.send({
+        type: 'play',
+        cardIds: hand.hand!.slice(0, hand.prompt.pick).map((card) => card.id),
+      })
+    }
+    await expect
+      .poll(async () => (await actor.snapshot()).phase, { timeout: 15_000 })
+      .toBe('judging')
+    const judging = await actor.snapshot()
+    const winning = judging.submissions.find(
+      (submission) => submission.fills[0]!.id === winningCard,
+    )!
+    const start = actor.events.length
+    actor.ws.addEventListener('message', (event) => {
+      if (JSON.parse(String(event.data)).type === 'round_won')
+        actor.send({ type: 'confess_discard', cardId: discarded })
+    })
+    czar.send({ type: 'pick', submissionId: winning.submissionId })
+    await expect
+      .poll(() =>
+        actor.events
+          .slice(start)
+          .find((event) => event.type === 'hand_update' && event.discardsUsed === 1),
+      )
+      .toBeTruthy()
+    await actor.wait('round_started', start)
+    const after = await actor.snapshot()
+    expect(after.round).toBe(2)
+    expect(after.myDiscardsUsed).toBe(1)
+    expect(after.hand).toHaveLength(10)
+    expect(after.hand!.some((card) => card.id === discarded)).toBe(false)
+    expect(after.hand!.some((card) => card.id === winningCard)).toBe(false)
+    const updates = actor.events.slice(start).filter((event) => event.type === 'hand_update')
+    expect(updates.at(-1)).toMatchObject({ hand: after.hand, discardsUsed: 1 })
+  } finally {
+    peers.forEach((peer) => peer.ws.close())
+  }
+})
