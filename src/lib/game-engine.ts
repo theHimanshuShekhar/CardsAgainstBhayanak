@@ -162,7 +162,13 @@ export async function startGame(code: string): Promise<void> {
     .update(gameSessions)
     .set({ status: 'active', lastActivityAt: new Date() })
     .where(eq(gameSessions.id, session.id))
-  await redis.hset(KEYS.game(code), 'status', 'active')
+  // Lobby edits live in PostgreSQL. Freeze that authoritative config in
+  // Redis before accepting game actions that validate rules atomically.
+  await redis
+    .multi()
+    .hset(KEYS.game(code), { status: 'active', config: JSON.stringify(config) })
+    .expire(KEYS.game(code), ROOM_TTL_SECONDS)
+    .exec()
 
   engineLogger.info({ code, firstCzarIdx, players: activePlayers.length }, 'game started')
 }

@@ -62,7 +62,7 @@ async function connect(member: Member) {
   return peer
 }
 
-async function game(rules: RuleId[] = [], count = 3) {
+async function game(rules: RuleId[] = [], count = 3, updatedRules?: RuleId[]) {
   const { packs } = (await (await fetch(BASE + '/api/packs')).json()) as {
     packs: { id: string; name: string }[]
   }
@@ -74,6 +74,25 @@ async function game(rules: RuleId[] = [], count = 3) {
   })
   expect(response.status).toBe(201)
   const host = (await response.json()) as Member
+  if (updatedRules) {
+    const updated = await fetch(`${BASE}/api/games/${host.roomCode}/config`, {
+      method: 'PATCH',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${host.sessionToken}`,
+      },
+      body: JSON.stringify({
+        config: {
+          maxPlayers: 10,
+          roundsToWin: 5,
+          timer: 'Off',
+          packs: [pack.id],
+          rules: updatedRules,
+        },
+      }),
+    })
+    expect(updated.status).toBe(204)
+  }
   const members = [host]
   for (let index = 1; index < count; index++)
     members.push(await join(host.roomCode, `Player${index}`))
@@ -102,8 +121,12 @@ test('round one rejects wagers without changing cards or wager eligibility', asy
   }
 })
 
-async function secondRound(rules: RuleId[] = []) {
-  const initial = await game(rules, rules.includes('serious_business') ? 4 : 3)
+async function secondRound(rules: RuleId[] = [], createdRules?: RuleId[]) {
+  const initial = await game(
+    createdRules ?? rules,
+    rules.includes('serious_business') ? 4 : 3,
+    createdRules ? rules : undefined,
+  )
   const { peers, czar } = initial
   const actor = peers[(peers.indexOf(czar) + 2) % peers.length]!
   const winningHand = await actor.snapshot()
@@ -391,6 +414,24 @@ test('paused sessions, stale rounds, expired timers and skipped players reject w
   } finally {
     await redis.quit()
     await sql.end()
+    peers.forEach((peer) => peer.ws.close())
+  }
+})
+
+test('removing a modal rule in the lobby allows a legal wager in the resulting normal game', async () => {
+  const { peers, actor } = await secondRound([], ['godmode'])
+  try {
+    const before = await actor.snapshot()
+    expect(before.config.rules).toEqual([])
+    expect(before.scores.find((score) => score.playerId === actor.member.playerId)?.score).toBe(1)
+    const start = actor.events.length
+    actor.send({ type: 'gamble' })
+    await actor.wait('player_gambled', start)
+    const after = await actor.snapshot()
+    expect(after.myHasGambled).toBe(true)
+    expect(after.hand).toHaveLength(10 + before.prompt.pick)
+    expect(after.hand!.slice(0, 10)).toEqual(before.hand)
+  } finally {
     peers.forEach((peer) => peer.ws.close())
   }
 })
