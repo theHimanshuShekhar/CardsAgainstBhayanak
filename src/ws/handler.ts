@@ -586,8 +586,13 @@ export const wsHooks = {
     // Grace window: drop only if the player never reconnected (auth
     // flips 'grace' → 'active'). dropPlayer runs the void/migrate/pause
     // path and is idempotent.
-    setTimeout(async () => {
-      if (!hasOtherSocket()) await engine.dropPlayer(code, playerId, 'grace', deadline)
+    setTimeout(() => {
+      if (!hasOtherSocket()) {
+        void engine.dropPlayer(code, playerId, 'grace', deadline).catch((err) => {
+          if (err instanceof GameCommandError && err.code === 'invalid_token') return
+          wsLogger.error({ err: sanitizeServerException(err), code, playerId }, 'grace drop failed')
+        })
+      }
     }, TIMING.GRACE_WINDOW_MS + 100)
 
     wsLogger.info({ code, playerId }, 'peer closed')

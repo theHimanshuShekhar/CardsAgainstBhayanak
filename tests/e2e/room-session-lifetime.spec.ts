@@ -1,5 +1,7 @@
 import { test, expect } from '@playwright/test'
 import Redis from 'ioredis'
+import postgres from 'postgres'
+import { request as httpRequest } from 'node:http'
 import type { ClientToServerEvent, GameConfig, ServerToClientEvent } from '../../src/lib/types'
 
 const BASE = process.env['CAB_E2E_BASE'] ?? 'http://localhost:3000'
@@ -227,3 +229,105 @@ test('a valid token cannot operate on another room over HTTP or WebSocket', asyn
     peer.ws.close()
   }
 })
+
+for (const action of ['config', 'reset'] as const) {
+  for (const revoke of ['expiry', 'leave'] as const) {
+    test(`HTTP ${action} rejects ${revoke} while its request body is pending`, async () => {
+      const { member, config } = await create()
+      if (action === 'reset') {
+        // Fixture: an ended room keeps its host eligible for Play again.
+        const sql = postgres(process.env['DATABASE_URL']!, { max: 1 })
+        await sql`update game_sessions set status = 'ended' where code = ${member.roomCode}`
+        await sql.end()
+      }
+      const body = JSON.stringify(
+        action === 'config' ? { config: { ...config, roundsToWin: 3 } } : { mode: 'lobby' },
+      )
+      const pending = httpRequest(`${BASE}/api/games/${member.roomCode}/${action}`, {
+        method: action === 'config' ? 'PATCH' : 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${member.sessionToken}`,
+          'content-length': Buffer.byteLength(body),
+        },
+      })
+      const response = new Promise<number>((resolve, reject) => {
+        pending.once('response', (res) => {
+          res.resume()
+          resolve(res.statusCode!)
+        })
+        pending.once('error', reject)
+      })
+      pending.write(body.slice(0, 1))
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      if (revoke === 'expiry') {
+        const redis = new Redis(process.env['REDIS_URL']!)
+        await redis.pexpire(`game:${member.roomCode}`, 1)
+        await expect.poll(() => redis.exists(`game:${member.roomCode}`)).toBe(0)
+        await redis.quit()
+      } else {
+        expect((await request(member, 'leave')).status).toBe(204)
+      }
+      pending.end(body.slice(1))
+      expect(await response).toBe(401)
+      expect((await request(member, 'config', { config })).status).toBe(401)
+    })
+  }
+}
+
+for (const revoke of ['expiry', 'membership'] as const) {
+  test(`pending WebSocket happy ending cannot restore ${revoke}`, async () => {
+    const { member, config } = await create()
+    const sql = postgres(process.env['DATABASE_URL']!, { max: 2 })
+    const redis = new Redis(process.env['REDIS_URL']!)
+    // Fixture: arm an active game without needing to play a whole round.
+    await sql`update game_sessions set status = 'active', config = ${JSON.stringify({ ...config, rules: ['happy_ending'] })}::jsonb where code = ${member.roomCode}`
+    const peer = await connect(member)
+    let unlock!: () => void
+    let locked!: () => void
+    const ready = new Promise<void>((resolve) => {
+      locked = resolve
+    })
+    const release = new Promise<void>((resolve) => {
+      unlock = resolve
+    })
+    let transaction: Promise<unknown> | undefined
+    try {
+      peer.send({ type: 'auth', sessionToken: member.sessionToken })
+      await peer.wait('auth_ok')
+      transaction = sql.begin(async (tx) => {
+        await tx`lock table game_sessions in access exclusive mode`
+        locked()
+        await release
+      })
+      await ready
+      peer.send({ type: 'happy_ending' })
+      // The command passed participation and is awaiting its SQL lookup.
+      await expect
+        .poll(async () => {
+          const rows =
+            await sql`select count(*)::int as count from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'`
+          return rows[0]!.count
+        })
+        .toBeGreaterThan(0)
+      if (revoke === 'expiry') {
+        await redis.pexpire(`game:${member.roomCode}`, 1)
+        await expect.poll(() => redis.exists(`game:${member.roomCode}`)).toBe(0)
+      } else {
+        await redis.hdel(`game:${member.roomCode}:players`, member.playerId)
+      }
+      unlock()
+      await transaction
+      expect(await peer.wait('error')).toMatchObject({ code: 'invalid_token' })
+      expect((await request(member, 'config', { config })).status).toBe(401)
+      peer.send({ type: 'ping' })
+      expect(await peer.wait('auth_error')).toMatchObject({ code: 'invalid_token' })
+    } finally {
+      unlock?.()
+      await transaction
+      peer.ws.close()
+      await sql.end()
+      await redis.quit()
+    }
+  })
+}

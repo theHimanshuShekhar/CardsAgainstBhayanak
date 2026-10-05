@@ -40,7 +40,9 @@ export const Route = createFileRoute('/api/games/$code/reset')({
         if (session.status !== 'ended')
           return errorResponse(409, 'invalid_state', 'Game is not over')
 
-        await engine.resetGame(code, mode)
+        if (!(await authenticate(request, code)))
+          return errorResponse(401, 'not_authorized', 'Missing or invalid token')
+        await engine.resetGame(code, mode, auth.playerId)
         apiLogger.info({ roomCode: code, mode }, 'game reset')
         return new Response(null, { status: 204 })
       },

@@ -73,6 +73,9 @@ export const Route = createFileRoute('/api/games/$code/config')({
             { rosterSize, requested: config.maxPlayers },
           )
 
+        if (!(await authenticate(request, code)))
+          return errorResponse(401, 'not_authorized', 'Missing or invalid token')
+        await state.updateLiveRoom(code, {}, auth.playerId)
         await db
           .update(gameSessions)
           .set({ config, lastActivityAt: new Date() })

@@ -32,6 +32,45 @@ export async function getPlayer(code: string, playerId: string): Promise<GamePla
   return raw ? (JSON.parse(raw) as GamePlayer) : null
 }
 
+// Existing rooms may expire during an asynchronous command. Updating their
+// root must never create a new room, and host commands recheck membership at
+// the same atomic boundary as their write (including reset's state cleanup).
+export async function updateLiveRoom(
+  code: string,
+  patch: Record<string, string>,
+  hostPlayerId?: string,
+  clearKeys: string[] = [],
+): Promise<void> {
+  const result = await redis.eval(
+    `
+    if not redis.call('HGET', KEYS[1], 'status') then return 'invalid_token' end
+    if ARGV[2] ~= '' then
+      local raw = redis.call('HGET', KEYS[2], ARGV[2])
+      if not raw then return 'invalid_token' end
+      local player = cjson.decode(raw)
+      if player.status == 'dropped' then return 'player_dropped' end
+      if redis.call('HGET', KEYS[1], 'hostId') ~= ARGV[2] then return 'host_only' end
+    end
+    for i = 3, #KEYS do redis.call('DEL', KEYS[i]) end
+    for field, value in pairs(cjson.decode(ARGV[1])) do
+      redis.call('HSET', KEYS[1], field, value)
+    end
+    redis.call('EXPIRE', KEYS[1], ARGV[3])
+    return 1
+    `,
+    2 + clearKeys.length,
+    KEYS.game(code),
+    KEYS.players(code),
+    ...clearKeys,
+    JSON.stringify(patch),
+    hostPlayerId ?? '',
+    ROOM_TTL_SECONDS,
+  )
+  if (result === 'player_dropped') throw new GameCommandError('player_dropped', 'Player dropped')
+  if (result === 'host_only') throw new GameCommandError('host_only', 'Only the host can act')
+  if (result !== 1) throw new GameCommandError('invalid_token', 'Room session expired')
+}
+
 // S2-11: the read-modify-write must be atomic. A JS get → spread → hset
 // races concurrent callers (the grace-timeout drop vs. an engine score
 // update, or endRound clearing hasGambled for many players) and loses
@@ -717,7 +756,7 @@ export async function claimPlayerDrop(
 }
 
 export async function setCurrentRound(code: string, round: number): Promise<void> {
-  await redis.hset(KEYS.game(code), 'currentRound', String(round))
+  await updateLiveRoom(code, { currentRound: String(round) })
 }
 
 export async function getCurrentRound(code: string): Promise<number> {
