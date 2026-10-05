@@ -1,4 +1,5 @@
 import type { Peer, Message } from 'crossws'
+import { randomUUID } from 'node:crypto'
 import { eq, inArray, desc } from 'drizzle-orm'
 import { db } from '~/db'
 import { blackCards, whiteCards, gameSessions, gameRounds } from '~/db/schema'
@@ -26,12 +27,11 @@ import type {
   Submission,
   PlayerScore,
   GameConfig,
-  Role,
 } from '~/lib/types'
 
 // S2-3: a spectator socket may keep the connection alive and re-sync,
 // but never drive the game.
-const SPECTATOR_BLOCKED = new Set<ClientToServerEvent['type']>([
+const GAME_ACTIONS = new Set<ClientToServerEvent['type']>([
   'play',
   'gamble',
   'pick',
@@ -40,16 +40,17 @@ const SPECTATOR_BLOCKED = new Set<ClientToServerEvent['type']>([
   'eliminate',
   'redraw',
   'confess_discard',
+  'happy_ending',
 ])
 
 type PeerCtx = {
   code: string
   playerId?: string
   anonId?: string
-  role?: Role
   lastPing: number
+  leaving?: boolean
   authenticating?: boolean
-  authSetup?: Promise<void>
+  authSetup?: Promise<boolean>
 }
 
 async function buildSnapshot(code: string, playerId: string): Promise<SessionState | null> {
@@ -245,7 +246,20 @@ function send(peer: Peer, event: ServerToClientEvent): void {
 function broadcast(code: string, event: ServerToClientEvent): void {
   const peers = roomPeers.get(code)
   if (!peers) return
-  for (const peer of peers) send(peer, event)
+  for (const peer of peers) {
+    if (!peerContext.get(peer)?.authenticating) send(peer, event)
+  }
+}
+
+function revokePlayerSockets(code: string, playerId: string): void {
+  for (const peer of roomPeers.get(code) ?? []) {
+    if (peerContext.get(peer)?.playerId !== playerId) continue
+    roomPeers.get(code)?.delete(peer)
+    openPeers.delete(peer)
+    peerContext.delete(peer)
+    send(peer, { type: 'auth_error', code: 'player_dropped', message: 'player dropped' })
+    peer.close(1008, 'player dropped')
+  }
 }
 
 async function ensureSubscriber(code: string): Promise<void> {
@@ -268,12 +282,16 @@ async function ensureSubscriber(code: string): Promise<void> {
   sub.on('message', (_ch, msg) => {
     try {
       const event = JSON.parse(msg) as ServerToClientEvent
+      // Every drop path publishes this event, including HTTP leave and
+      // grace expiry. Revoke all connections before any more room fanout.
+      if (event.type === 'player_left') revokePlayerSockets(code, event.playerId)
       // hand_update is private — route only to its owner, never broadcast.
       if (event.type === 'hand_update') {
         const peers = roomPeers.get(code)
         if (peers) {
           for (const peer of peers) {
-            if (peerContext.get(peer)?.playerId === event.playerId) send(peer, event)
+            const ctx = peerContext.get(peer)
+            if (ctx?.playerId === event.playerId && !ctx.authenticating) send(peer, event)
           }
         }
         return
@@ -371,31 +389,32 @@ export const wsHooks = {
           peer.close(1008, 'authentication failed')
           return
         }
-        // Bind role + clear grace BEFORE acking. The client fires its next
-        // message (e.g. `play`) the instant it sees auth_ok; acking first
-        // left a window where ctx.role was still undefined and the
-        // spectator action guard below was skipped (S2-3).
-        const player = await state.getPlayer(ctx.code, auth.playerId)
-        if (peerContext.get(peer) !== ctx) return
         await ensureSubscriber(ctx.code)
         // Authentication can finish after a pending socket disconnected.
         if (peerContext.get(peer) !== ctx) return
+        const player = await state.getPlayer(ctx.code, auth.playerId)
+        if (peerContext.get(peer) !== ctx) return
+        if (!player || player.status === 'dropped') {
+          send(peer, { type: 'auth_error', code: 'player_dropped', message: 'player dropped' })
+          openPeers.delete(peer)
+          peerContext.delete(peer)
+          peer.close(1008, 'player dropped')
+          return
+        }
         ctx.playerId = auth.playerId
         ctx.anonId = auth.anonId
-        ctx.role = player?.role
-        if (player?.status === 'grace') {
-          // close waits for these writes before restoring grace if the
-          // reconnect disconnects while authentication is finishing.
-          ctx.authSetup = (async () => {
-            await state.updatePlayer(ctx.code, auth.playerId, { status: 'active' })
-            await state.clearGrace(ctx.code, auth.playerId)
-          })()
-          await ctx.authSetup
-          if (peerContext.get(peer) !== ctx) return
-        }
-        ctx.lastPing = Date.now()
+        // Track the binding before the atomic restore so a concurrent drop
+        // revokes setup too. Pending setup receives no room broadcasts.
         if (!roomPeers.has(ctx.code)) roomPeers.set(ctx.code, new Set())
         roomPeers.get(ctx.code)!.add(peer)
+        ctx.authSetup = state.reconnectPlayer(ctx.code, auth.playerId)
+        const restored = await ctx.authSetup
+        if (peerContext.get(peer) !== ctx) return
+        if (!restored) {
+          revokePlayerSockets(ctx.code, auth.playerId)
+          return
+        }
+        ctx.lastPing = Date.now()
         ctx.authenticating = false
         send(peer, { type: 'auth_ok' })
         return
@@ -403,14 +422,33 @@ export const wsHooks = {
 
       ctx.lastPing = Date.now()
 
-      // S2-3: spectators may ping / rejoin / leave, never act on the game.
-      if (ctx.role === 'spectator' && SPECTATOR_BLOCKED.has(parsed.type)) {
-        return send(peer, {
-          type: 'error',
-          code: 'spectator_action',
-          message: 'spectators cannot perform game actions',
-          ...(commandId ? { commandId } : {}),
-        })
+      // A socket authenticates identity, not permanent participation.
+      // HTTP leave, activation and another connection can change it.
+      if (ctx.leaving) return
+      const currentPlayer = await state.getPlayer(ctx.code, ctx.playerId)
+      if (peerContext.get(peer) !== ctx) return
+      if (ctx.leaving) return
+      if (!currentPlayer || currentPlayer.status === 'dropped') {
+        revokePlayerSockets(ctx.code, ctx.playerId)
+        return
+      }
+      if (GAME_ACTIONS.has(parsed.type)) {
+        if (currentPlayer.role === 'spectator') {
+          return send(peer, {
+            type: 'error',
+            code: 'spectator_action',
+            message: 'spectators cannot perform game actions',
+            ...(commandId ? { commandId } : {}),
+          })
+        }
+        if (currentPlayer.status !== 'active' || currentPlayer.isRando) {
+          return send(peer, {
+            type: 'error',
+            code: 'not_authorized',
+            message: 'Only active players can perform game actions',
+            ...(commandId ? { commandId } : {}),
+          })
+        }
       }
 
       switch (parsed.type) {
@@ -454,14 +492,14 @@ export const wsHooks = {
           await engine.triggerHappyEnding(ctx.code, ctx.playerId)
           return
         case 'leave':
-          // S2-5: explicit leave is immediate — no 30s grace. Stop
-          // broadcasting to this peer and run the full drop path now;
-          // the subsequent socket `close` no-ops (already 'dropped').
-          roomPeers.get(ctx.code)?.delete(peer)
+          // The drop event revokes every socket bound to this identity.
+          ctx.leaving = true
           await engine.dropPlayer(ctx.code, ctx.playerId, 'leave')
+          revokePlayerSockets(ctx.code, ctx.playerId)
           return
       }
     } catch (err) {
+      if (eventType === 'leave') ctx.leaving = false
       if (err instanceof GameCommandError) {
         if (!accepted)
           send(peer, {
@@ -520,21 +558,24 @@ export const wsHooks = {
 
     // S2-5: an explicit `leave` already dropped this player. Don't
     // resurrect them into 'grace' or schedule a duplicate drop.
-    const existing = await state.getPlayer(code, playerId)
-    if (!existing || existing.status === 'dropped') {
-      wsLogger.info({ code, playerId }, 'peer closed (already dropped)')
+    const hasOtherSocket = () =>
+      [...(roomPeers.get(code) ?? [])].some(
+        (other) => peerContext.get(other)?.playerId === playerId,
+      )
+    if (hasOtherSocket()) return
+    const deadline = randomUUID()
+    if (!(await state.disconnectPlayer(code, playerId, deadline, TIMING.GRACE_WINDOW_MS))) return
+    // An authentication may finish while the disconnect write is in flight.
+    if (hasOtherSocket()) {
+      await state.reconnectPlayer(code, playerId)
       return
     }
-
-    await state.updatePlayer(code, playerId, { status: 'grace' })
-    await state.setGrace(code, playerId, TIMING.GRACE_WINDOW_MS)
 
     // Grace window: drop only if the player never reconnected (auth
     // flips 'grace' → 'active'). dropPlayer runs the void/migrate/pause
     // path and is idempotent.
     setTimeout(async () => {
-      const player = await state.getPlayer(code, playerId)
-      if (player?.status === 'grace') await engine.dropPlayer(code, playerId, 'grace')
+      if (!hasOtherSocket()) await engine.dropPlayer(code, playerId, 'grace', deadline)
     }, TIMING.GRACE_WINDOW_MS + 100)
 
     wsLogger.info({ code, playerId }, 'peer closed')

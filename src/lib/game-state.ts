@@ -43,6 +43,7 @@ local cur = redis.call('HGET', KEYS[1], ARGV[1])
 if not cur then return 0 end
 local obj = cjson.decode(cur)
 local patch = cjson.decode(ARGV[2])
+if obj.status == 'dropped' and patch.status and patch.status ~= 'dropped' then return 0 end
 for k, v in pairs(patch) do obj[k] = v end
 redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(obj))
 return 1
@@ -609,7 +610,104 @@ export async function setGrace(code: string, playerId: string, ms: number): Prom
 }
 
 export async function clearGrace(code: string, playerId: string): Promise<void> {
-  await redis.del(KEYS.grace(code, playerId))
+  await redis.del(KEYS.grace(code, playerId), KEYS.graceConnection(code, playerId))
+}
+
+// Reconnection must never resurrect a concurrent leave or promote a
+// mid-round joiner. Restore only a disconnected active participant.
+export async function reconnectPlayer(code: string, playerId: string): Promise<boolean> {
+  return Boolean(
+    await redis.eval(
+      `
+      local raw = redis.call('HGET', KEYS[1], ARGV[1])
+      if not raw then return 0 end
+      local player = cjson.decode(raw)
+      if player.status == 'dropped' then return 0 end
+      if player.status == 'grace' then
+        player.status = 'active'
+        redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(player))
+      end
+      redis.call('DEL', KEYS[2], KEYS[3])
+      redis.call('EXPIRE', KEYS[1], ARGV[2])
+      return 1
+      `,
+      3,
+      KEYS.players(code),
+      KEYS.grace(code, playerId),
+      KEYS.graceConnection(code, playerId),
+      playerId,
+      ROOM_TTL_SECONDS,
+    ),
+  )
+}
+
+export async function disconnectPlayer(
+  code: string,
+  playerId: string,
+  deadline: string,
+  ms: number,
+): Promise<boolean> {
+  return Boolean(
+    await redis.eval(
+      `
+      local raw = redis.call('HGET', KEYS[1], ARGV[1])
+      if not raw then return 0 end
+      local player = cjson.decode(raw)
+      if player.status == 'dropped' then return 0 end
+      -- Queued players keep their activation eligibility while disconnected.
+      if player.status ~= 'queued' then player.status = 'grace' end
+      redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(player))
+      redis.call('SET', KEYS[2], ARGV[2], 'PX', ARGV[3])
+      -- Preserve the connection generation past grace-key expiry so an old
+      -- timer cannot drop a later disconnect or a successful reconnect.
+      redis.call('SET', KEYS[3], ARGV[2], 'EX', ARGV[4])
+      redis.call('EXPIRE', KEYS[1], ARGV[4])
+      return 1
+      `,
+      3,
+      KEYS.players(code),
+      KEYS.grace(code, playerId),
+      KEYS.graceConnection(code, playerId),
+      playerId,
+      deadline,
+      ms,
+      ROOM_TTL_SECONDS,
+    ),
+  )
+}
+
+export async function claimPlayerDrop(
+  code: string,
+  playerId: string,
+  connection?: string,
+): Promise<boolean> {
+  return Boolean(
+    await redis.eval(
+      `
+      local raw = redis.call('HGET', KEYS[1], ARGV[1])
+      if not raw then return 0 end
+      local player = cjson.decode(raw)
+      if player.status == 'dropped' then return 0 end
+      if ARGV[2] ~= '' and (redis.call('GET', KEYS[3]) ~= ARGV[2]
+        or redis.call('EXISTS', KEYS[2]) == 1) then return 0 end
+      player.status = 'dropped'
+      redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(player))
+      redis.call('DEL', KEYS[2], KEYS[3])
+      redis.call('EXPIRE', KEYS[1], ARGV[3])
+      redis.call('PUBLISH', ARGV[4], ARGV[5])
+      return 1
+      `,
+      3,
+      KEYS.players(code),
+      KEYS.grace(code, playerId),
+      KEYS.graceConnection(code, playerId),
+      playerId,
+      connection ?? '',
+      ROOM_TTL_SECONDS,
+      KEYS.channel(code),
+      JSON.stringify({ type: 'player_left', playerId }),
+    ),
+  )
 }
 
 export async function setCurrentRound(code: string, round: number): Promise<void> {
