@@ -477,7 +477,7 @@ export async function commitConfession(
 // Hydration queries may complete out of order. Publish only while this is
 // still the authoritative hand/counter; callers retry with the latest state.
 const PUBLISH_HAND_IF_CURRENT_LUA = `
-if not redis.call('HGET', KEYS[3], 'status') then return 0 end
+if not redis.call('HGET', KEYS[3], 'status') then return 'invalid_token' end
 local player = cjson.decode(redis.call('HGET', KEYS[1], ARGV[1]) or '{}')
 if (player.discardsUsed or 0) ~= tonumber(ARGV[3]) then return 0 end
 local expected = cjson.decode(ARGV[2])
@@ -497,20 +497,21 @@ export async function publishHandUpdateIfCurrent(
   discardsUsed: number,
   event: unknown,
 ): Promise<boolean> {
-  return (
-    (await redis.eval(
-      PUBLISH_HAND_IF_CURRENT_LUA,
-      3,
-      KEYS.players(code),
-      KEYS.hand(code, playerId),
-      KEYS.game(code),
-      playerId,
-      JSON.stringify(ids),
-      discardsUsed,
-      KEYS.channel(code),
-      JSON.stringify(event),
-    )) === 1
+  const result = await redis.eval(
+    PUBLISH_HAND_IF_CURRENT_LUA,
+    3,
+    KEYS.players(code),
+    KEYS.hand(code, playerId),
+    KEYS.game(code),
+    playerId,
+    JSON.stringify(ids),
+    discardsUsed,
+    KEYS.channel(code),
+    JSON.stringify(event),
   )
+  if (result === 'invalid_token')
+    throw new GameCommandError('invalid_token', 'Room session expired')
+  return result === 1
 }
 
 export async function removeFromHand(

@@ -404,3 +404,60 @@ test('a vote delayed by SQL cannot mutate an expired room ballot or outcome', as
     await redis.quit()
   }
 })
+
+test('expiry during SQL hand hydration terminates the command without publishing or retrying', async () => {
+  const { member, config } = await create()
+  const sql = postgres(process.env['DATABASE_URL']!, { max: 2 })
+  const redis = new Redis(process.env['REDIS_URL']!)
+  const root = `game:${member.roomCode}`
+  const rules = ['never_have_i_ever']
+  const cards = await sql`select id from white_cards limit 2`
+  await sql`update game_sessions set status = 'active', config = ${JSON.stringify({ ...config, rules })}::jsonb where code = ${member.roomCode}`
+  await redis.hset(root, { status: 'active', config: JSON.stringify({ ...config, rules }) })
+  await redis.hset(`${root}:round`, 'phase', 'transition')
+  await redis.rpush(`${root}:hand:${member.playerId}`, cards[0]!.id)
+  await redis.rpush(`${root}:deck:white`, cards[1]!.id)
+  const peer = await connect(member)
+  let unlock!: () => void
+  let locked!: () => void
+  const ready = new Promise<void>((resolve) => {
+    locked = resolve
+  })
+  const release = new Promise<void>((resolve) => {
+    unlock = resolve
+  })
+  let transaction: Promise<unknown> | undefined
+  try {
+    peer.send({ type: 'auth', sessionToken: member.sessionToken })
+    await peer.wait('auth_ok')
+    transaction = sql.begin(async (tx) => {
+      await tx`lock table white_cards in access exclusive mode`
+      locked()
+      await release
+    })
+    await ready
+    peer.send({ type: 'confess_discard', cardId: cards[0]!.id })
+    await expect
+      .poll(async () => {
+        const rows =
+          await sql`select count(*)::int as count from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'`
+        return rows[0]!.count
+      })
+      .toBeGreaterThan(0)
+    await redis.pexpire(root, 1)
+    await expect.poll(() => redis.exists(root)).toBe(0)
+    unlock()
+    await transaction
+    expect(await peer.wait('error')).toMatchObject({ code: 'invalid_token' })
+    expect(peer.events.some((event) => event.type === 'hand_update')).toBe(false)
+    // Receipt proves the command returned instead of spinning in hydration.
+    peer.send({ type: 'ping' })
+    expect(await peer.wait('auth_error')).toMatchObject({ code: 'invalid_token' })
+  } finally {
+    unlock?.()
+    await transaction
+    peer.ws.close()
+    await sql.end()
+    await redis.quit()
+  }
+})
