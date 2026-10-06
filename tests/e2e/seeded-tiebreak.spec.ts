@@ -2,10 +2,11 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { once } from 'node:events'
 import { resolve } from 'node:path'
 import { test, expect } from '@playwright/test'
+import { replayInfrastructure } from '../fixtures/replay-infrastructure'
 import type { ClientToServerEvent, ServerToClientEvent } from '../../src/lib/types'
 
 // Own a production-entry subprocess so each replay starts from the same seed.
-// It uses the suite's isolated backing services and a separate listening port.
+// Its backing stores belong exclusively to this test, including boot recovery.
 const port = Number(process.env['PORT'] ?? 3000) + 100
 const base = `http://127.0.0.1:${port}`
 type Member = { roomCode: string; playerId: string; sessionToken: string }
@@ -56,7 +57,7 @@ async function connect(member: Member) {
 }
 
 async function stop(child: ChildProcess) {
-  if (child.exitCode !== null) return
+  if (child.exitCode !== null || child.signalCode !== null) return
   const exited = once(child, 'exit')
   child.kill('SIGTERM')
   const force = setTimeout(() => child.kill('SIGKILL'), 3000)
@@ -67,7 +68,7 @@ async function stop(child: ChildProcess) {
   }
 }
 
-async function replay(noiseBeforeGame: boolean) {
+async function replay(noiseBeforeGame: boolean, env: { DATABASE_URL: string; REDIS_URL: string }) {
   const child = spawn(
     process.execPath,
     [
@@ -80,6 +81,7 @@ async function replay(noiseBeforeGame: boolean) {
     {
       env: {
         ...process.env,
+        ...env,
         PORT: String(port),
         NODE_ENV: 'production',
         CAB_RNG_SEED: 'final-ballot-replay',
@@ -197,10 +199,14 @@ async function replay(noiseBeforeGame: boolean) {
 }
 
 test('seeded tied ballots repeat the winner despite distinct same-millisecond rate-limit traffic', async () => {
-  test.setTimeout(90_000)
-  const first = await replay(false)
-  // Advance beyond the persisted create window for this replay, while
-  // keeping every request within each replay at the same millisecond.
-  const second = await replay(true)
-  expect(second).toEqual(first)
+  test.setTimeout(180_000)
+  const infrastructure = await replayInfrastructure()
+  try {
+    const first = await replay(false, infrastructure.env)
+    await infrastructure.reset()
+    const second = await replay(true, infrastructure.env)
+    expect(second).toEqual(first)
+  } finally {
+    await infrastructure.close()
+  }
 })
