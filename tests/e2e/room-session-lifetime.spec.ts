@@ -331,3 +331,76 @@ for (const revoke of ['expiry', 'membership'] as const) {
     }
   })
 }
+
+test('a vote delayed by SQL cannot mutate an expired room ballot or outcome', async () => {
+  const { member, config } = await create()
+  const sql = postgres(process.env['DATABASE_URL']!, { max: 2 })
+  const redis = new Redis(process.env['REDIS_URL']!)
+  const root = `game:${member.roomCode}`
+  const round = `${root}:round`
+  // Fixture: a voting round with one voter and another player's response.
+  await sql`update game_sessions set status = 'active', config = ${JSON.stringify({ ...config, rules: ['godmode'] })}::jsonb where code = ${member.roomCode}`
+  await redis.hset(root, { status: 'active', currentRound: '1' })
+  await redis.hset(round, { roundId: 'delayed-vote-round', phase: 'waiting' })
+  await redis.set(`${round}:order`, JSON.stringify(['other-player']))
+  await redis.hset(
+    `${round}:submissions`,
+    'other-player',
+    JSON.stringify({ submissionId: 'response', fills: [] }),
+  )
+  const peer = await connect(member)
+  let unlock!: () => void
+  let locked!: () => void
+  const ready = new Promise<void>((resolve) => {
+    locked = resolve
+  })
+  const release = new Promise<void>((resolve) => {
+    unlock = resolve
+  })
+  let transaction: Promise<unknown> | undefined
+  try {
+    peer.send({ type: 'auth', sessionToken: member.sessionToken })
+    await peer.wait('auth_ok')
+    transaction = sql.begin(async (tx) => {
+      await tx`lock table game_sessions in access exclusive mode`
+      locked()
+      await release
+    })
+    await ready
+    peer.send({ type: 'vote', submissionId: '0' })
+    await expect
+      .poll(async () => {
+        const rows =
+          await sql`select count(*)::int as count from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'`
+        return rows[0]!.count
+      })
+      .toBeGreaterThan(0)
+    await redis.pexpire(root, 1)
+    await expect.poll(() => redis.exists(root)).toBe(0)
+    unlock()
+    await transaction
+    await peer.wait('error')
+    expect(
+      peer.events.some((event) => ['vote_tally', 'round_won', 'round_end'].includes(event.type)),
+    ).toBe(false)
+    expect(
+      await redis.exists(`${round}:voters`, `${round}:voterchoices`, `${round}:votetally`),
+    ).toBe(0)
+    expect(
+      await redis.hmget(
+        round,
+        'outcomeClaim',
+        'completionClaim',
+        'winnerId',
+        'voteClosed',
+        'phase',
+      ),
+    ).toEqual([null, null, null, null, 'waiting'])
+  } finally {
+    unlock?.()
+    await transaction
+    peer.ws.close()
+    await sql.end()
+    await redis.quit()
+  }
+})

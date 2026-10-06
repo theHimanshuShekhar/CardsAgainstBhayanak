@@ -477,6 +477,7 @@ export async function commitConfession(
 // Hydration queries may complete out of order. Publish only while this is
 // still the authoritative hand/counter; callers retry with the latest state.
 const PUBLISH_HAND_IF_CURRENT_LUA = `
+if not redis.call('HGET', KEYS[3], 'status') then return 0 end
 local player = cjson.decode(redis.call('HGET', KEYS[1], ARGV[1]) or '{}')
 if (player.discardsUsed or 0) ~= tonumber(ARGV[3]) then return 0 end
 local expected = cjson.decode(ARGV[2])
@@ -499,9 +500,10 @@ export async function publishHandUpdateIfCurrent(
   return (
     (await redis.eval(
       PUBLISH_HAND_IF_CURRENT_LUA,
-      2,
+      3,
       KEYS.players(code),
       KEYS.hand(code, playerId),
+      KEYS.game(code),
       playerId,
       JSON.stringify(ids),
       discardsUsed,
@@ -842,6 +844,7 @@ export async function clearPostResolveResumeAt(code: string): Promise<void> {
 // guarantees exactly one caller sees the prior value; the other gets
 // nil and bails.
 const TAKE_RESUME_AT_LUA = `
+if not redis.call('HGET', KEYS[2], 'status') then return nil end
 local v = redis.call('HGET', KEYS[1], 'postResolveResumeAt')
 if not v then return nil end
 redis.call('HDEL', KEYS[1], 'postResolveResumeAt')
@@ -849,7 +852,7 @@ return v
 `
 
 export async function takePostResolveResumeAt(code: string): Promise<number | null> {
-  const v = await redis.eval(TAKE_RESUME_AT_LUA, 1, KEYS.round(code))
+  const v = await redis.eval(TAKE_RESUME_AT_LUA, 2, KEYS.round(code), KEYS.game(code))
   return v ? Number(v) : null
 }
 
@@ -883,6 +886,7 @@ export async function setRoundWinner(code: string, winnerId: string): Promise<vo
 // phase and identity in Redis prevents a delayed command from claiming a new
 // round after its own round's resolution fields have been cleared.
 const CLAIM_ROUND_OUTCOME_LUA = `
+if not redis.call('HGET', KEYS[2], 'status') then return 0 end
 if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1] then return 0 end
 if redis.call('HGET', KEYS[1], 'phase') ~= ARGV[2] then return 0 end
 if redis.call('HEXISTS', KEYS[1], 'outcomeClaim') == 1 then return 0 end
@@ -900,8 +904,9 @@ export async function claimRoundOutcome(
   return (
     (await redis.eval(
       CLAIM_ROUND_OUTCOME_LUA,
-      1,
+      2,
       KEYS.round(code),
+      KEYS.game(code),
       roundId,
       phase,
       winnerId,
@@ -911,6 +916,7 @@ export async function claimRoundOutcome(
 }
 
 const CLAIM_ROUND_COMPLETION_LUA = `
+if not redis.call('HGET', KEYS[2], 'status') then return 0 end
 if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1] then return 0 end
 if redis.call('HGET', KEYS[1], 'outcomeClaim') ~= ARGV[1] then return 0 end
 local ok = redis.call('HSETNX', KEYS[1], 'completionClaim', ARGV[1])
@@ -922,8 +928,9 @@ export async function claimRoundCompletion(code: string, roundId: string): Promi
   return (
     (await redis.eval(
       CLAIM_ROUND_COMPLETION_LUA,
-      1,
+      2,
       KEYS.round(code),
+      KEYS.game(code),
       roundId,
       ROOM_TTL_SECONDS,
     )) === 1
@@ -983,6 +990,7 @@ export async function clearSkippedPlayers(code: string): Promise<void> {
 // Turn validation, card removal and turn advancement are one operation.
 // A second frame from the old actor cannot remove another submission.
 const ELIMINATE_LUA = `
+if not redis.call('HGET', KEYS[4], 'status') then return nil end
 if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1] then return nil end
 if redis.call('HGET', KEYS[1], 'phase') ~= 'eliminating' then return nil end
 if ARGV[2] == '' or redis.call('HGET', KEYS[1], 'eliminationTurnPlayerId') ~= ARGV[2] then return nil end
@@ -1021,10 +1029,11 @@ export async function commitElimination(
 ): Promise<string | null> {
   return (await redis.eval(
     ELIMINATE_LUA,
-    3,
+    4,
     KEYS.round(code),
     submissionsKey(code),
     KEYS.players(code),
+    KEYS.game(code),
     roundId,
     actorId,
     submissionKey,
@@ -1036,6 +1045,7 @@ export async function commitElimination(
 // Register a ballot and close its election in one Redis operation. Only
 // the last accepted ballot can decide a winner or open the next revote.
 const VOTE_LUA = `
+if not redis.call('HGET', KEYS[8], 'status') then return nil end
 if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1] then return nil end
 if redis.call('HGET', KEYS[1], 'phase') ~= 'waiting' then return nil end
 if (redis.call('HGET', KEYS[1], 'voteEpoch') or '0') ~= ARGV[2] then return nil end
@@ -1094,7 +1104,7 @@ export async function commitVote(
 ): Promise<{ tally: Record<string, number>; leaders?: string[]; revote?: boolean } | null> {
   const raw = await redis.eval(
     VOTE_LUA,
-    7,
+    8,
     KEYS.round(code),
     KEYS.players(code),
     submissionsKey(code),
@@ -1102,6 +1112,7 @@ export async function commitVote(
     `${KEYS.round(code)}:voterchoices`,
     `${KEYS.round(code)}:votetally`,
     `${KEYS.round(code)}:tiebreak`,
+    KEYS.game(code),
     roundId,
     epoch,
     voterId,

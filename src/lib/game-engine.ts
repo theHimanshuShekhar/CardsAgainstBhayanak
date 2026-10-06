@@ -1233,7 +1233,6 @@ export async function migrateHost(code: string): Promise<string | null> {
   }
   await state.updatePlayer(code, next.id, { isHost: true })
   await state.updateLiveRoom(code, { hostId: next.id })
-  await redis.expire(KEYS.game(code), ROOM_TTL_SECONDS)
 
   await db
     .update(gameSessions)
@@ -1257,7 +1256,6 @@ export async function pauseGame(code: string): Promise<void> {
   if (!session || session.status !== 'active') return
   await db.update(gameSessions).set({ status: 'paused' }).where(eq(gameSessions.id, session.id))
   await state.updateLiveRoom(code, { status: 'paused' })
-  await redis.expire(KEYS.game(code), ROOM_TTL_SECONDS)
   engineLogger.info({ code }, 'all players dropped — game paused')
 }
 
@@ -1294,7 +1292,6 @@ export async function resumeIfReady(code: string): Promise<void> {
   // helpers) no-op unless the session is 'active'.
   await db.update(gameSessions).set({ status: 'active' }).where(eq(gameSessions.id, session.id))
   await state.updateLiveRoom(code, { status: 'active' })
-  await redis.expire(KEYS.game(code), ROOM_TTL_SECONDS)
   engineLogger.info({ code, humans: humans.length }, 'game resumed from pause')
 
   await voidRound(code, 'resumed after pause')
