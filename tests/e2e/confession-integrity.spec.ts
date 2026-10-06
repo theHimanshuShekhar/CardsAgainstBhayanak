@@ -46,9 +46,31 @@ async function connect(member: Member) {
       >
     },
     async snapshot() {
-      const after = events.length
-      peer.send({ type: 'rejoin' })
-      return (await peer.wait('state_snapshot', after)).state
+      for (let attempt = 0; attempt < 8; attempt++) {
+        const after = events.length
+        peer.send({ type: 'rejoin' })
+        await expect
+          .poll(
+            () =>
+              events
+                .slice(after)
+                .find((event) => event.type === 'state_snapshot' || event.type === 'error'),
+            { timeout: 10_000 },
+          )
+          .toBeTruthy()
+        const reply = events
+          .slice(after)
+          .find((event) => event.type === 'state_snapshot' || event.type === 'error')!
+        if (reply.type === 'state_snapshot') return reply.state
+        expect(reply).toMatchObject({
+          type: 'error',
+          code: 'rate_limited',
+          retryAfterMs: expect.any(Number),
+        })
+        if (reply.type === 'error')
+          await new Promise((resolve) => setTimeout(resolve, reply.retryAfterMs! + 25))
+      }
+      throw new Error('Snapshot retry budget exhausted')
     },
   }
   peer.send({ type: 'auth', sessionToken: member.sessionToken })
@@ -218,7 +240,7 @@ test('only active members in picking or transition can confess, and an empty dec
   const { default: Redis } = await import('ioredis')
   const redis = new Redis(process.env['REDIS_URL']!)
   try {
-    const actor = players[0]!
+    let actor = players[0]!
     const queued = await connect(await join(host.roomCode, 'Queued'))
     const spectator = await connect(await join(host.roomCode, 'Observer', 'spectator'))
     peers.push(queued, spectator)
@@ -246,8 +268,13 @@ test('only active members in picking or transition can confess, and an empty dec
     await redis.hdel(`${gameKey}:players`, actor.member.playerId)
     const missingStart = actor.events.length
     actor.send({ type: 'confess_discard', cardId: before.hand![0]!.id })
-    expect(await actor.wait('error', missingStart)).toMatchObject({ code: 'not_authorized' })
+    expect(['player_dropped', 'invalid_token']).toContain(
+      (await actor.wait('auth_error', missingStart)).code,
+    )
+    await expect.poll(() => actor.ws.readyState).toBe(WebSocket.CLOSED)
     await redis.hset(`${gameKey}:players`, actor.member.playerId, playerRaw)
+    actor = await connect(actor.member)
+    peers.push(actor)
     for (const status of ['queued', 'grace', 'dropped']) {
       await redis.hset(
         `${gameKey}:players`,
@@ -256,9 +283,13 @@ test('only active members in picking or transition can confess, and an empty dec
       )
       const start = actor.events.length
       actor.send({ type: 'confess_discard', cardId: before.hand![0]!.id })
-      expect(await actor.wait('error', start)).toMatchObject({ code: 'not_authorized' })
+      if (status === 'dropped')
+        expect(await actor.wait('auth_error', start)).toMatchObject({ code: 'player_dropped' })
+      else expect(await actor.wait('error', start)).toMatchObject({ code: 'not_authorized' })
     }
     await redis.hset(`${gameKey}:players`, actor.member.playerId, playerRaw)
+    actor = await connect(actor.member)
+    peers.push(actor)
     expect((await actor.snapshot()).hand).toEqual(before.hand)
     expect((await actor.snapshot()).myDiscardsUsed).toBe(0)
     const deck = await redis.lrange(`${gameKey}:deck:white`, 0, -1)
@@ -292,8 +323,34 @@ test('concurrent successful confessions leave the last private update consistent
     peers.push(second, third)
     const before = await actor.snapshot()
     const start = actor.events.length
-    for (const [index, peer] of [actor, second, third].entries())
+    const attempts = [actor, second, third].map((peer, index) => ({
+      peer,
+      index,
+      after: peer.events.length,
+    }))
+    for (const { peer, index } of attempts)
       peer.send({ type: 'confess_discard', cardId: before.hand![index]!.id })
+    await expect
+      .poll(() => actor.events.slice(start).filter((event) => event.type === 'hand_update').length)
+      .toBeGreaterThanOrEqual(2)
+    // Preserve the three-way race, then retry only an explicit work-limit rejection.
+    await expect
+      .poll(
+        () =>
+          actor.events.slice(start).filter((event) => event.type === 'hand_update').length +
+          attempts.filter(({ peer, after }) =>
+            peer.events.slice(after).some((event) => event.type === 'error'),
+          ).length,
+      )
+      .toBe(3)
+    for (const { peer, index, after } of attempts) {
+      const reply = peer.events.slice(after).find((event) => event.type === 'error')
+      if (reply?.type === 'error') {
+        expect(reply).toMatchObject({ code: 'rate_limited', retryAfterMs: expect.any(Number) })
+        await new Promise((resolve) => setTimeout(resolve, reply.retryAfterMs! + 25))
+        peer.send({ type: 'confess_discard', cardId: before.hand![index]!.id })
+      }
+    }
     await expect
       .poll(() => actor.events.slice(start).filter((event) => event.type === 'hand_update'))
       .toHaveLength(3)

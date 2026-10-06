@@ -43,6 +43,10 @@ function take(value: Identity, name: string, capacity: number, intervalMs: numbe
     bucket = { tokens: capacity, updatedAt: now }
     value.buckets.set(name, bucket)
   }
+  return consume(bucket, capacity, intervalMs, now)
+}
+
+function consume(bucket: Bucket, capacity: number, intervalMs: number, now: number): number {
   bucket.tokens = Math.min(
     capacity,
     bucket.tokens + ((now - bucket.updatedAt) * capacity) / intervalMs,
@@ -118,10 +122,8 @@ export function admitFrame(
 ): number {
   // Cheap malformed/pre-auth frames are bounded too, before JSON/schema work.
   const now = Date.now()
-  socketBucket.tokens = Math.min(120, socketBucket.tokens + (now - socketBucket.updatedAt) / 500)
-  socketBucket.updatedAt = now
-  if (socketBucket.tokens < 1) return Math.ceil((1 - socketBucket.tokens) * 500)
-  socketBucket.tokens--
+  const retryAfterMs = consume(socketBucket, 120, 60_000, now)
+  if (retryAfterMs) return retryAfterMs
   if (!playerId) return 0
   const value = identity(`player:${code}:${playerId}`)
   return value ? take(value, 'frames', 120, 60_000) : IDLE_MS
