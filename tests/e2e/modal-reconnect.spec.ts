@@ -167,7 +167,18 @@ for (const mode of ['godmode', 'survival', 'serious_business'] as const) {
         viewers.push({ actor, page, snapshots: () => snapshots })
       }
       await ready(game)
-      const board = await game.peers[0]!.snapshot()
+      let board = await game.peers[0]!.snapshot()
+      if (mode === 'survival') {
+        const firstActor = viewers.find(
+          (viewer) => viewer.actor.playerId === board.eliminationTurnPlayerId,
+        )!
+        const marker = game.peers[0]!.events.length
+        await firstActor.page.getByTestId('eliminate-btn').nth(0).click()
+        await game.peers[0]!.wait('card_eliminated', marker)
+        await game.peers[0]!.wait('elimination_turn', marker)
+        board = await game.peers[0]!.snapshot()
+        expect(board.eliminationTurnPlayerId).not.toBe(firstActor.actor.playerId)
+      }
       for (const viewer of viewers) {
         const { actor, page } = viewer
         const controls = page.getByTestId(
@@ -181,8 +192,12 @@ for (const mode of ['godmode', 'survival', 'serious_business'] as const) {
               await expect(
                 page.locator('.subs-grid').getByText(card.text, { exact: true }),
               ).toBeVisible()
-          for (const control of await controls.all()) {
-            if (legal) await expect(control).toBeEnabled()
+          if (mode === 'survival') {
+            await expect(page.locator('.sub-card.is-eliminated')).toHaveCount(board.prompt.pick)
+            await expect(controls.nth(0)).toHaveText('Eliminated')
+          }
+          for (const [index, control] of (await controls.all()).entries()) {
+            if (legal && !(mode === 'survival' && index === 0)) await expect(control).toBeEnabled()
             else await expect(control).toBeDisabled()
           }
         }

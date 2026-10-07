@@ -143,6 +143,9 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
       : subOrder.map((key, index) => ({
           submissionId: String(index),
           fills: index < revealIndex ? (rawSubs[key]?.fills ?? []) : [],
+          // Elimination is public once announced; keep it across rejoin
+          // without exposing the stored submission's player attribution.
+          eliminated: rawSubs[key]?.eliminated,
         }))
 
   let voteTally: Record<string, number> | undefined
