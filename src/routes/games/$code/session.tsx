@@ -86,6 +86,7 @@ function SessionScreen() {
   // God Is Dead: per-round vote state. The engine enforces one vote per
   // round; controls disable while pending and the accepted vote is marked
   // only by a matching receipt. Live tallies alone cannot confirm our vote.
+  const [mySubmissionIds, setMySubmissionIds] = useState<string[]>([])
   const [myVotedSubmissionId, setMyVotedSubmissionId] = useState<string | null>(null)
   const [voteTally, setVoteTally] = useState<Record<string, number>>({})
   // Survival of the Fittest: the engine drives whose turn it is via
@@ -234,6 +235,7 @@ function SessionScreen() {
         setHasGambled(s.myHasGambled)
         setMySubmissionsSent(s.mySubmissionCount)
         setMyVotedSubmissionId(s.myVotedSubmissionId)
+        setMySubmissionIds(s.mySubmissionIds)
         setVoteTally(s.voteTally ?? {})
         setSelected((cards) => cards.filter((id) => s.hand?.some((card) => card.id === id)))
         if (s.hand) setHand(s.hand)
@@ -287,6 +289,7 @@ function SessionScreen() {
         // button re-enables for the next round without a refresh.
         setHasGambled(false)
         setMySubmissionsSent(0)
+        setMySubmissionIds([])
         setMyVotedSubmissionId(null)
         setVoteTally({})
         // Survival/SB: per-round state must reset alongside submissions
@@ -376,6 +379,7 @@ function SessionScreen() {
         setSubmitted(event.submitted)
         setExpected(event.expected)
       }
+      if (event.type === 'my_submission_ids') setMySubmissionIds(event.submissionIds)
       if (event.type === 'reveal_start') {
         setPhase('reveal')
         setRevealIndex(0)
@@ -688,6 +692,7 @@ function SessionScreen() {
                             : 'normal'
                     }
                     canVote={canVote}
+                    mySubmissionIds={mySubmissionIds}
                     myVotedSubmissionId={myVotedSubmissionId}
                     voteTally={voteTally}
                     onVote={handleVote}

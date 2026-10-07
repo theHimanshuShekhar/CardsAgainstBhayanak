@@ -186,6 +186,9 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
     myDiscardsUsed: me?.discardsUsed ?? 0,
     myHasGambled: me?.hasGambled ?? false,
     mySubmissionCount: Number(!!rawSubs[playerId]) + Number(!!rawSubs[`${playerId}:gamble`]),
+    mySubmissionIds: config.rules.includes('godmode')
+      ? subOrder.flatMap((key, index) => (key === playerId ? [String(index)] : []))
+      : [],
     myVotedSubmissionId: await redis.hget(`${KEYS.round(code)}:voterchoices`, playerId),
     ...(voteTally ? { voteTally } : {}),
     ...(eliminationTurnPlayerId ? { eliminationTurnPlayerId } : {}),
@@ -291,8 +294,8 @@ async function ensureSubscriber(code: string): Promise<void> {
       // Every drop path publishes this event, including HTTP leave and
       // grace expiry. Revoke all connections before any more room fanout.
       if (event.type === 'player_left') revokePlayerSockets(code, event.playerId)
-      // hand_update is private — route only to its owner, never broadcast.
-      if (event.type === 'hand_update') {
+      // Hands and own-answer eligibility are private; route only to their owner.
+      if (event.type === 'hand_update' || event.type === 'my_submission_ids') {
         const peers = roomPeers.get(code)
         if (peers) {
           for (const peer of peers) {

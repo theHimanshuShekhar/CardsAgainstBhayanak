@@ -24,6 +24,7 @@ type Props = {
   // after a tap. Defaulted so non-godmode callers can omit them.
   mode?: 'normal' | 'godmode' | 'survival' | 'serious_business'
   canVote?: boolean
+  mySubmissionIds?: string[]
   voteTally?: Record<string, number>
   myVotedSubmissionId?: string | null
   onVote?: (submissionId: string) => void
@@ -58,6 +59,7 @@ export function SubmissionsGrid({
   onPickWinner,
   mode = 'normal',
   canVote = false,
+  mySubmissionIds = [],
   voteTally = {},
   myVotedSubmissionId = null,
   onVote,
@@ -160,10 +162,14 @@ export function SubmissionsGrid({
                         <button
                           className={`btn btn-ghost btn-sm vote-btn${iVotedThis ? ' is-armed' : ''}`}
                           data-testid="vote-btn"
-                          disabled={pending || !canVote}
+                          disabled={pending || !canVote || mySubmissionIds.includes(s.submissionId)}
                           onClick={() => onVote?.(s.submissionId)}
                         >
-                          {iVotedThis ? 'Voted' : 'Vote'}
+                          {mySubmissionIds.includes(s.submissionId)
+                            ? 'Your answer'
+                            : iVotedThis
+                              ? 'Voted'
+                              : 'Vote'}
                         </button>
                         <span className="vote-tally" data-testid="vote-tally">
                           {votes} {votes === 1 ? 'vote' : 'votes'}

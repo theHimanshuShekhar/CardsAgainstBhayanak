@@ -105,6 +105,8 @@ export type SessionState = {
   // Private action receipts let reconnects reconcile a lost acknowledgement.
   mySubmissionCount: number
   myVotedSubmissionId: string | null
+  // Recipient-private shuffled answer IDs; never include another player’s attribution.
+  mySubmissionIds: string[]
 }
 
 // ── Session-level status ──────────────────────────────────────────
@@ -227,6 +229,7 @@ export type ServerMessage =
   | { type: 'scores_update'; scores: PlayerScore[] }
   | { type: 'player_gambled'; playerId: string }
   | { type: 'player_skipped'; playerId: string; round: number; submitted: number; expected: number }
+  | { type: 'my_submission_ids'; playerId: string; submissionIds: string[] }
   | { type: 'reveal_start' }
   | { type: 'card_revealed'; submissionIndex: number; fills: Card[] }
   | { type: 'round_won'; winnerId: string; submissionId: string; scores: PlayerScore[] }
