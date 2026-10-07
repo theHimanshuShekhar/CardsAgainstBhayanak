@@ -117,3 +117,19 @@ the test suite's disposable DB/Redis:
 pnpm build
 pnpm exec playwright test tests/e2e/http-client-identity.spec.ts
 ```
+
+### Seeded replay regression
+
+`tests/e2e/seeded-tiebreak.spec.ts` requires a working Docker daemon and the
+`postgres:17-alpine` and `valkey/valkey:8-alpine` images. It creates temporary
+containers on random loopback ports, applies the canonical schema, and copies
+only the test suite's seeded card catalog. The replay preload blocks the upstream
+card API so background seeding cannot change that catalog. Its two production server replays
+own this storage, so their boot recovery cannot race the main browser suite.
+The fixture removes its containers after success or setup/server failure;
+unavailable Docker produces an actionable failure rather than skipping coverage.
+
+Docker commands have bounded deadlines (30 seconds for creation, 10 seconds
+for port lookup and cleanup). Cleanup errors name the exact owned containers
+for a later retry; the fixture kills pending CLI processes when its worker exits.
+Disposable PostgreSQL data uses tmpfs to reduce disk contention.
