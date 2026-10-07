@@ -27,9 +27,26 @@ async function driveTo3GameOver(players: PlayerHandle[]): Promise<void> {
     const czar = await getCzar(players)
     const submitter = players.find((p) => p !== czar) ?? players[0]!
     const pick = await handPickCount(submitter).catch(() => 1)
+    const host = players[0]!
+    const label = (await host.page.locator('.pill').first().textContent()) ?? ''
+    const roundBefore = Number(/Round (\d+)/.exec(label)?.[1] ?? 0)
     await playRound(players, pick)
-    // ROUND_RESULT_PAUSE_MS holds before the next round_started.
-    await players[0]!.page.waitForTimeout(300)
+    // The result hold can finish with either round_started or game_over.
+    // Do not begin another hand submission before that public transition.
+    await expect
+      .poll(
+        async () => {
+          if (host.page.url().includes('/end')) return true
+          const nextLabel = await host.page
+            .locator('.pill')
+            .first()
+            .textContent({ timeout: 1_000 })
+            .catch(() => '')
+          return Number(/Round (\d+)/.exec(nextLabel ?? '')?.[1] ?? 0) > roundBefore
+        },
+        { timeout: 30_000 },
+      )
+      .toBe(true)
   }
   await Promise.all(players.map((h) => h.page.waitForURL('**/end', { timeout: 30_000 })))
 }
