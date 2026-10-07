@@ -1,7 +1,7 @@
 import { db } from '~/db'
 import { blackCards, whiteCards, gameSessions, gamePlayers, gameRounds, packs } from '~/db/schema'
 import { inArray, eq, sql, desc, and } from 'drizzle-orm'
-import { randomInt, shuffle } from './rng'
+import { randomInt, shuffle, pick } from './rng'
 import { redis, KEYS, ROOM_TTL_SECONDS } from './redis'
 import * as state from './game-state'
 import { engineLogger } from './logger'
@@ -556,6 +556,13 @@ export function publicIdForKey(order: string[], key: string): string {
   return String(order.indexOf(key))
 }
 
+// Equivalent participation has the same input to a seeded shuffle, even when
+// Redis traverses differently or a replay allocates different opaque IDs.
+export function orderedSubmissionKeys(keys: string[], participantOrder: string[]): string[] {
+  const available = new Set(keys)
+  return participantOrder.flatMap((id) => [id, `${id}:gamble`]).filter((key) => available.has(key))
+}
+
 function submissionComplete(
   player: GamePlayer,
   submissions: Record<string, Submission>,
@@ -644,7 +651,14 @@ export async function checkRoundReady(code: string): Promise<void> {
 
   // Permute storage keys once; persist so pick/vote/eliminate and the
   // rejoin snapshot all agree on index → submission.
-  const order = shuffle(Object.keys(submissions))
+  // Redis hash traversal depends on opaque random player IDs. Start from
+  // the stable roster before shuffling so a seeded game is reproducible.
+  // Rando has no Czar turn; its submission follows the human roster.
+  const participants = [
+    ...(await state.getCzarOrder(code)),
+    ...players.filter((player) => player.isRando).map((player) => player.id),
+  ]
+  const order = shuffle(orderedSubmissionKeys(Object.keys(submissions), participants))
   const orderJson = JSON.stringify(order)
   await redis.set(subOrderKey(code), orderJson, 'EX', ROOM_TTL_SECONDS)
 
@@ -1396,6 +1410,13 @@ async function currentRoundIdentity(code: string): Promise<string | null> {
   return row.id
 }
 
+// Redis tally iteration has no stable order. Canonical public submission IDs
+// ensure a seeded draw maps to the same candidate for equivalent ballots.
+export function chooseVoteWinner(leaders: string[]): string {
+  const candidates = [...leaders].sort((a, b) => Number(a) - Number(b))
+  return candidates.length === 1 ? candidates[0]! : pick(candidates)
+}
+
 export async function castVote(
   code: string,
   voterId: string,
@@ -1436,8 +1457,7 @@ export async function castVote(
   }
   if (!leaders) return
   const submissions = await state.getSubmissions(code)
-  const winnerSubmissionId =
-    leaders.length === 1 ? leaders[0]! : leaders[randomInt(0, leaders.length)]!
+  const winnerSubmissionId = chooseVoteWinner(leaders)
   const winnerKey = await resolveSubmissionKey(code, winnerSubmissionId)
   if (!winnerKey) return
   const winnerPlayerId = resolvePlayerId(winnerKey)
