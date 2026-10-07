@@ -1,3 +1,4 @@
+import { ErrorNotice } from '~/components/ui/ErrorNotice'
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { Topbar } from '~/components/ui/Topbar'
@@ -168,11 +169,7 @@ function CreateScreen() {
                 <b>{draft.rules.length}</b>
               </div>
               <hr className="hr" style={{ margin: '16px 0' }} />
-              {error && (
-                <div className="muted" style={{ fontSize: 12, marginBottom: 10, color: 'red' }}>
-                  {error}
-                </div>
-              )}
+              {error && <ErrorNotice>{error}</ErrorNotice>}
               <button
                 className="btn btn-primary btn-block btn-lg"
                 disabled={!canStart || loading}
