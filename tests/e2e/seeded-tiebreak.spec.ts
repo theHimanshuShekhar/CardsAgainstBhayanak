@@ -189,7 +189,11 @@ async function replay(noiseBeforeGame: boolean, env: { DATABASE_URL: string; RED
     await peers[0]!.wait('round_end')
     if (!noiseBeforeGame) await noise()
     expect((await create()).status).toBe(429)
-    return { winnerOrdinal, fills: outcome.submissionId, hands: initial.map((state) => state.hand) }
+    return {
+      winnerOrdinal,
+      winnerSubmissionId: outcome.submissionId,
+      hands: initial.map((state) => state.hand),
+    }
   } catch (error) {
     throw new Error(`${String(error)}\nChild output:\n${output}`, { cause: error })
   } finally {
