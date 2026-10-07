@@ -205,12 +205,28 @@ async function replay(noiseBeforeGame: boolean, env: { DATABASE_URL: string; RED
 test('seeded tied ballots repeat the winner despite distinct same-millisecond rate-limit traffic', async () => {
   test.setTimeout(180_000)
   const infrastructure = await replayInfrastructure()
+  let replayFailure: { error: unknown } | undefined
   try {
     const first = await replay(false, infrastructure.env)
     await infrastructure.reset()
     const second = await replay(true, infrastructure.env)
     expect(second).toEqual(first)
+    console.info('Seeded replays matched hands and winner; rate-limit entries remained distinct')
+  } catch (error) {
+    replayFailure = { error }
+    throw error
   } finally {
-    await infrastructure.close()
+    try {
+      await infrastructure.close()
+    } catch (cleanupError) {
+      if (replayFailure) {
+        throw new AggregateError(
+          [replayFailure.error, cleanupError],
+          'Replay and fixture cleanup both failed',
+          { cause: cleanupError },
+        )
+      }
+      throw cleanupError
+    }
   }
 })

@@ -6,6 +6,21 @@ import Redis from 'ioredis'
 
 const exec = promisify(execFile)
 
+async function docker(args: string[], timeout = 30_000) {
+  const running = exec('docker', args, { timeout, killSignal: 'SIGKILL' })
+  // Playwright may terminate its worker after a test timeout. Do not leave the
+  // CLI waiting on the daemon after the worker exits.
+  const stop = () => {
+    running.child.kill('SIGKILL')
+  }
+  process.once('exit', stop)
+  try {
+    return await running
+  } finally {
+    process.removeListener('exit', stop)
+  }
+}
+
 // Replay recovery must never inspect rooms from the main browser suite.
 // Own both backing stores, publishing only randomly assigned loopback ports.
 export async function replayInfrastructure() {
@@ -18,9 +33,13 @@ export async function replayInfrastructure() {
       database?.end({ timeout: 1 }),
       ...containers.map(async (name) => {
         try {
-          await exec('docker', ['rm', '-f', name])
+          await docker(['rm', '-f', name], 10_000)
         } catch (error) {
-          if (!String(error).includes('No such container')) throw error
+          if (!String(error).includes('No such container'))
+            throw new Error(
+              `Could not remove owned replay container ${name}; retry docker rm -f ${name} when the daemon responds`,
+              { cause: error },
+            )
         }
       }),
     ])
@@ -28,7 +47,7 @@ export async function replayInfrastructure() {
     if (errors.length)
       throw new AggregateError(
         errors.map((result) => result.reason),
-        'Replay fixture cleanup failed',
+        `Replay fixture cleanup failed; owned containers: ${containers.join(', ')}`,
       )
   }
   async function container(image: string, internalPort: number, args: string[] = []) {
@@ -36,7 +55,7 @@ export async function replayInfrastructure() {
     // Register before creation so even a partially successful docker run is
     // cleaned up. Names are unique and cannot target any pre-existing service.
     containers.push(name)
-    await exec('docker', [
+    await docker([
       'run',
       '-d',
       '--rm',
@@ -49,7 +68,7 @@ export async function replayInfrastructure() {
       ...args,
       image,
     ])
-    const published = await exec('docker', ['port', name, `${internalPort}/tcp`])
+    const published = await docker(['port', name, `${internalPort}/tcp`], 10_000)
     return published.stdout.trim()
   }
   try {
@@ -61,6 +80,10 @@ export async function replayInfrastructure() {
       `POSTGRES_PASSWORD=${password}`,
       '-e',
       'POSTGRES_DB=cab_replay',
+      // Disposable PG still has real WAL/fsync semantics; tmpfs avoids slow
+      // overlay-disk initialization under concurrent builds.
+      '--tmpfs',
+      '/var/lib/postgresql/data:rw,size=256m',
     ])
     const redisAddress = await container('valkey/valkey:8-alpine', 6379)
     const databaseUrl = `postgres://cab_replay:${password}@${pgAddress}/cab_replay`
@@ -108,9 +131,13 @@ export async function replayInfrastructure() {
     try {
       await close()
     } catch (cleanupError) {
-      throw new AggregateError([error, cleanupError], 'Replay fixture setup and cleanup failed', {
-        cause: cleanupError,
-      })
+      throw new AggregateError(
+        [error, cleanupError],
+        `Replay fixture setup and cleanup failed; owned containers: ${containers.join(', ')}`,
+        {
+          cause: cleanupError,
+        },
+      )
     }
     throw new Error(
       'Seeded replay needs a working Docker daemon and postgres:17-alpine / valkey/valkey:8-alpine images; fixture setup failed',

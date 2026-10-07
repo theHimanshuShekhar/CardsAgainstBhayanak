@@ -128,3 +128,8 @@ card API so background seeding cannot change that catalog. Its two production se
 own this storage, so their boot recovery cannot race the main browser suite.
 The fixture removes its containers after success or setup/server failure;
 unavailable Docker produces an actionable failure rather than skipping coverage.
+
+Docker commands have bounded deadlines (30 seconds for creation, 10 seconds
+for port lookup and cleanup). Cleanup errors name the exact owned containers
+for a later retry; the fixture kills pending CLI processes when its worker exits.
+Disposable PostgreSQL data uses tmpfs to reduce disk contention.
