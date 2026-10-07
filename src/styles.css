@@ -2505,3 +2505,26 @@ button {
     grid-template-columns: 120px 1fr 50px;
   }
 }
+
+/* Shared error feedback stays legible without colour accents. */
+.error-notice {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-block: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--hairline-3);
+  border-left: 3px solid var(--white);
+  border-radius: var(--radius-sm);
+  background: var(--black-3);
+  color: var(--white);
+  font-size: 13px;
+  line-height: 1.5;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.error-notice-label {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+}

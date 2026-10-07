@@ -1,3 +1,4 @@
+import { ErrorNotice } from '~/components/ui/ErrorNotice'
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useState } from 'react'
 import { Topbar } from '~/components/ui/Topbar'
@@ -134,11 +135,7 @@ function JoinScreen() {
             </div>
           </div>
 
-          {error && (
-            <div className="muted" style={{ fontSize: 13, color: 'red' }}>
-              {error}
-            </div>
-          )}
+          {error && <ErrorNotice>{error}</ErrorNotice>}
 
           <button
             className="btn btn-primary btn-block btn-lg"
