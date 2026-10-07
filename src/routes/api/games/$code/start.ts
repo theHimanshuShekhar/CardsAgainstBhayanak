@@ -13,7 +13,7 @@ export const Route = createFileRoute('/api/games/$code/start')({
   server: {
     handlers: {
       POST: async ({ request, params }) => {
-        const auth = await authenticate(request)
+        const auth = await authenticate(request, params.code.toUpperCase())
         if (!auth) return errorResponse(401, 'not_authorized', 'Missing or invalid token')
 
         // S3-1: room codes are stored raw-uppercase; normalize the URL param
@@ -46,7 +46,9 @@ export const Route = createFileRoute('/api/games/$code/start')({
         if (Number(packCount?.cnt ?? 0) === 0)
           return errorResponse(503, 'internal_error', 'No card data available')
 
-        await engine.startGame(code)
+        if (!(await authenticate(request, code)))
+          return errorResponse(401, 'not_authorized', 'Missing or invalid token')
+        await engine.startGame(code, auth.playerId)
 
         // N-1: the engine is the sole emitter of `round_started`
         // (inside startRound). Emit `game_started` first so clients see

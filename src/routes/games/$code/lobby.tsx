@@ -1,3 +1,4 @@
+import { ErrorNotice } from '~/components/ui/ErrorNotice'
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { Topbar } from '~/components/ui/Topbar'
@@ -167,11 +168,7 @@ function LobbyScreen() {
         }
       />
       <div className="lobby-wrap fade-in">
-        {leaveError && (
-          <div role="alert" className="muted">
-            {leaveError}
-          </div>
-        )}
+        {leaveError && <ErrorNotice>{leaveError}</ErrorNotice>}
         <div className="lobby-hd">
           <div>
             <div className="eyebrow">Waiting for players</div>
@@ -231,11 +228,7 @@ function LobbyScreen() {
                   onChange={(c) => void updateConfig(c)}
                   packs={packs}
                 />
-                {configError && (
-                  <div className="muted" style={{ fontSize: 13, color: 'red' }}>
-                    {configError}
-                  </div>
-                )}
+                {configError && <ErrorNotice>{configError}</ErrorNotice>}
               </>
             ) : (
               <div className="sheet">
@@ -256,11 +249,7 @@ function LobbyScreen() {
                 </div>
               </div>
             )}
-            {startError && (
-              <div className="muted" style={{ fontSize: 13, color: 'red' }}>
-                {startError}
-              </div>
-            )}
+            {startError && <ErrorNotice>{startError}</ErrorNotice>}
             {isHost ? (
               <button
                 className="btn btn-primary btn-block btn-lg"

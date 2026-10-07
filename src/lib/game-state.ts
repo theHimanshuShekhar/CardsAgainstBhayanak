@@ -32,6 +32,45 @@ export async function getPlayer(code: string, playerId: string): Promise<GamePla
   return raw ? (JSON.parse(raw) as GamePlayer) : null
 }
 
+// Existing rooms may expire during an asynchronous command. Updating their
+// root must never create a new room, and host commands recheck membership at
+// the same atomic boundary as their write (including reset's state cleanup).
+export async function updateLiveRoom(
+  code: string,
+  patch: Record<string, string>,
+  hostPlayerId?: string,
+  clearKeys: string[] = [],
+): Promise<void> {
+  const result = await redis.eval(
+    `
+    if not redis.call('HGET', KEYS[1], 'status') then return 'invalid_token' end
+    if ARGV[2] ~= '' then
+      local raw = redis.call('HGET', KEYS[2], ARGV[2])
+      if not raw then return 'invalid_token' end
+      local player = cjson.decode(raw)
+      if player.status == 'dropped' then return 'player_dropped' end
+      if redis.call('HGET', KEYS[1], 'hostId') ~= ARGV[2] then return 'host_only' end
+    end
+    for i = 3, #KEYS do redis.call('DEL', KEYS[i]) end
+    for field, value in pairs(cjson.decode(ARGV[1])) do
+      redis.call('HSET', KEYS[1], field, value)
+    end
+    redis.call('EXPIRE', KEYS[1], ARGV[3])
+    return 1
+    `,
+    2 + clearKeys.length,
+    KEYS.game(code),
+    KEYS.players(code),
+    ...clearKeys,
+    JSON.stringify(patch),
+    hostPlayerId ?? '',
+    ROOM_TTL_SECONDS,
+  )
+  if (result === 'player_dropped') throw new GameCommandError('player_dropped', 'Player dropped')
+  if (result === 'host_only') throw new GameCommandError('host_only', 'Only the host can act')
+  if (result !== 1) throw new GameCommandError('invalid_token', 'Room session expired')
+}
+
 // S2-11: the read-modify-write must be atomic. A JS get → spread → hset
 // races concurrent callers (the grace-timeout drop vs. an engine score
 // update, or endRound clearing hasGambled for many players) and loses
@@ -438,6 +477,7 @@ export async function commitConfession(
 // Hydration queries may complete out of order. Publish only while this is
 // still the authoritative hand/counter; callers retry with the latest state.
 const PUBLISH_HAND_IF_CURRENT_LUA = `
+if not redis.call('HGET', KEYS[3], 'status') then return 'invalid_token' end
 local player = cjson.decode(redis.call('HGET', KEYS[1], ARGV[1]) or '{}')
 if (player.discardsUsed or 0) ~= tonumber(ARGV[3]) then return 0 end
 local expected = cjson.decode(ARGV[2])
@@ -457,19 +497,21 @@ export async function publishHandUpdateIfCurrent(
   discardsUsed: number,
   event: unknown,
 ): Promise<boolean> {
-  return (
-    (await redis.eval(
-      PUBLISH_HAND_IF_CURRENT_LUA,
-      2,
-      KEYS.players(code),
-      KEYS.hand(code, playerId),
-      playerId,
-      JSON.stringify(ids),
-      discardsUsed,
-      KEYS.channel(code),
-      JSON.stringify(event),
-    )) === 1
+  const result = await redis.eval(
+    PUBLISH_HAND_IF_CURRENT_LUA,
+    3,
+    KEYS.players(code),
+    KEYS.hand(code, playerId),
+    KEYS.game(code),
+    playerId,
+    JSON.stringify(ids),
+    discardsUsed,
+    KEYS.channel(code),
+    JSON.stringify(event),
   )
+  if (result === 'invalid_token')
+    throw new GameCommandError('invalid_token', 'Room session expired')
+  return result === 1
 }
 
 export async function removeFromHand(
@@ -619,6 +661,7 @@ export async function reconnectPlayer(code: string, playerId: string): Promise<b
   return Boolean(
     await redis.eval(
       `
+      if not redis.call('HGET', KEYS[4], 'status') then return 0 end
       local raw = redis.call('HGET', KEYS[1], ARGV[1])
       if not raw then return 0 end
       local player = cjson.decode(raw)
@@ -631,10 +674,11 @@ export async function reconnectPlayer(code: string, playerId: string): Promise<b
       redis.call('EXPIRE', KEYS[1], ARGV[2])
       return 1
       `,
-      3,
+      4,
       KEYS.players(code),
       KEYS.grace(code, playerId),
       KEYS.graceConnection(code, playerId),
+      KEYS.game(code),
       playerId,
       ROOM_TTL_SECONDS,
     ),
@@ -650,6 +694,7 @@ export async function disconnectPlayer(
   return Boolean(
     await redis.eval(
       `
+      if not redis.call('HGET', KEYS[4], 'status') then return 0 end
       local raw = redis.call('HGET', KEYS[1], ARGV[1])
       if not raw then return 0 end
       local player = cjson.decode(raw)
@@ -664,10 +709,11 @@ export async function disconnectPlayer(
       redis.call('EXPIRE', KEYS[1], ARGV[4])
       return 1
       `,
-      3,
+      4,
       KEYS.players(code),
       KEYS.grace(code, playerId),
       KEYS.graceConnection(code, playerId),
+      KEYS.game(code),
       playerId,
       deadline,
       ms,
@@ -684,6 +730,7 @@ export async function claimPlayerDrop(
   return Boolean(
     await redis.eval(
       `
+      if not redis.call('HGET', KEYS[4], 'status') then return 0 end
       local raw = redis.call('HGET', KEYS[1], ARGV[1])
       if not raw then return 0 end
       local player = cjson.decode(raw)
@@ -697,10 +744,11 @@ export async function claimPlayerDrop(
       redis.call('PUBLISH', ARGV[4], ARGV[5])
       return 1
       `,
-      3,
+      4,
       KEYS.players(code),
       KEYS.grace(code, playerId),
       KEYS.graceConnection(code, playerId),
+      KEYS.game(code),
       playerId,
       connection ?? '',
       ROOM_TTL_SECONDS,
@@ -711,7 +759,7 @@ export async function claimPlayerDrop(
 }
 
 export async function setCurrentRound(code: string, round: number): Promise<void> {
-  await redis.hset(KEYS.game(code), 'currentRound', String(round))
+  await updateLiveRoom(code, { currentRound: String(round) })
 }
 
 export async function getCurrentRound(code: string): Promise<number> {
@@ -797,6 +845,7 @@ export async function clearPostResolveResumeAt(code: string): Promise<void> {
 // guarantees exactly one caller sees the prior value; the other gets
 // nil and bails.
 const TAKE_RESUME_AT_LUA = `
+if not redis.call('HGET', KEYS[2], 'status') then return nil end
 local v = redis.call('HGET', KEYS[1], 'postResolveResumeAt')
 if not v then return nil end
 redis.call('HDEL', KEYS[1], 'postResolveResumeAt')
@@ -804,7 +853,7 @@ return v
 `
 
 export async function takePostResolveResumeAt(code: string): Promise<number | null> {
-  const v = await redis.eval(TAKE_RESUME_AT_LUA, 1, KEYS.round(code))
+  const v = await redis.eval(TAKE_RESUME_AT_LUA, 2, KEYS.round(code), KEYS.game(code))
   return v ? Number(v) : null
 }
 
@@ -838,6 +887,7 @@ export async function setRoundWinner(code: string, winnerId: string): Promise<vo
 // phase and identity in Redis prevents a delayed command from claiming a new
 // round after its own round's resolution fields have been cleared.
 const CLAIM_ROUND_OUTCOME_LUA = `
+if not redis.call('HGET', KEYS[2], 'status') then return 0 end
 if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1] then return 0 end
 if redis.call('HGET', KEYS[1], 'phase') ~= ARGV[2] then return 0 end
 if redis.call('HEXISTS', KEYS[1], 'outcomeClaim') == 1 then return 0 end
@@ -855,8 +905,9 @@ export async function claimRoundOutcome(
   return (
     (await redis.eval(
       CLAIM_ROUND_OUTCOME_LUA,
-      1,
+      2,
       KEYS.round(code),
+      KEYS.game(code),
       roundId,
       phase,
       winnerId,
@@ -866,6 +917,7 @@ export async function claimRoundOutcome(
 }
 
 const CLAIM_ROUND_COMPLETION_LUA = `
+if not redis.call('HGET', KEYS[2], 'status') then return 0 end
 if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1] then return 0 end
 if redis.call('HGET', KEYS[1], 'outcomeClaim') ~= ARGV[1] then return 0 end
 local ok = redis.call('HSETNX', KEYS[1], 'completionClaim', ARGV[1])
@@ -877,8 +929,9 @@ export async function claimRoundCompletion(code: string, roundId: string): Promi
   return (
     (await redis.eval(
       CLAIM_ROUND_COMPLETION_LUA,
-      1,
+      2,
       KEYS.round(code),
+      KEYS.game(code),
       roundId,
       ROOM_TTL_SECONDS,
     )) === 1
@@ -938,6 +991,7 @@ export async function clearSkippedPlayers(code: string): Promise<void> {
 // Turn validation, card removal and turn advancement are one operation.
 // A second frame from the old actor cannot remove another submission.
 const ELIMINATE_LUA = `
+if not redis.call('HGET', KEYS[4], 'status') then return nil end
 if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1] then return nil end
 if redis.call('HGET', KEYS[1], 'phase') ~= 'eliminating' then return nil end
 if ARGV[2] == '' or redis.call('HGET', KEYS[1], 'eliminationTurnPlayerId') ~= ARGV[2] then return nil end
@@ -976,10 +1030,11 @@ export async function commitElimination(
 ): Promise<string | null> {
   return (await redis.eval(
     ELIMINATE_LUA,
-    3,
+    4,
     KEYS.round(code),
     submissionsKey(code),
     KEYS.players(code),
+    KEYS.game(code),
     roundId,
     actorId,
     submissionKey,
@@ -991,6 +1046,7 @@ export async function commitElimination(
 // Register a ballot and close its election in one Redis operation. Only
 // the last accepted ballot can decide a winner or open the next revote.
 const VOTE_LUA = `
+if not redis.call('HGET', KEYS[8], 'status') then return nil end
 if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1] then return nil end
 if redis.call('HGET', KEYS[1], 'phase') ~= 'waiting' then return nil end
 if (redis.call('HGET', KEYS[1], 'voteEpoch') or '0') ~= ARGV[2] then return nil end
@@ -1049,7 +1105,7 @@ export async function commitVote(
 ): Promise<{ tally: Record<string, number>; leaders?: string[]; revote?: boolean } | null> {
   const raw = await redis.eval(
     VOTE_LUA,
-    7,
+    8,
     KEYS.round(code),
     KEYS.players(code),
     submissionsKey(code),
@@ -1057,6 +1113,7 @@ export async function commitVote(
     `${KEYS.round(code)}:voterchoices`,
     `${KEYS.round(code)}:votetally`,
     `${KEYS.round(code)}:tiebreak`,
+    KEYS.game(code),
     roundId,
     epoch,
     voterId,
