@@ -1,3 +1,4 @@
+import { ErrorNotice } from '~/components/ui/ErrorNotice'
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { Topbar } from '~/components/ui/Topbar'
@@ -236,11 +237,7 @@ function EndScreen() {
           </div>
         )}
 
-        {resetError && (
-          <div className="muted" style={{ fontSize: 13, color: 'red', marginTop: 12 }}>
-            {resetError}
-          </div>
-        )}
+        {resetError && <ErrorNotice>{resetError}</ErrorNotice>}
 
         <div style={{ display: 'flex', gap: 12, justifyContent: 'center', marginTop: 16 }}>
           <button className="btn btn-ghost" onClick={handlePlayAgain}>

@@ -31,7 +31,7 @@ export function chooseFirstCzar(activePlayerCount: number): number {
 // real activity; cheap (one HSET + one indexed UPDATE).
 export async function touchSessionActivity(code: string): Promise<void> {
   const now = Date.now()
-  await redis.hset(KEYS.game(code), 'lastActivityAt', String(now))
+  await state.updateLiveRoom(code, { lastActivityAt: String(now) })
   await db
     .update(gameSessions)
     .set({ lastActivityAt: new Date(now) })
@@ -100,11 +100,12 @@ export async function dealStartingHands(
   return hands
 }
 
-export async function startGame(code: string): Promise<void> {
+export async function startGame(code: string, hostPlayerId?: string): Promise<void> {
   const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
   if (!session) throw new Error('session not found')
   const config = session.config as GameConfig
 
+  await state.updateLiveRoom(code, {}, hostPlayerId)
   await buildDecks(code, config.packs)
 
   // Ordered by joined_at: czarOrder is built from this and the spec
@@ -157,18 +158,18 @@ export async function startGame(code: string): Promise<void> {
   // Round-1 Czar is a random offset into czarOrder; persist it so the
   // rotation is stable and seeded-RNG runs are deterministic.
   const firstCzarIdx = chooseFirstCzar(czarOrderIds.length)
-  await redis.hset(KEYS.game(code), 'czarStartOffset', String(firstCzarIdx))
+  await state.updateLiveRoom(code, { czarStartOffset: String(firstCzarIdx) }, hostPlayerId)
   await db
     .update(gameSessions)
     .set({ status: 'active', lastActivityAt: new Date() })
     .where(eq(gameSessions.id, session.id))
   // Lobby edits live in PostgreSQL. Freeze that authoritative config in
   // Redis before accepting game actions that validate rules atomically.
-  await redis
-    .multi()
-    .hset(KEYS.game(code), { status: 'active', config: JSON.stringify(config) })
-    .expire(KEYS.game(code), ROOM_TTL_SECONDS)
-    .exec()
+  await state.updateLiveRoom(
+    code,
+    { status: 'active', config: JSON.stringify(config) },
+    hostPlayerId,
+  )
 
   engineLogger.info({ code, firstCzarIdx, players: activePlayers.length }, 'game started')
 }
@@ -201,7 +202,7 @@ export async function startRound(
       .limit(1)
     if (haiku) {
       black = haiku.black_cards
-      await redis.hset(KEYS.game(code), 'happyEndingFinal', '1')
+      await state.updateLiveRoom(code, { happyEndingFinal: '1' })
       await redis.hdel(KEYS.game(code), 'happyEndingArmed')
     } else {
       engineLogger.error({ code }, 'happy_ending: armed but Haiku card not seeded; falling back')
@@ -1019,7 +1020,7 @@ async function finalizeRoundAfterPause(code: string): Promise<void> {
 }
 
 export async function endGame(code: string, mode: GameOverMode, winnerId?: string): Promise<void> {
-  await redis.hset(KEYS.game(code), 'status', 'ended')
+  await state.updateLiveRoom(code, { status: 'ended' })
   const players = await state.getAllPlayers(code)
   const finalScores = toPlayerScores(players, null)
 
@@ -1050,7 +1051,11 @@ export async function endGame(code: string, mode: GameOverMode, winnerId?: strin
 // state, zeroes carried players, and either drops back to the lobby
 // (`lobby`) or starts a fresh game immediately (`rematch`). The session
 // must be `ended` — the endpoint enforces that and host-only.
-export async function resetGame(code: string, mode: ResetMode): Promise<void> {
+export async function resetGame(
+  code: string,
+  mode: ResetMode,
+  hostPlayerId?: string,
+): Promise<void> {
   const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
   if (!session) throw new Error('session not found')
 
@@ -1061,19 +1066,16 @@ export async function resetGame(code: string, mode: ResetMode): Promise<void> {
   // Wipe all per-round Redis state. The room hash and players hash
   // survive; the round hash, decks, discards, czarOrder and every hand
   // are rebuilt fresh by startGame (rematch) or left empty (lobby).
-  const pipeline = redis.multi()
-  pipeline.del(KEYS.round(code))
-  pipeline.del(KEYS.deckBlack(code))
-  pipeline.del(KEYS.deckWhite(code))
-  pipeline.del(KEYS.discardWhite(code))
-  pipeline.del(KEYS.discardBlack(code))
-  pipeline.del(KEYS.czarOrder(code))
-  for (const p of before) pipeline.del(KEYS.hand(code, p.id))
-  // Round/phase bookkeeping lives on the room hash; reset it to a
-  // pre-game state (startGame re-stamps czarStartOffset for rematch).
-  pipeline.hset(KEYS.game(code), { currentRound: '0', czarIndex: '-1' })
-  pipeline.hdel(KEYS.game(code), 'czarStartOffset', 'happyEndingArmed', 'happyEndingFinal')
-  await pipeline.exec()
+  await state.updateLiveRoom(code, { currentRound: '0', czarIndex: '-1' }, hostPlayerId, [
+    KEYS.round(code),
+    KEYS.deckBlack(code),
+    KEYS.deckWhite(code),
+    KEYS.discardWhite(code),
+    KEYS.discardBlack(code),
+    KEYS.czarOrder(code),
+    ...before.map((p) => KEYS.hand(code, p.id)),
+  ])
+  await redis.hdel(KEYS.game(code), 'czarStartOffset', 'happyEndingArmed', 'happyEndingFinal')
 
   // Drop the prior game's round history. buildSnapshot derives the live
   // round from max(gameRounds.roundNum), and startRound inserts with
@@ -1125,7 +1127,7 @@ export async function resetGame(code: string, mode: ResetMode): Promise<void> {
     .where(eq(gameSessions.id, session.id))
 
   if (mode === 'lobby') {
-    await redis.hset(KEYS.game(code), 'status', 'lobby')
+    await state.updateLiveRoom(code, { status: 'lobby' }, hostPlayerId)
     const players = await state.getAllPlayers(code)
     await state.publishEvent(code, {
       type: 'lobby_snapshot',
@@ -1143,7 +1145,7 @@ export async function resetGame(code: string, mode: ResetMode): Promise<void> {
   // czarOrder / hands and flips the room status to active; the late
   // reconnect is hydrated by rejoin → state_snapshot (existing path).
   await state.publishEvent(code, { type: 'game_reset', mode })
-  await startGame(code)
+  await startGame(code, hostPlayerId)
   await state.publishEvent(code, { type: 'game_started', firstRound: 1 })
   await startRound(code, 1)
   engineLogger.info({ code }, 'game reset — rematch started')
@@ -1230,8 +1232,7 @@ export async function migrateHost(code: string): Promise<string | null> {
     if (p.isHost && p.id !== next.id) await state.updatePlayer(code, p.id, { isHost: false })
   }
   await state.updatePlayer(code, next.id, { isHost: true })
-  await redis.hset(KEYS.game(code), 'hostId', next.id)
-  await redis.expire(KEYS.game(code), ROOM_TTL_SECONDS)
+  await state.updateLiveRoom(code, { hostId: next.id })
 
   await db
     .update(gameSessions)
@@ -1254,8 +1255,7 @@ export async function pauseGame(code: string): Promise<void> {
   const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
   if (!session || session.status !== 'active') return
   await db.update(gameSessions).set({ status: 'paused' }).where(eq(gameSessions.id, session.id))
-  await redis.hset(KEYS.game(code), 'status', 'paused')
-  await redis.expire(KEYS.game(code), ROOM_TTL_SECONDS)
+  await state.updateLiveRoom(code, { status: 'paused' })
   engineLogger.info({ code }, 'all players dropped — game paused')
 }
 
@@ -1291,8 +1291,7 @@ export async function resumeIfReady(code: string): Promise<void> {
   // Flip active *before* voidRound — it (and startRound's downstream
   // helpers) no-op unless the session is 'active'.
   await db.update(gameSessions).set({ status: 'active' }).where(eq(gameSessions.id, session.id))
-  await redis.hset(KEYS.game(code), 'status', 'active')
-  await redis.expire(KEYS.game(code), ROOM_TTL_SECONDS)
+  await state.updateLiveRoom(code, { status: 'active' })
   engineLogger.info({ code, humans: humans.length }, 'game resumed from pause')
 
   await voidRound(code, 'resumed after pause')
@@ -1785,8 +1784,7 @@ export async function triggerHappyEnding(code: string, playerId: string): Promis
   // it sees the flag, so we don't race the deck LPUSH against the next
   // LPOP (a slow trigger could otherwise land between rounds and pin the
   // Haiku two rounds out).
-  await redis.hset(KEYS.game(code), 'happyEndingArmed', '1')
-  await redis.expire(KEYS.game(code), ROOM_TTL_SECONDS)
+  await state.updateLiveRoom(code, { happyEndingArmed: '1' }, playerId)
   engineLogger.info({ code, playerId }, 'happy ending armed')
   captureServerEvent(await distinctIdFor(code, playerId), 'cab_rule_triggered', {
     roomCode: code,

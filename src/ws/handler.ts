@@ -14,6 +14,7 @@ import { ClientMessageSchema } from './client-message'
 import { redis, getSubscriber, KEYS } from '~/lib/redis'
 import * as engine from '~/lib/game-engine'
 import { GameCommandError } from '~/lib/game-command-error'
+import { getRoomParticipation } from '~/lib/room-session'
 import * as state from '~/lib/game-state'
 import { TIMING } from '~/lib/timing'
 import type {
@@ -251,14 +252,19 @@ function broadcast(code: string, event: ServerToClientEvent): void {
   }
 }
 
-function revokePlayerSockets(code: string, playerId: string): void {
+function revokePlayerSockets(
+  code: string,
+  playerId: string,
+  errorCode: 'player_dropped' | 'invalid_token' = 'player_dropped',
+): void {
   for (const peer of roomPeers.get(code) ?? []) {
     if (peerContext.get(peer)?.playerId !== playerId) continue
     roomPeers.get(code)?.delete(peer)
     openPeers.delete(peer)
     peerContext.delete(peer)
-    send(peer, { type: 'auth_error', code: 'player_dropped', message: 'player dropped' })
-    peer.close(1008, 'player dropped')
+    const message = errorCode === 'player_dropped' ? 'player dropped' : 'invalid token'
+    send(peer, { type: 'auth_error', code: errorCode, message })
+    peer.close(1008, message)
   }
 }
 
@@ -392,13 +398,17 @@ export const wsHooks = {
         await ensureSubscriber(ctx.code)
         // Authentication can finish after a pending socket disconnected.
         if (peerContext.get(peer) !== ctx) return
-        const player = await state.getPlayer(ctx.code, auth.playerId)
+        const participation = await getRoomParticipation(ctx.code, auth.playerId)
         if (peerContext.get(peer) !== ctx) return
-        if (!player || player.status === 'dropped') {
-          send(peer, { type: 'auth_error', code: 'player_dropped', message: 'player dropped' })
+        if (!participation.ok) {
+          send(peer, {
+            type: 'auth_error',
+            code: participation.code,
+            message: participation.code === 'player_dropped' ? 'player dropped' : 'invalid token',
+          })
           openPeers.delete(peer)
           peerContext.delete(peer)
-          peer.close(1008, 'player dropped')
+          peer.close(1008, 'authentication failed')
           return
         }
         ctx.playerId = auth.playerId
@@ -411,7 +421,8 @@ export const wsHooks = {
         const restored = await ctx.authSetup
         if (peerContext.get(peer) !== ctx) return
         if (!restored) {
-          revokePlayerSockets(ctx.code, auth.playerId)
+          const current = await getRoomParticipation(ctx.code, auth.playerId)
+          revokePlayerSockets(ctx.code, auth.playerId, current.ok ? 'invalid_token' : current.code)
           return
         }
         ctx.lastPing = Date.now()
@@ -425,13 +436,14 @@ export const wsHooks = {
       // A socket authenticates identity, not permanent participation.
       // HTTP leave, activation and another connection can change it.
       if (ctx.leaving) return
-      const currentPlayer = await state.getPlayer(ctx.code, ctx.playerId)
+      const participation = await getRoomParticipation(ctx.code, ctx.playerId)
       if (peerContext.get(peer) !== ctx) return
       if (ctx.leaving) return
-      if (!currentPlayer || currentPlayer.status === 'dropped') {
-        revokePlayerSockets(ctx.code, ctx.playerId)
+      if (!participation.ok) {
+        revokePlayerSockets(ctx.code, ctx.playerId, participation.code)
         return
       }
+      const currentPlayer = participation.player
       if (GAME_ACTIONS.has(parsed.type)) {
         if (currentPlayer.role === 'spectator') {
           return send(peer, {
@@ -574,8 +586,13 @@ export const wsHooks = {
     // Grace window: drop only if the player never reconnected (auth
     // flips 'grace' → 'active'). dropPlayer runs the void/migrate/pause
     // path and is idempotent.
-    setTimeout(async () => {
-      if (!hasOtherSocket()) await engine.dropPlayer(code, playerId, 'grace', deadline)
+    setTimeout(() => {
+      if (!hasOtherSocket()) {
+        void engine.dropPlayer(code, playerId, 'grace', deadline).catch((err) => {
+          if (err instanceof GameCommandError && err.code === 'invalid_token') return
+          wsLogger.error({ err: sanitizeServerException(err), code, playerId }, 'grace drop failed')
+        })
+      }
     }, TIMING.GRACE_WINDOW_MS + 100)
 
     wsLogger.info({ code, playerId }, 'peer closed')
