@@ -149,11 +149,13 @@ async function replay(noiseBeforeGame: boolean, env: { DATABASE_URL: string; RED
     const initial = await Promise.all(peers.map((peer) => peer.snapshot()))
     for (const [i, peer] of peers.entries()) {
       const snapshot = initial[i]!
+      const receiptMarker = peer.events.length
       peer.send({
         type: 'play',
+        commandId: `replay-play-${i}`,
         cardIds: snapshot.hand!.slice(0, snapshot.prompt.pick).map((card) => card.id),
       })
-      await peer.wait('player_played')
+      await peer.wait('command_accepted', receiptMarker)
     }
     await expect.poll(async () => (await peers[0]!.snapshot()).phase).toBe('waiting')
     const submissions = (await peers[0]!.snapshot()).submissions
@@ -214,19 +216,18 @@ test('seeded tied ballots repeat the winner despite distinct same-millisecond ra
     console.info('Seeded replays matched hands and winner; rate-limit entries remained distinct')
   } catch (error) {
     replayFailure = { error }
-    throw error
-  } finally {
-    try {
-      await infrastructure.close()
-    } catch (cleanupError) {
-      if (replayFailure) {
-        throw new AggregateError(
-          [replayFailure.error, cleanupError],
-          'Replay and fixture cleanup both failed',
-          { cause: cleanupError },
-        )
-      }
-      throw cleanupError
-    }
   }
+  try {
+    await infrastructure.close()
+  } catch (cleanupError) {
+    if (replayFailure) {
+      throw new AggregateError(
+        [replayFailure.error, cleanupError],
+        'Replay and fixture cleanup both failed',
+        { cause: cleanupError },
+      )
+    }
+    throw cleanupError
+  }
+  if (replayFailure) throw replayFailure.error
 })

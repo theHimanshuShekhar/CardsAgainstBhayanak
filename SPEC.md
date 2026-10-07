@@ -637,6 +637,7 @@ export function pick<T>(array: T[]): T // single random element
 - In production, the PRNG is seeded once at boot from `crypto.randomBytes(16)`. No determinism.
 - In tests, `CAB_RNG_SEED` env var is the seed → fully reproducible outcomes (first Czar, deck shuffle, Rando card picks, modal-rule random choices).
 - Crypto-strength randomness (room codes, sessionToken HMAC nonces) uses `crypto` directly — never goes through this wrapper. Rate-limit entry nonces use `crypto.randomUUID()` for infrastructure uniqueness, independently of the game PRNG; rate-limit traffic must not change seeded game outcomes.
+- Submission shuffles start from the persisted Czar roster order, with Rando last and a player’s gambled answer after their primary answer. Redis hash traversal order must not affect seeded outcomes.
 - Final tied ballots sort tied candidates by numeric public submission order before the seeded draw, so tally iteration order cannot change the winner.
 
 ### Card pool

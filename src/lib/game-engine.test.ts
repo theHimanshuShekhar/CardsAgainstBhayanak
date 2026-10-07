@@ -5,6 +5,7 @@ import {
   toPlayerScores,
   dedupeCardIdsByText,
   chooseVoteWinner,
+  orderedSubmissionKeys,
 } from './game-engine'
 import type { GamePlayer } from './types'
 
@@ -50,6 +51,21 @@ describe('game-engine', () => {
       return chooseVoteWinner(leaders)
     })
     expect(winners).toEqual(['2', '2', '2'])
+  })
+
+  it('submission order follows participation rather than storage traversal or opaque identity', () => {
+    expect(
+      orderedSubmissionKeys(
+        ['rando-d', 'guest-c:gamble', 'guest-c', 'host-a'],
+        ['host-a', 'czar-b', 'guest-c', 'rando-d'],
+      ),
+    ).toEqual(['host-a', 'guest-c', 'guest-c:gamble', 'rando-d'])
+    expect(
+      orderedSubmissionKeys(
+        ['opaque-z', 'opaque-x', 'opaque-x:gamble', 'opaque-y'],
+        ['opaque-z', 'unsubmitted-czar', 'opaque-x', 'opaque-y'],
+      ),
+    ).toEqual(['opaque-z', 'opaque-x', 'opaque-x:gamble', 'opaque-y'])
   })
 
   describe('toPlayerScores', () => {

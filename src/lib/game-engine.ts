@@ -556,6 +556,13 @@ export function publicIdForKey(order: string[], key: string): string {
   return String(order.indexOf(key))
 }
 
+// Equivalent participation has the same input to a seeded shuffle, even when
+// Redis traverses differently or a replay allocates different opaque IDs.
+export function orderedSubmissionKeys(keys: string[], participantOrder: string[]): string[] {
+  const available = new Set(keys)
+  return participantOrder.flatMap((id) => [id, `${id}:gamble`]).filter((key) => available.has(key))
+}
+
 function submissionComplete(
   player: GamePlayer,
   submissions: Record<string, Submission>,
@@ -644,7 +651,14 @@ export async function checkRoundReady(code: string): Promise<void> {
 
   // Permute storage keys once; persist so pick/vote/eliminate and the
   // rejoin snapshot all agree on index → submission.
-  const order = shuffle(Object.keys(submissions))
+  // Redis hash traversal depends on opaque random player IDs. Start from
+  // the stable roster before shuffling so a seeded game is reproducible.
+  // Rando has no Czar turn; its submission follows the human roster.
+  const participants = [
+    ...(await state.getCzarOrder(code)),
+    ...players.filter((player) => player.isRando).map((player) => player.id),
+  ]
+  const order = shuffle(orderedSubmissionKeys(Object.keys(submissions), participants))
   const orderJson = JSON.stringify(order)
   await redis.set(subOrderKey(code), orderJson, 'EX', ROOM_TTL_SECONDS)
 
