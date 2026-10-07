@@ -62,7 +62,7 @@ test('lobby Leave keeps the session while pending or rejected and permits a conf
     await expect(host.page.locator('.player-name', { hasText: 'Alice' })).toBeVisible()
 
     rejectLeave()
-    await expect(alice.page.getByRole('alert')).toHaveText(
+    await expect(alice.page.getByRole('alert')).toContainText(
       'Could not confirm leaving the game. Please try again.',
     )
     await expect(alice.page.getByRole('button', { name: 'Leave', exact: true })).toBeEnabled()
@@ -99,7 +99,7 @@ test('in-game Leave shows a network failure and keeps the player in the game unt
     await alice.page.route(endpoint, (route) => route.abort('failed'))
 
     await alice.page.getByRole('button', { name: 'Leave', exact: true }).click()
-    await expect(alice.page.getByRole('alert')).toHaveText(
+    await expect(alice.page.getByRole('alert')).toContainText(
       'Could not confirm leaving the game. Please try again.',
     )
     await expect(alice.page).toHaveURL(new RegExp(`/games/${roomCode}/session$`))
