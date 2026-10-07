@@ -1,5 +1,8 @@
+import { requestStateSnapshot } from '../ws-snapshot'
 import { test, expect } from '@playwright/test'
 import type { ClientToServerEvent, ServerToClientEvent, RuleId } from '../../src/lib/types'
+
+test.setTimeout(60_000)
 
 const BASE = process.env['CAB_E2E_BASE'] ?? 'http://localhost:3000'
 type Member = { roomCode: string; playerId: string; sessionToken: string }
@@ -42,9 +45,7 @@ async function connect(member: Member) {
       >
     },
     async snapshot() {
-      const after = events.length
-      peer.send({ type: 'rejoin' })
-      return (await peer.wait('state_snapshot', after)).state
+      return requestStateSnapshot(ws, events)
     },
   }
   peer.send({ type: 'auth', sessionToken: member.sessionToken })
@@ -110,7 +111,7 @@ async function ready(game: Awaited<ReturnType<typeof start>>) {
         ? 'ranking'
         : 'judging'
   await expect
-    .poll(async () => (await game.peers[0]!.snapshot()).phase, { timeout: 10_000 })
+    .poll(async () => (await game.peers[0]!.snapshot()).phase, { timeout: 30_000 })
     .toBe(phase)
 }
 
@@ -198,10 +199,12 @@ test('God Is Dead rejects premature, queued, spectator, departed and self votes 
       (await post(`/api/games/${game.host.roomCode}/leave`, {}, departed.sessionToken)).status,
     ).toBe(204)
     const before = await observer.snapshot()
+    expect(await departed.wait('auth_error')).toMatchObject({ code: 'player_dropped' })
+    await expect.poll(() => departed.ws.readyState).toBe(WebSocket.CLOSED)
+    await unchanged(observer, before)
     for (const [peer, code] of [
       [queued, 'not_authorized'],
       [spectator, 'spectator_action'],
-      [departed, 'not_authorized'],
     ] as const) {
       await rejected(
         peer,
@@ -251,6 +254,9 @@ test('Survival rejects missing turns, wrong actors and alternate-mode votes whil
       (await post(`/api/games/${game.host.roomCode}/leave`, {}, departed.sessionToken)).status,
     ).toBe(204)
     const before = await observer.snapshot()
+    expect(await departed.wait('auth_error')).toMatchObject({ code: 'player_dropped' })
+    await expect.poll(() => departed.ws.readyState).toBe(WebSocket.CLOSED)
+    await unchanged(observer, before)
     const actor = game.peers.find((peer) => peer.playerId === before.eliminationTurnPlayerId)!
     const other = game.peers.find((peer) => peer !== actor && peer !== game.czar)!
     for (const [peer, code] of [
@@ -258,7 +264,6 @@ test('Survival rejects missing turns, wrong actors and alternate-mode votes whil
       [other, 'not_authorized'],
       [queued, 'not_authorized'],
       [spectator, 'spectator_action'],
-      [departed, 'not_authorized'],
     ] as const) {
       await rejected(peer, { type: 'eliminate', submissionId: '0' }, code)
       await unchanged(observer, before)

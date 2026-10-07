@@ -5,6 +5,14 @@ import type { ServerToClientEvent } from '../../src/lib/types'
 
 const BASE = process.env['CAB_E2E_BASE'] ?? 'http://localhost:3000'
 
+// Deliberate abuse consumes process-local IP buckets that Redis teardown
+// cannot reset. Let their documented one-minute refill complete before
+// unrelated files authenticate ordinary clients on the same loopback IP.
+test.afterAll(async () => {
+  test.setTimeout(70_000)
+  await new Promise((resolve) => setTimeout(resolve, 60_000))
+})
+
 async function createRoom() {
   const { packs } = (await (await fetch(`${BASE}/api/packs`)).json()) as {
     packs: { id: string }[]

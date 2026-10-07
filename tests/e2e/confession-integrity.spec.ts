@@ -1,3 +1,4 @@
+import { requestStateSnapshot } from '../ws-snapshot'
 import { test, expect } from '@playwright/test'
 import type { ClientToServerEvent, ServerToClientEvent, RuleId } from '../../src/lib/types'
 
@@ -46,31 +47,7 @@ async function connect(member: Member) {
       >
     },
     async snapshot() {
-      for (let attempt = 0; attempt < 8; attempt++) {
-        const after = events.length
-        peer.send({ type: 'rejoin' })
-        await expect
-          .poll(
-            () =>
-              events
-                .slice(after)
-                .find((event) => event.type === 'state_snapshot' || event.type === 'error'),
-            { timeout: 10_000 },
-          )
-          .toBeTruthy()
-        const reply = events
-          .slice(after)
-          .find((event) => event.type === 'state_snapshot' || event.type === 'error')!
-        if (reply.type === 'state_snapshot') return reply.state
-        expect(reply).toMatchObject({
-          type: 'error',
-          code: 'rate_limited',
-          retryAfterMs: expect.any(Number),
-        })
-        if (reply.type === 'error')
-          await new Promise((resolve) => setTimeout(resolve, reply.retryAfterMs! + 25))
-      }
-      throw new Error('Snapshot retry budget exhausted')
+      return requestStateSnapshot(ws, events)
     },
   }
   peer.send({ type: 'auth', sessionToken: member.sessionToken })
