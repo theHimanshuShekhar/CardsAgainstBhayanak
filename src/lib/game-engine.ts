@@ -506,7 +506,9 @@ export async function restoreRoundTimers(): Promise<void> {
       const czarId = roundRow?.czarPlayerId ?? null
       const players = await state.getAllPlayers(code)
       const config = s.config as GameConfig
-      void transitionAfterReveal(code, config, czarId, players).catch((err) =>
+      const roundId = await currentRoundIdentity(code)
+      if (!roundId) continue
+      void transitionAfterReveal(code, config, czarId, players, roundId).catch((err) =>
         engineLogger.error({ err, code }, 'reveal fast-forward failed'),
       )
       engineLogger.info({ code }, 'reveal phase fast-forwarded')
@@ -662,56 +664,52 @@ export async function checkRoundReady(code: string): Promise<void> {
   const orderJson = JSON.stringify(order)
   await redis.set(subOrderKey(code), orderJson, 'EX', ROOM_TTL_SECONDS)
 
+  const roundId = await currentRoundIdentity(code)
+  if (!roundId) return
   await state.setPhase(code, 'reveal')
   await state.publishEvent(code, { type: 'reveal_start' })
   for (let i = 0; i < order.length; i++) {
     const sub = submissions[order[i]!]
     if (!sub) continue
     await sleep(REVEAL_STAGGER)
-    // `pick` is not phase-gated: pickWinner → endRound can resolve and
-    // advance the round while this loop is still sleeping between
-    // staggered reveals. endRound deletes subOrderKey; a fresh round
-    // rewrites it with a new order. Either way, emitting more
-    // card_revealed frames for a finished round lands them after the
-    // client's round_started cleared submissions[], producing a sparse
-    // array that crashes the next round's render. Bail the instant this
-    // reveal sequence is no longer the live one.
-    if ((await redis.get(subOrderKey(code))) !== orderJson) return
-    await redis.set(revealedKey(code), String(i + 1), 'EX', ROOM_TTL_SECONDS)
-    await state.publishEvent(code, { type: 'card_revealed', submissionIndex: i, fills: sub.fills })
+    if (
+      !(await state.publishRoundReveals(code, roundId, [{ submissionIndex: i, fills: sub.fills }]))
+    )
+      return
   }
 
-  await transitionAfterReveal(code, config, czarId, players)
+  await transitionAfterReveal(code, config, czarId, players, roundId)
 }
 
-// S2-NEW: extracted so the boot path can fast-forward a round whose
-// reveal-loop crashed mid-stagger. Idempotent — re-publishing
-// elimination_turn / vote_tally is harmless (the client just re-syncs)
-// and setPhase is a single HSET.
+// Boot recovery can fast-forward an interrupted reveal. The handoff is
+// claimed against the original round, so a fallback or newer round wins
+// over any sleeping callback.
 async function transitionAfterReveal(
   code: string,
   config: GameConfig,
   czarId: string | null,
   players: GamePlayer[],
+  roundId: string,
 ): Promise<void> {
-  if (config.rules.includes('survival')) {
-    await state.setPhase(code, 'eliminating')
-    const turnOrder = players.filter((p) => p.status === 'active' && p.id !== czarId && !p.isRando)
-    const firstP = turnOrder[0]
-    if (firstP) {
-      await redis.hset(KEYS.round(code), 'eliminationTurnPlayerId', firstP.id)
-      await redis.expire(KEYS.round(code), ROOM_TTL_SECONDS)
-      await state.publishEvent(code, { type: 'elimination_turn', playerId: firstP.id })
-    }
-  } else if (config.rules.includes('godmode')) {
-    await state.setPhase(code, 'waiting')
-    await state.publishEvent(code, { type: 'vote_tally', votes: {} })
-  } else if (config.rules.includes('serious_business')) {
-    await state.setPhase(code, 'ranking')
-  } else {
-    await state.setPhase(code, 'judging')
-  }
-  // serious_business / normal: the Czar now ranks / picks (client-driven).
+  const phase = config.rules.includes('survival')
+    ? 'eliminating'
+    : config.rules.includes('godmode')
+      ? 'waiting'
+      : config.rules.includes('serious_business')
+        ? 'ranking'
+        : 'judging'
+  const firstPlayer =
+    phase === 'eliminating'
+      ? players.find((p) => p.status === 'active' && p.id !== czarId && !p.isRando)
+      : undefined
+  if (!(await state.advanceRevealedRound(code, roundId, phase, firstPlayer?.id))) return
+  if (firstPlayer)
+    await state.publishEvent(code, { type: 'elimination_turn', playerId: firstPlayer.id })
+  if (phase === 'waiting') await state.publishEvent(code, { type: 'vote_tally', votes: {} })
+  // A permanent drop can race the reveal-to-judging handoff. Whichever
+  // phase it observed, the shared claim lets exactly one fallback finish.
+  if (czarId && phase !== 'waiting' && (await state.getPlayer(code, czarId))?.status === 'dropped')
+    await resolveDroppedCzar(code, czarId, roundId, config, phase)
 }
 
 // Report the command outcome at its mutation, before asynchronous reveals
@@ -844,6 +842,17 @@ export async function pickWinner(
   onOutcome?: (accepted: boolean) => void,
 ): Promise<void> {
   const roundId = await authorizeCzarResolution(code, czarId, 'pick')
+  await resolvePickedWinner(code, czarId, submissionId, roundId, 'judging', onOutcome)
+}
+
+async function resolvePickedWinner(
+  code: string,
+  czarId: string,
+  submissionId: string,
+  roundId: string,
+  phase: 'judging' | 'reveal',
+  onOutcome?: (accepted: boolean) => void,
+): Promise<void> {
   const submissions = await state.getSubmissions(code)
   const winnerKey = await resolveSubmissionKey(code, submissionId)
   if (!winnerKey || !submissions[winnerKey])
@@ -855,11 +864,13 @@ export async function pickWinner(
   // async task. Without a single-writer claim, scoring runs twice and
   // endRound interleaves through the non-atomic setHand (del + rpush),
   // producing 20-card hands.
-  const claimed = await state.claimRoundOutcome(code, roundId, 'judging', winnerPlayerId)
+  const claimed = await state.claimRoundOutcome(code, roundId, phase, winnerPlayerId)
   if (!claimed) {
     onOutcome?.(false)
     return
   }
+
+  if (phase === 'reveal') await finishClaimedReveal(code, roundId, submissions)
 
   const winner = await state.getPlayer(code, winnerPlayerId)
   if (!winner) throw new Error('winner not found')
@@ -1352,18 +1363,78 @@ export async function dropPlayer(
     await migrateHost(code)
   }
 
-  // Czar of a live round left → it can no longer be resolved; void it
-  // and rotate to the next Czar. phase null/'transition' ⇒ no round is
-  // mid-flight, so nothing to void.
+  // Picking/waiting restarts fairly; a revealed round keeps its answers
+  // and resolves by mode. A claimed/completed round is left alone.
   const [roundRow] = await db
     .select()
     .from(gameRounds)
     .where(eq(gameRounds.sessionId, session.id))
     .orderBy(desc(gameRounds.roundNum))
     .limit(1)
+  if (roundRow?.czarPlayerId !== playerId) return
   const phase = await state.getPhase(code)
-  if (roundRow?.czarPlayerId === playerId && phase && phase !== 'transition') {
+  if (phase === 'picking' || phase === 'waiting') {
     await voidRound(code, 'czar_dropped')
+  } else if (
+    phase === 'reveal' ||
+    phase === 'judging' ||
+    phase === 'ranking' ||
+    phase === 'eliminating'
+  ) {
+    await resolveDroppedCzar(code, playerId, roundRow.id, session.config as GameConfig, phase)
+  }
+}
+
+async function finishClaimedReveal(
+  code: string,
+  roundId: string,
+  submissions: Record<string, Submission>,
+): Promise<void> {
+  const order = await getSubOrder(code)
+  await state.publishRoundReveals(
+    code,
+    roundId,
+    order.map((key, submissionIndex) => ({
+      submissionIndex,
+      fills: submissions[key]!.fills,
+    })),
+    true,
+  )
+}
+
+async function resolveDroppedCzar(
+  code: string,
+  czarId: string,
+  roundId: string,
+  config: GameConfig,
+  phase: 'reveal' | 'judging' | 'ranking' | 'eliminating',
+): Promise<void> {
+  const order = await getSubOrder(code)
+  if (!order.length) return
+  if (config.rules.includes('survival')) {
+    if (phase !== 'reveal' && phase !== 'eliminating') return
+    const remaining = await state.autoEliminateRemaining(code, roundId, phase, shuffle(order))
+    if (!remaining.length) return
+    const submissions = await state.getSubmissions(code)
+    if (phase === 'reveal') await finishClaimedReveal(code, roundId, submissions)
+    for (const key of remaining.slice(0, -1))
+      await state.publishEvent(code, {
+        type: 'card_eliminated',
+        submissionId: publicIdForKey(order, key),
+        byPlayerId: czarId,
+      })
+    await finishSurvivalOutcome(code, roundId, remaining.at(-1)!, submissions, order)
+  } else if (config.rules.includes('serious_business')) {
+    if (phase !== 'reveal' && phase !== 'ranking') return
+    await resolveRanking(
+      code,
+      shuffle(order.map((_, index) => String(index))).slice(0, 3),
+      roundId,
+      phase,
+    )
+  } else if (!config.rules.includes('godmode')) {
+    if (phase !== 'reveal' && phase !== 'judging') return
+    await resolvePickedWinner(code, czarId, String(randomInt(0, order.length)), roundId, phase)
   }
 }
 
@@ -1543,35 +1614,55 @@ export async function eliminateSubmission(
     const winner = await state.getPlayer(code, winnerPlayerId)
     if (!winner) return
     if (!(await state.claimRoundOutcome(code, roundId, 'eliminating', winnerPlayerId))) return
-    const transfer = await settleGambles(code, winnerPlayerId)
-    await state.adjustScore(code, winnerPlayerId, 1 + transfer)
-
-    const allPlayers = await state.getAllPlayers(code)
-    const scores = toPlayerScores(allPlayers, null)
-    // Winner and terminal phase were persisted by the common outcome claim.
-    await state.publishEvent(code, {
-      type: 'round_won',
-      winnerId: winnerPlayerId,
-      submissionId: publicIdForKey(order, winnerKey),
-      scores,
-    })
-    captureServerEvent(await distinctIdForHost(code), 'cab_round_eliminated', {
-      roomCode: code,
-      winnerId: winnerPlayerId,
-      totalEliminations: Object.keys(submissions).length - 1,
-    })
-    await persistRoundOutcome(code, {
-      winnerPlayerId,
-      winningFills: submissions[winnerKey]?.fills ?? [],
-    })
-    await endRound(code, Object.keys(submissions), roundId)
+    await finishSurvivalOutcome(code, roundId, winnerKey, submissions, order)
   } else if (nextPlayer) {
     await state.publishEvent(code, { type: 'elimination_turn', playerId: nextPlayer.id })
   }
 }
 
+async function finishSurvivalOutcome(
+  code: string,
+  roundId: string,
+  winnerKey: string,
+  submissions: Record<string, Submission>,
+  order: string[],
+): Promise<void> {
+  const winnerPlayerId = resolvePlayerId(winnerKey)
+  const transfer = await settleGambles(code, winnerPlayerId)
+  await state.adjustScore(code, winnerPlayerId, 1 + transfer)
+
+  const allPlayers = await state.getAllPlayers(code)
+  const scores = toPlayerScores(allPlayers, null)
+  // Winner and terminal phase were persisted by the common outcome claim.
+  await state.publishEvent(code, {
+    type: 'round_won',
+    winnerId: winnerPlayerId,
+    submissionId: publicIdForKey(order, winnerKey),
+    scores,
+  })
+  captureServerEvent(await distinctIdForHost(code), 'cab_round_eliminated', {
+    roomCode: code,
+    winnerId: winnerPlayerId,
+    totalEliminations: Object.keys(submissions).length - 1,
+  })
+  await persistRoundOutcome(code, {
+    winnerPlayerId,
+    winningFills: submissions[winnerKey]?.fills ?? [],
+  })
+  await endRound(code, Object.keys(submissions), roundId)
+}
+
 export async function applyRanking(code: string, czarId: string, ranking: string[]): Promise<void> {
   const roundId = await authorizeCzarResolution(code, czarId, 'rank')
+  await resolveRanking(code, ranking, roundId, 'ranking')
+}
+
+async function resolveRanking(
+  code: string,
+  ranking: string[],
+  roundId: string,
+  phase: 'ranking' | 'reveal',
+): Promise<void> {
   const submissions = await state.getSubmissions(code)
   // Validate the entire command before crediting any submission. A stale
   // target in a later podium slot must not leave a partially scored round.
@@ -1583,7 +1674,8 @@ export async function applyRanking(code: string, czarId: string, ranking: string
     new Set(keys).size !== keys.length
   )
     throw new GameCommandError('invalid_state', 'Ranking must use distinct current submissions')
-  if (!(await state.claimRoundOutcome(code, roundId, 'ranking', resolvePlayerId(keys[0]!)))) return
+  if (!(await state.claimRoundOutcome(code, roundId, phase, resolvePlayerId(keys[0]!)))) return
+  if (phase === 'reveal') await finishClaimedReveal(code, roundId, submissions)
   const points = [3, 2, 1] as const
   const scoresDelta: Record<string, number> = {}
   const rankedSubmissions: Submission[] = []

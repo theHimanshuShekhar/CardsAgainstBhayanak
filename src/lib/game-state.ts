@@ -1,6 +1,6 @@
 import { redis, KEYS, ROOM_TTL_SECONDS } from './redis'
 import { GameCommandError } from './game-command-error'
-import type { GameConfig, GamePlayer, GamePhase, Submission } from './types'
+import type { GameConfig, GamePlayer, GamePhase, Submission, Card } from './types'
 
 export async function createGameState(
   code: string,
@@ -647,6 +647,51 @@ export async function publishEvent(code: string, event: unknown): Promise<void> 
   await redis.publish(KEYS.channel(code), JSON.stringify(event))
 }
 
+// Publish each answer and its snapshot cursor atomically with the live
+// round check. Automatic outcomes can finish the reveal they claimed;
+// sleeping stagger callbacks cannot publish into a finished round.
+const PUBLISH_REVEALS_LUA = `
+if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1] then return 0 end
+if ARGV[2] == '1' then
+  if redis.call('HGET', KEYS[1], 'phase') ~= 'transition' or redis.call('HGET', KEYS[1], 'outcomeClaim') ~= ARGV[1] then return 0 end
+else
+  if redis.call('HGET', KEYS[1], 'phase') ~= 'reveal' then return 0 end
+end
+local cursor = tonumber(redis.call('GET', KEYS[2]) or '0')
+for _, raw in ipairs(cjson.decode(ARGV[3])) do
+  local event = cjson.decode(raw)
+  if event.submissionIndex >= cursor then
+    if event.submissionIndex ~= cursor then return 0 end
+    redis.call('PUBLISH', KEYS[3], raw)
+    cursor = cursor + 1
+  end
+end
+redis.call('SET', KEYS[2], cursor, 'EX', ARGV[4])
+return 1
+`
+
+export async function publishRoundReveals(
+  code: string,
+  roundId: string,
+  reveals: { submissionIndex: number; fills: Card[] }[],
+  claimedOutcome = false,
+): Promise<boolean> {
+  const events = reveals.map((reveal) => JSON.stringify({ type: 'card_revealed', ...reveal }))
+  return (
+    (await redis.eval(
+      PUBLISH_REVEALS_LUA,
+      3,
+      KEYS.round(code),
+      `${KEYS.round(code)}:revealed`,
+      KEYS.channel(code),
+      roundId,
+      claimedOutcome ? '1' : '0',
+      JSON.stringify(events),
+      ROOM_TTL_SECONDS,
+    )) === 1
+  )
+}
+
 export async function setGrace(code: string, playerId: string, ms: number): Promise<void> {
   await redis.set(KEYS.grace(code, playerId), '1', 'PX', ms)
 }
@@ -916,6 +961,36 @@ export async function claimRoundOutcome(
   )
 }
 
+// A sleeping reveal must not overwrite a claimed outcome or a newer round.
+const ADVANCE_REVEAL_LUA = `
+if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1] then return 0 end
+if redis.call('HGET', KEYS[1], 'phase') ~= 'reveal' then return 0 end
+if redis.call('HEXISTS', KEYS[1], 'outcomeClaim') == 1 then return 0 end
+redis.call('HSET', KEYS[1], 'phase', ARGV[2])
+if ARGV[3] ~= '' then redis.call('HSET', KEYS[1], 'eliminationTurnPlayerId', ARGV[3]) end
+redis.call('EXPIRE', KEYS[1], ARGV[4])
+return 1
+`
+
+export async function advanceRevealedRound(
+  code: string,
+  roundId: string,
+  phase: GamePhase,
+  eliminationTurn = '',
+): Promise<boolean> {
+  return (
+    (await redis.eval(
+      ADVANCE_REVEAL_LUA,
+      1,
+      KEYS.round(code),
+      roundId,
+      phase,
+      eliminationTurn,
+      ROOM_TTL_SECONDS,
+    )) === 1
+  )
+}
+
 const CLAIM_ROUND_COMPLETION_LUA = `
 if not redis.call('HGET', KEYS[2], 'status') then return 0 end
 if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1] then return 0 end
@@ -1041,6 +1116,48 @@ export async function commitElimination(
     nextActorId,
     ROOM_TTL_SECONDS,
   )) as string | null
+}
+
+// Claim and finish automatic Survival eliminations together: a live turn
+// racing the Czar drop cannot make an already eliminated answer win.
+const AUTO_ELIMINATE_LUA = `
+if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1] then return {} end
+if redis.call('HGET', KEYS[1], 'phase') ~= ARGV[2] then return {} end
+if redis.call('HEXISTS', KEYS[1], 'outcomeClaim') == 1 then return {} end
+local remaining = {}
+for _, key in ipairs(cjson.decode(ARGV[3])) do
+  local raw = redis.call('HGET', KEYS[2], key)
+  if raw and not cjson.decode(raw).eliminated then table.insert(remaining, key) end
+end
+if #remaining == 0 then return {} end
+local winner = remaining[#remaining]
+redis.call('HSET', KEYS[1], 'outcomeClaim', ARGV[1], 'winnerId', winner, 'phase', 'transition', 'eliminationTurnPlayerId', '')
+for i = 1, #remaining - 1 do
+  local submission = cjson.decode(redis.call('HGET', KEYS[2], remaining[i]))
+  submission.eliminated = true
+  redis.call('HSET', KEYS[2], remaining[i], cjson.encode(submission))
+end
+redis.call('EXPIRE', KEYS[1], ARGV[4])
+redis.call('EXPIRE', KEYS[2], ARGV[4])
+return remaining
+`
+
+export async function autoEliminateRemaining(
+  code: string,
+  roundId: string,
+  phase: 'eliminating' | 'reveal',
+  order: string[],
+): Promise<string[]> {
+  return (await redis.eval(
+    AUTO_ELIMINATE_LUA,
+    2,
+    KEYS.round(code),
+    submissionsKey(code),
+    roundId,
+    phase,
+    JSON.stringify(order),
+    ROOM_TTL_SECONDS,
+  )) as string[]
 }
 
 // Register a ballot and close its election in one Redis operation. Only
