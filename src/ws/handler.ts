@@ -351,7 +351,7 @@ export const wsHooks = {
     peerContext.set(peer, {
       code,
       lease,
-      frameBucket: { tokens: 120, updatedAt: Date.now() },
+      frameBucket: { tokens: 120, updatedAt: performance.now() },
       lastPing: Date.now(),
     })
     openPeers.add(peer)

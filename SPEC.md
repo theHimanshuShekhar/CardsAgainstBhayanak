@@ -89,7 +89,7 @@ Client clears `cab_session` on **explicit Leave button**, on **"Go home" from th
 
 ### WebSocket traffic limits
 
-Limits are process-local token buckets with the listed initial burst and continuous refill over the listed interval. They are shared by all rooms/sockets for the same transport IP, or by all sockets for the same verified room/player identity. Reconnecting cannot reset those shared budgets.
+Limits are process-local token buckets with the listed initial burst and continuous refill over the listed interval. Refill and idle pruning measure elapsed monotonic process time, independently of wall-clock adjustments. They are shared by all rooms/sockets for the same transport IP, or by all sockets for the same verified room/player identity. Reconnecting cannot reset those shared budgets.
 
 | Boundary                                              | Limit                                                            |
 | ----------------------------------------------------- | ---------------------------------------------------------------- |

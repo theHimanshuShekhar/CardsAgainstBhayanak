@@ -1,5 +1,6 @@
 // Process-local ingress/work limits. No Redis/DB work is needed for admission.
 // Buckets survive socket close to prevent reconnects from resetting a budget.
+// Elapsed budgets use the monotonic process clock, independent of wall-clock changes.
 const IDLE_MS = 120_000
 const MAX_IDENTITIES = 4096
 const AUTH_TIMEOUT_MS = 15_000
@@ -18,7 +19,7 @@ type Identity = {
 }
 
 function identity(key: string): Identity | undefined {
-  const now = Date.now()
+  const now = performance.now()
   if (now >= nextPrune) {
     for (const [key, value] of identities) {
       if (!value.connections && !value.working && now - value.touchedAt >= IDLE_MS)
@@ -37,7 +38,7 @@ function identity(key: string): Identity | undefined {
 }
 
 function take(value: Identity, name: string, capacity: number, intervalMs: number): number {
-  const now = Date.now()
+  const now = performance.now()
   let bucket = value.buckets.get(name)
   if (!bucket) {
     bucket = { tokens: capacity, updatedAt: now }
@@ -92,7 +93,7 @@ export function admitConnection(ip: string): { lease?: ConnectionLease; retryAft
     clearPending()
     connections--
     value.connections--
-    value.touchedAt = Date.now()
+    value.touchedAt = performance.now()
   }
   // Also releases abandoned/invalid native upgrades that never reach open.
   const timer = setTimeout(() => {
@@ -121,7 +122,7 @@ export function admitFrame(
   socketBucket: { tokens: number; updatedAt: number },
 ): number {
   // Cheap malformed/pre-auth frames are bounded too, before JSON/schema work.
-  const now = Date.now()
+  const now = performance.now()
   const retryAfterMs = consume(socketBucket, 120, 60_000, now)
   if (retryAfterMs) return retryAfterMs
   if (!playerId) return 0
@@ -148,7 +149,7 @@ export function admitCommand(
     retryAfterMs: 0,
     release: () => {
       value.working--
-      value.touchedAt = Date.now()
+      value.touchedAt = performance.now()
     },
   }
 }
