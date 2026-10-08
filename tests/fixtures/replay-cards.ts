@@ -38,7 +38,7 @@ const markup = renderToStaticMarkup(
       phase: 'reveal',
       pickCount: 1,
       revealIndex: 1,
-      winnerId: null,
+      winningSubmissionId: null,
       winnerName: null,
       isCzar: true,
       onStartReveal: () => {},

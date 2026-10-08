@@ -83,7 +83,10 @@ export type SessionState = {
   submissions: Submission[]
   scores: PlayerScore[]
   revealIndex: number
+  /** @deprecated Compatibility alias for winningPlayerId; never a submission ID. */
   winnerId: string | null
+  winningPlayerId: string | null
+  winningSubmissionId: string | null
   // Picking-phase progress (server-authoritative); reaches submitted ===
   // expected exactly when the round resolves.
   submitted: number
@@ -229,8 +232,23 @@ export type ServerMessage =
   | { type: 'player_skipped'; playerId: string; round: number; submitted: number; expected: number }
   | { type: 'reveal_start' }
   | { type: 'card_revealed'; submissionIndex: number; fills: Card[] }
-  | { type: 'round_won'; winnerId: string; submissionId: string; scores: PlayerScore[] }
-  | { type: 'round_ranked'; ranking: Submission[]; scoresDelta: Record<string, number> }
+  | {
+      type: 'round_won'
+      winningPlayerId: string
+      winningSubmissionId: string
+      /** @deprecated Compatibility alias for winningPlayerId. */
+      winnerId: string
+      /** @deprecated Compatibility alias for winningSubmissionId. */
+      submissionId: string
+      scores: PlayerScore[]
+    }
+  | {
+      type: 'round_ranked'
+      winningPlayerId: string
+      winningSubmissionId: string
+      ranking: Submission[]
+      scoresDelta: Record<string, number>
+    }
   | { type: 'elimination_turn'; playerId: string }
   | { type: 'card_eliminated'; submissionId: string; byPlayerId: string }
   | { type: 'vote_tally'; votes: Record<string, number> }

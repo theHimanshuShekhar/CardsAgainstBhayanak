@@ -65,8 +65,16 @@ test('Rebooting the Universe — winner redraws, loses 1 point, refills hand', a
     await startReveal(czar)
     await pickWinner(czar, 0)
 
-    // Give the next round_started a moment to repaint the rule-bar.
-    await host.page.waitForTimeout(800)
+    // Wait for the server's next round, including its result pause.
+    await expect
+      .poll(
+        async () => {
+          const label = (await host.page.locator('.pill').first().textContent()) ?? ''
+          return Number(/Round (\d+)/.exec(label)?.[1] ?? 0)
+        },
+        { timeout: 20_000 },
+      )
+      .toBe(round + 1)
     winner = await findRedrawer()
   }
 

@@ -121,10 +121,15 @@ test('permanent Czar leave resolves a revealed normal round once instead of void
     await ready(game)
     const observer = game.peers.find((peer) => peer !== game.czar)!
     const submissions = (await observer.snapshot()).submissions
-    expect(
-      (await post(`/api/games/${game.host.roomCode}/leave`, {}, game.czar!.sessionToken)).status,
-    ).toBe(204)
+    const departure = post(`/api/games/${game.host.roomCode}/leave`, {}, game.czar!.sessionToken)
     const outcome = await observer.wait('round_won')
+    expect(outcome.winningPlayerId).toBe(outcome.winnerId)
+    expect(outcome.winningSubmissionId).toBe(outcome.submissionId)
+    expect(await observer.snapshot()).toMatchObject({
+      winningPlayerId: outcome.winningPlayerId,
+      winningSubmissionId: outcome.winningSubmissionId,
+    })
+    expect((await departure).status).toBe(204)
     expect(submissions.some((submission) => submission.submissionId === outcome.submissionId)).toBe(
       true,
     )
@@ -150,10 +155,15 @@ test('permanent Czar leave awards the Serious Business podium and advances the r
     await ready(game)
     const observer = game.peers.find((peer) => peer !== game.czar)!
     const before = await observer.snapshot()
-    expect(
-      (await post(`/api/games/${game.host.roomCode}/leave`, {}, game.czar!.sessionToken)).status,
-    ).toBe(204)
+    const departure = post(`/api/games/${game.host.roomCode}/leave`, {}, game.czar!.sessionToken)
     const outcome = await observer.wait('round_ranked')
+    expect(outcome.winningSubmissionId).toBe(outcome.ranking[0]!.submissionId)
+    expect(outcome.scoresDelta[outcome.winningPlayerId]).toBe(3)
+    expect(await observer.snapshot()).toMatchObject({
+      winningPlayerId: outcome.winningPlayerId,
+      winningSubmissionId: outcome.winningSubmissionId,
+    })
+    expect((await departure).status).toBe(204)
     expect(outcome.ranking.map((submission) => submission.rank)).toEqual([1, 2, 3])
     expect(new Set(outcome.ranking.map((submission) => submission.submissionId)).size).toBe(3)
     expect(
@@ -185,10 +195,15 @@ test('permanent Survival Czar leave eliminates remaining answers without revivin
     const eliminator = game.peers.find((peer) => peer.playerId === initial.eliminationTurnPlayerId)!
     eliminator.send({ type: 'eliminate', submissionId: '0' })
     await observer.wait('card_eliminated')
-    expect(
-      (await post(`/api/games/${game.host.roomCode}/leave`, {}, game.czar!.sessionToken)).status,
-    ).toBe(204)
+    const departure = post(`/api/games/${game.host.roomCode}/leave`, {}, game.czar!.sessionToken)
     const outcome = await observer.wait('round_won')
+    expect(outcome.winningPlayerId).toBe(outcome.winnerId)
+    expect(outcome.winningSubmissionId).toBe(outcome.submissionId)
+    expect(await observer.snapshot()).toMatchObject({
+      winningPlayerId: outcome.winningPlayerId,
+      winningSubmissionId: outcome.winningSubmissionId,
+    })
+    expect((await departure).status).toBe(204)
     expect(outcome.submissionId).not.toBe('0')
     expect(
       initial.submissions.some((submission) => submission.submissionId === outcome.submissionId),

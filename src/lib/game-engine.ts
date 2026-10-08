@@ -864,7 +864,7 @@ async function resolvePickedWinner(
   // async task. Without a single-writer claim, scoring runs twice and
   // endRound interleaves through the non-atomic setHand (del + rpush),
   // producing 20-card hands.
-  const claimed = await state.claimRoundOutcome(code, roundId, phase, winnerPlayerId)
+  const claimed = await state.claimRoundOutcome(code, roundId, phase, winnerPlayerId, submissionId)
   if (!claimed) {
     onOutcome?.(false)
     return
@@ -883,6 +883,8 @@ async function resolvePickedWinner(
 
   await state.publishEvent(code, {
     type: 'round_won',
+    winningPlayerId: winnerPlayerId,
+    winningSubmissionId: submissionId,
     winnerId: winnerPlayerId,
     submissionId,
     scores,
@@ -954,6 +956,19 @@ export async function endRound(
 
   for (const pid of realSubmitterIds) await state.refillHand(code, pid, 10)
 
+  // Keep only the public result board for reconnects during the result pause.
+  const resultOrder: string[] = JSON.parse((await redis.get(subOrderKey(code))) ?? '[]')
+  await redis.hset(
+    KEYS.round(code),
+    'resolvedSubmissions',
+    JSON.stringify(
+      resultOrder.map((key, index) => ({
+        submissionId: String(index),
+        fills: submissions[key]?.fills ?? [],
+        ...(submissions[key]?.eliminated ? { eliminated: true } : {}),
+      })),
+    ),
+  )
   await state.clearSubmissions(code)
   await redis.del(
     subOrderKey(code),
@@ -1413,7 +1428,13 @@ async function resolveDroppedCzar(
   if (!order.length) return
   if (config.rules.includes('survival')) {
     if (phase !== 'reveal' && phase !== 'eliminating') return
-    const remaining = await state.autoEliminateRemaining(code, roundId, phase, shuffle(order))
+    const remaining = await state.autoEliminateRemaining(
+      code,
+      roundId,
+      phase,
+      shuffle(order),
+      order,
+    )
     if (!remaining.length) return
     const submissions = await state.getSubmissions(code)
     if (phase === 'reveal') await finishClaimedReveal(code, roundId, submissions)
@@ -1535,7 +1556,10 @@ export async function castVote(
 
   const winner = await state.getPlayer(code, winnerPlayerId)
   if (!winner) return
-  if (!(await state.claimRoundOutcome(code, roundId, 'waiting', winnerPlayerId))) return
+  if (
+    !(await state.claimRoundOutcome(code, roundId, 'waiting', winnerPlayerId, winnerSubmissionId))
+  )
+    return
   const transfer = await settleGambles(code, winnerPlayerId)
   await state.adjustScore(code, winnerPlayerId, 1 + transfer)
 
@@ -1545,6 +1569,8 @@ export async function castVote(
   // Winner and terminal phase were persisted by the common outcome claim.
   await state.publishEvent(code, {
     type: 'round_won',
+    winningPlayerId: winnerPlayerId,
+    winningSubmissionId: winnerSubmissionId,
     winnerId: winnerPlayerId,
     submissionId: winnerSubmissionId,
     scores,
@@ -1613,7 +1639,16 @@ export async function eliminateSubmission(
     const winnerPlayerId = resolvePlayerId(winnerKey)
     const winner = await state.getPlayer(code, winnerPlayerId)
     if (!winner) return
-    if (!(await state.claimRoundOutcome(code, roundId, 'eliminating', winnerPlayerId))) return
+    if (
+      !(await state.claimRoundOutcome(
+        code,
+        roundId,
+        'eliminating',
+        winnerPlayerId,
+        publicIdForKey(order, winnerKey),
+      ))
+    )
+      return
     await finishSurvivalOutcome(code, roundId, winnerKey, submissions, order)
   } else if (nextPlayer) {
     await state.publishEvent(code, { type: 'elimination_turn', playerId: nextPlayer.id })
@@ -1636,6 +1671,8 @@ async function finishSurvivalOutcome(
   // Winner and terminal phase were persisted by the common outcome claim.
   await state.publishEvent(code, {
     type: 'round_won',
+    winningPlayerId: winnerPlayerId,
+    winningSubmissionId: publicIdForKey(order, winnerKey),
     winnerId: winnerPlayerId,
     submissionId: publicIdForKey(order, winnerKey),
     scores,
@@ -1674,7 +1711,10 @@ async function resolveRanking(
     new Set(keys).size !== keys.length
   )
     throw new GameCommandError('invalid_state', 'Ranking must use distinct current submissions')
-  if (!(await state.claimRoundOutcome(code, roundId, phase, resolvePlayerId(keys[0]!)))) return
+  if (
+    !(await state.claimRoundOutcome(code, roundId, phase, resolvePlayerId(keys[0]!), ranking[0]!))
+  )
+    return
   if (phase === 'reveal') await finishClaimedReveal(code, roundId, submissions)
   const points = [3, 2, 1] as const
   const scoresDelta: Record<string, number> = {}
@@ -1701,7 +1741,13 @@ async function resolveRanking(
   }
 
   await state.setRoundRanking(code, rankedSubmissions)
-  await state.publishEvent(code, { type: 'round_ranked', ranking: rankedSubmissions, scoresDelta })
+  await state.publishEvent(code, {
+    type: 'round_ranked',
+    winningPlayerId: topWinnerId!,
+    winningSubmissionId: ranking[0]!,
+    ranking: rankedSubmissions,
+    scoresDelta,
+  })
   captureServerEvent(await distinctIdForHost(code), 'cab_round_ranked', {
     roomCode: code,
     top3: rankedSubmissions.map((s) => s.playerId).filter(Boolean),

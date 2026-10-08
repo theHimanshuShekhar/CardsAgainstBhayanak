@@ -56,13 +56,19 @@ test('Gambling — winner wagers on round 2, submits twice, round resolves', asy
     return null
   }
 
+  async function readRound(): Promise<number> {
+    const t = (await host.page.locator('.pill').first().textContent()) ?? ''
+    const m = /Round (\d+)/.exec(t)
+    return m ? parseInt(m[1]!, 10) : 0
+  }
+
   const pick1 = await handPickCount(r1others[0]!)
   for (const p of r1others) await submitCards(p, pick1)
   await waitForPhase(players, 'judging')
   await startReveal(r1czar)
   await expect(r1czar.page.locator('.flip-reveal .card-response')).toHaveCount(2 * pick1)
   await pickWinner(r1czar, 0)
-  await host.page.waitForTimeout(800)
+  await expect.poll(readRound, { timeout: 20_000 }).toBeGreaterThan(1)
 
   let gambler = await findGambler()
   if (!gambler) {
@@ -74,7 +80,7 @@ test('Gambling — winner wagers on round 2, submits twice, round resolves', asy
     await startReveal(r2czar)
     await expect(r2czar.page.locator('.flip-reveal .card-response')).toHaveCount(2 * pick2round)
     await pickWinner(r2czar, 0)
-    await host.page.waitForTimeout(800)
+    await expect.poll(readRound, { timeout: 20_000 }).toBeGreaterThan(2)
     gambler = await findGambler()
   }
   expect(gambler, 'expected a non-czar with ≥1 pt to hold the Wager button').toBeTruthy()
@@ -85,11 +91,6 @@ test('Gambling — winner wagers on round 2, submits twice, round resolves', asy
   // Snapshot the round number on host's page before the wager round —
   // we'll assert the game advances past it without depending on the
   // exact starting value (could be 2 or 3 depending on r1 dynamics).
-  async function readRound(): Promise<number> {
-    const t = (await host.page.locator('.pill').first().textContent()) ?? ''
-    const m = /Round (\d+)/.exec(t)
-    return m ? parseInt(m[1]!, 10) : 0
-  }
   const roundBefore = await readRound()
 
   // Snapshot pre-wager hand size — should be exactly 10.
