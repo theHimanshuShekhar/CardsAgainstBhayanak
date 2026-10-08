@@ -59,11 +59,11 @@ function SessionScreen() {
   const [scores, setScores] = useState<PlayerScore[]>([])
   const [submissions, setSubmissions] = useState<Submission[]>([])
   const [revealIndex, setRevealIndex] = useState(-1)
-  const [winnerId, setWinnerId] = useState<string | null>(null)
+  const [winningSubmissionId, setWinningSubmissionId] = useState<string | null>(null)
   // Winner's handle for the result badge. Resolved from scores by the
   // winning playerId — the grid highlights by submissionId, but the
   // client never maps submission→playerId, so the name must come from
-  // round_won.winnerId / the snapshot's winnerId (both playerIds).
+  // the round outcome's player identity.
   const [winnerName, setWinnerName] = useState<string | null>(null)
   const [submitted, setSubmitted] = useState(0)
   const [expected, setExpected] = useState(0)
@@ -140,7 +140,7 @@ function SessionScreen() {
     submissions.length > 0 &&
     revealIndex >= submissions.length &&
     !myVotedSubmissionId &&
-    winnerId == null
+    winningSubmissionId == null
   // Survival: only the elimination-turn holder can eliminate, and only
   // once every card is face-up. The engine flips server phase to
   // 'eliminating' silently — the client stays on 'reveal' until winner.
@@ -150,7 +150,7 @@ function SessionScreen() {
     submissions.length > 0 &&
     revealIndex >= submissions.length &&
     eliminationTurn === myId &&
-    winnerId == null
+    winningSubmissionId == null
   // Serious Business: the czar ranks top 3 once the reveal completes.
   const canRank =
     isSerious &&
@@ -159,7 +159,7 @@ function SessionScreen() {
     revealIndex >= submissions.length &&
     isCzar &&
     serverRanking == null &&
-    winnerId == null
+    winningSubmissionId == null
 
   const { on, send, connected, reconnect } = useGameSocket(
     code,
@@ -223,10 +223,9 @@ function SessionScreen() {
           return merged
         })
         setRevealIndex((current) => (sameRound ? Math.max(current, s.revealIndex) : s.revealIndex))
-        setWinnerId(s.winnerId)
-        // Snapshot winnerId is a playerId (server's getRoundWinner);
-        // resolve its handle from the snapshot scores.
-        setWinnerName(s.scores.find((x) => x.playerId === s.winnerId)?.username ?? null)
+        setWinningSubmissionId(s.winningSubmissionId)
+        // Resolve attribution independently of the highlighted answer.
+        setWinnerName(s.scores.find((x) => x.playerId === s.winningPlayerId)?.username ?? null)
         setSubmitted(s.submitted)
         setExpected(s.expected)
         setTimerExpiresAt(s.roundTimerExpiresAt)
@@ -247,13 +246,15 @@ function SessionScreen() {
         )
         const finishedSubmitting = s.mySubmissionCount >= (s.myHasGambled ? 2 : 1)
         const snapshotPhase =
-          s.phase === 'picking' && (s.czarId === myId || finishedSubmitting)
-            ? 'waiting'
-            : s.submissions.length > 0 &&
-                (s.phase === 'judging' ||
-                  (s.config.rules.includes('godmode') && s.phase === 'waiting'))
-              ? 'reveal'
-              : s.phase
+          s.winningSubmissionId != null
+            ? 'reveal'
+            : s.phase === 'picking' && (s.czarId === myId || finishedSubmitting)
+              ? 'waiting'
+              : s.submissions.length > 0 &&
+                  (s.phase === 'judging' ||
+                    (s.config.rules.includes('godmode') && s.phase === 'waiting'))
+                ? 'reveal'
+                : s.phase
         setPhase((current) =>
           sameRound &&
           current === 'reveal' &&
@@ -272,7 +273,7 @@ function SessionScreen() {
         setSelected([])
         setSubmissions([])
         setRevealIndex(-1)
-        setWinnerId(null)
+        setWinningSubmissionId(null)
         setWinnerName(null)
         setSubmitted(event.submitted)
         setExpected(event.expected)
@@ -354,8 +355,7 @@ function SessionScreen() {
         setServerRanking(event.ranking)
         // Pin the top-ranked submission as the round winner so the
         // grid highlights it and the round_end pause renders cleanly.
-        const top = event.ranking[0]
-        if (top) setWinnerId(top.submissionId)
+        setWinningSubmissionId(event.winningSubmissionId)
         // Apply scoresDelta and resolve the top-ranked player's handle
         // in the same setter so we read the freshest scores list.
         setScores((prev) => {
@@ -364,8 +364,8 @@ function SessionScreen() {
               ? { ...p, score: p.score + (event.scoresDelta[p.playerId] ?? 0) }
               : p,
           )
-          if (top?.playerId) {
-            setWinnerName(next.find((x) => x.playerId === top.playerId)?.username ?? null)
+          if (event.winningPlayerId) {
+            setWinnerName(next.find((x) => x.playerId === event.winningPlayerId)?.username ?? null)
           }
           return next
         })
@@ -396,16 +396,18 @@ function SessionScreen() {
       }
       if (event.type === 'round_won') {
         // N-3: SubmissionsGrid highlights by submissionId, so track the
-        // winning submission — not event.winnerId, which is a playerId.
-        // The grid stays up (phase still 'judging', winnerId set) until
+        // winning submission separately from the winning player.
+        // The grid stays up (phase still 'judging', winningSubmissionId set) until
         // the server's ROUND_RESULT_PAUSE_MS-delayed round_started — the
         // pace is server-driven, never a client timer (which round_started
         // used to race, so the winner never showed).
-        setWinnerId(event.submissionId)
+        setWinningSubmissionId(event.winningSubmissionId)
         setScores(event.scores)
-        // event.winnerId is the winning playerId; resolve its handle
+        // Resolve the winning player's handle
         // from the same scores payload for the result badge (#1).
-        setWinnerName(event.scores.find((x) => x.playerId === event.winnerId)?.username ?? null)
+        setWinnerName(
+          event.scores.find((x) => x.playerId === event.winningPlayerId)?.username ?? null,
+        )
       }
       if (event.type === 'round_end') {
         clearPending()
@@ -419,7 +421,7 @@ function SessionScreen() {
         setSelected([])
         setSubmissions([])
         setRevealIndex(-1)
-        setWinnerId(null)
+        setWinningSubmissionId(null)
         setWinnerName(null)
       }
       // S3-NEW-B: rematch/back-to-lobby reset. Normally a player is on
@@ -437,7 +439,7 @@ function SessionScreen() {
           setSelected([])
           setSubmissions([])
           setRevealIndex(-1)
-          setWinnerId(null)
+          setWinningSubmissionId(null)
           setWinnerName(null)
           setTimerExpiresAt(null)
         }
@@ -672,7 +674,7 @@ function SessionScreen() {
                     pickCount={prompt.pick}
                     phase={phase as 'judging' | 'reveal'}
                     revealIndex={revealIndex}
-                    winnerId={winnerId}
+                    winningSubmissionId={winningSubmissionId}
                     winnerName={winnerName}
                     isCzar={isCzar}
                     pending={pending !== null}

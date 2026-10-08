@@ -34,9 +34,9 @@ export default defineConfig({
             REDIS_URL: process.env.REDIS_URL ?? 'redis://localhost:6379/1',
             SESSION_SECRET: 'test-secret-min-32-chars-test-test-test',
             CAB_RNG_SEED: 'test-seed-2026',
-            // Shrink the 4s production round-result pause so the suite
-            // isn't paced by it (still exercises the server-driven beat).
-            CAB_ROUND_RESULT_PAUSE_MS: '150',
+            // Keep a visible result window for live/refresh winner assertions.
+            // Production uses its unchanged 4s pause.
+            CAB_ROUND_RESULT_PAUSE_MS: '2000',
             PORT: '3000',
             // NOT 'production': rate-limit.ts enforces only when
             // NODE_ENV==='production', and the suite creates >5 games

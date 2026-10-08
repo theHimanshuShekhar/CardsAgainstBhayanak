@@ -426,7 +426,9 @@ type SessionState = {
   submissions: Submission[] // server pre-shuffles between players
   scores: PlayerScore[]
   revealIndex: number
-  winnerId: string | null
+  winningPlayerId: string | null // attribution / scoreboard identity
+  winningSubmissionId: string | null // opaque answer slot for highlighting
+  winnerId: string | null // deprecated player-only compatibility alias
   eliminationTurnPlayerId?: string // Survival of the Fittest current turn
   voteTally?: Record<string, number> // God Is Dead live votes
   ranking?: Submission[] // Serious Business top-3 (rank+points filled)
@@ -548,8 +550,8 @@ All client messages are scoped to the socket's authenticated `playerId` + `roomC
 { type: "player_skipped",   playerId, round }           // timer expired before submission
 { type: "reveal_start" }
 { type: "card_revealed",    submissionIndex, fills: Card[] }
-{ type: "round_won",        winnerId, submissionId, scores: PlayerScore[] }      // normal & God-Is-Dead resolution
-{ type: "round_ranked",     ranking: Submission[], scoresDelta: Record<playerId, number> } // Serious Business
+{ type: "round_won",        winningPlayerId, winningSubmissionId, winnerId, submissionId, scores: PlayerScore[] }      // normal & God-Is-Dead resolution
+{ type: "round_ranked",     winningPlayerId, winningSubmissionId, ranking: Submission[], scoresDelta: Record<playerId, number> } // Serious Business
 { type: "elimination_turn", playerId }                  // Survival: whose turn to eliminate
 { type: "card_eliminated",  submissionId, byPlayerId }  // Survival
 { type: "vote_tally",       votes: Record<submissionId, number> } // God Is Dead live
@@ -561,6 +563,8 @@ All client messages are scoped to the socket's authenticated `playerId` + `roomC
 ```
 
 `round_end` is the single source of truth for round termination across all modes. Mode-specific events (`round_won`, `round_ranked`) precede `round_end` to describe the outcome. Before `round_end`, each refilled submitter and newly activated player receives their own full hand through recipient-private `hand_update`; clients refresh their hand through that event. `round_end` contains only public activation metadata. This intentionally replaces the former all-player `handsRefilled` map, which exposed opponents' hands to players and spectators.
+
+`round_won.winnerId` and `round_won.submissionId` remain compatibility aliases for `winningPlayerId` and `winningSubmissionId`. Clients use the explicit identities. Completed-round snapshots retain the public response board until the next round, so winner attribution and highlighting survive reconnect without mapping a player ID into a submission slot.
 
 ### Submission ordering
 
@@ -839,7 +843,9 @@ game:{code}:round          hash with mode-aware fields:
                              blackCardId         (always)
                              czarId              (null in God Is Dead)
                              submissions         (always, JSON: playerId → Submission)
-                             winnerId            (filled at round_won)
+                             winningPlayerId     (filled by every terminal outcome)
+                             winningSubmissionId (opaque answer slot, recorded alongside player identity)
+                             resolvedSubmissions (public result board, retained through pause)
                              ranking             (only in Serious Business: JSON)
                              voteTally           (only in God Is Dead: JSON)
                              eliminationTurnPlayerId (only in Survival: current eliminator)

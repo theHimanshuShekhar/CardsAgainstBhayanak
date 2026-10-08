@@ -141,7 +141,7 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
   // All recipients, including the submitter and Czar, see only answers
   // whose scheduled reveal has happened. Empty fills retain stable slots
   // without transmitting a hidden card ID, text, or submitter identity.
-  const submissions: Submission[] =
+  let submissions: Submission[] =
     phase === 'picking'
       ? []
       : subOrder.map((key, index) => ({
@@ -164,7 +164,10 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
   // being lost. clearRoundResolution wipes these at the next startRound.
   const { submitted, expected } = await engine.submissionProgress(code)
   const roundTimerExpiresAt = await state.getRoundTimerExpiresAt(code)
-  const winnerId = await state.getRoundWinner(code)
+  const outcome = await state.getRoundOutcome(code)
+  if (phase === 'transition' && submissions.length === 0) {
+    submissions = JSON.parse((await redis.hget(KEYS.round(code), 'resolvedSubmissions')) ?? '[]')
+  }
   const eliminationTurnPlayerId = config.rules.includes('survival')
     ? ((await state.getEliminationTurn(code)) ?? undefined)
     : undefined
@@ -182,8 +185,9 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
     hand,
     submissions,
     scores,
-    revealIndex,
-    winnerId,
+    revealIndex: phase === 'transition' ? submissions.length : revealIndex,
+    winnerId: outcome.winningPlayerId,
+    ...outcome,
     submitted,
     expected,
     roundTimerExpiresAt,
