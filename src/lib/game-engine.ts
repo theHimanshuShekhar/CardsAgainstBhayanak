@@ -1039,8 +1039,8 @@ async function finalizeRoundAfterPause(code: string): Promise<void> {
   // end now regardless of score; the Haiku round winner wins the game.
   if (await redis.hget(KEYS.game(code), 'happyEndingFinal')) {
     await redis.hdel(KEYS.game(code), 'happyEndingFinal', 'happyEndingArmed')
-    const finalRoundWinner = await state.getRoundWinner(code)
-    await endGame(code, 'happy_ending', finalRoundWinner ?? undefined)
+    const { winningPlayerId } = await state.getRoundOutcome(code)
+    await endGame(code, 'happy_ending', winningPlayerId ?? undefined)
     return
   }
 

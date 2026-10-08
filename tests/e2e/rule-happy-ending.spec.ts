@@ -113,7 +113,7 @@ test('Happy Ending — trailing Haiku winner beats the cumulative leader', async
     socket.on('framereceived', ({ payload }) => {
       const event = JSON.parse(String(payload))
       if (event.type === 'game_over') gameOvers.push(event)
-      if (event.type === 'round_won') roundWinners.push(event.winnerId)
+      if (event.type === 'round_won') roundWinners.push(event.winningPlayerId)
     }),
   )
   // Attach before the session route opens its socket.
