@@ -4,26 +4,83 @@ import type { ClientToServerEvent, ServerToClientEvent, RuleId } from '../../src
 const BASE = process.env['CAB_E2E_BASE'] ?? 'http://localhost:3000'
 type Member = { roomCode: string; playerId: string; sessionToken: string }
 
-async function post(path: string, body: unknown, token?: string) {
-  return fetch(BASE + path, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
-    },
-    body: JSON.stringify(body),
+const connections = new Map<WebSocket, ReturnType<typeof setInterval> | undefined>()
+const requestTimings: { method: string; path: string; responseHeadersMs: number }[] = []
+
+test.beforeEach(() => {
+  requestTimings.length = 0
+})
+test.afterEach(async () => {
+  // Also closes peers from a fixture whose create/join/auth step failed.
+  for (const [socket, heartbeat] of connections) {
+    clearInterval(heartbeat)
+    socket.close()
+  }
+  connections.clear()
+  await test.info().attach('winner-request-timings', {
+    body: JSON.stringify(requestTimings),
+    contentType: 'application/json',
   })
+})
+
+async function request(method: string, path: string, body?: unknown, token?: string) {
+  const started = Date.now()
+  try {
+    return await test.step(`${method} ${path}`, () =>
+      fetch(BASE + path, {
+        method,
+        headers: {
+          'content-type': 'application/json',
+          ...(token ? { authorization: `Bearer ${token}` } : {}),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        // Keep stalled setup visible as a request failure rather than an opaque
+        // whole-test timeout. The deadline also covers reading the response body.
+        signal: AbortSignal.timeout(10_000),
+      }))
+  } finally {
+    requestTimings.push({ method, path, responseHeadersMs: Date.now() - started })
+  }
+}
+
+async function post(path: string, body: unknown, token?: string) {
+  return request('POST', path, body, token)
 }
 
 async function connect(member: Member) {
   const ws = new WebSocket(`${BASE.replace(/^http/, 'ws')}/api/games/${member.roomCode}/ws`)
+  connections.set(ws, undefined)
+  ws.addEventListener(
+    'close',
+    () => {
+      clearInterval(connections.get(ws))
+      connections.delete(ws)
+    },
+    { once: true },
+  )
   const events: ServerToClientEvent[] = []
   ws.addEventListener('message', (event) => events.push(JSON.parse(String(event.data))))
   await new Promise<void>((resolve, reject) => {
-    ws.addEventListener('open', () => resolve(), { once: true })
-    ws.addEventListener('error', () => reject(new Error('WebSocket connection failed')), {
-      once: true,
-    })
+    const deadline = setTimeout(() => {
+      ws.close()
+      reject(new Error(`WebSocket open timed out for ${member.roomCode}`))
+    }, 10_000)
+    ws.addEventListener(
+      'open',
+      () => {
+        clearTimeout(deadline)
+        resolve()
+      },
+      { once: true },
+    )
+    ws.addEventListener(
+      'error',
+      () => {
+        clearTimeout(deadline)
+        reject(new Error(`WebSocket connection failed for ${member.roomCode}`))
+      },
+      { once: true },
+    )
   })
   const peer = {
     ...member,
@@ -34,7 +91,19 @@ async function connect(member: Member) {
     },
     async wait<T extends ServerToClientEvent['type']>(type: T, after = 0) {
       await expect
-        .poll(() => events.slice(after).find((event) => event.type === type), { timeout: 30_000 })
+        .poll(
+          () => {
+            if (ws.readyState === WebSocket.CLOSED)
+              throw new Error(
+                `Socket closed before ${type}; last events: ${events
+                  .slice(-5)
+                  .map((event) => event.type)
+                  .join(', ')}`,
+              )
+            return events.slice(after).find((event) => event.type === type)
+          },
+          { timeout: 30_000, message: `Waiting for ${type} in ${member.roomCode}` },
+        )
         .toBeTruthy()
       return events.slice(after).find((event) => event.type === type) as Extract<
         ServerToClientEvent,
@@ -49,6 +118,12 @@ async function connect(member: Member) {
   }
   peer.send({ type: 'auth', sessionToken: member.sessionToken })
   await peer.wait('auth_ok')
+  connections.set(
+    ws,
+    setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) peer.send({ type: 'ping' })
+    }, 15_000),
+  )
   return peer
 }
 type Peer = Awaited<ReturnType<typeof connect>>
@@ -64,7 +139,7 @@ async function join(roomCode: string, username: string, role = 'player'): Promis
 }
 
 async function start(rules: RuleId[] = [], roundsToWin = 20, begin = true, playerCount = 4) {
-  const { packs } = (await (await fetch(BASE + '/api/packs')).json()) as {
+  const { packs } = (await (await request('GET', '/api/packs')).json()) as {
     packs: { id: string; name: string }[]
   }
   const pack = packs.find((pack) => /base/i.test(pack.name)) ?? packs[0]!
