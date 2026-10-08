@@ -130,8 +130,10 @@ for (const mode of ['godmode', 'survival', 'serious_business'] as const) {
             ? game.peers.filter((peer) => peer !== game.czar)
             : [game.czar!]
       const viewers = []
-      for (const actor of actors) {
-        const context = await browser.newContext()
+      for (const [index, actor] of actors.entries()) {
+        const context = await browser.newContext({
+          viewport: index % 2 === 0 ? { width: 1280, height: 720 } : { width: 390, height: 844 },
+        })
         contexts.push(context)
         const page = await context.newPage()
         let snapshots = 0
@@ -214,8 +216,57 @@ for (const mode of ['godmode', 'survival', 'serious_business'] as const) {
         await expect.poll(viewer.snapshots, { timeout: 15_000 }).toBeGreaterThan(beforeReconnect)
         await verify()
       }
+      if (mode === 'survival') {
+        // The next turn holder uses the mobile viewport. Confirm a native
+        // click can reach an available action after all refreshes/rejoins.
+        const nextActor = viewers.find(
+          (viewer) => viewer.actor.playerId === board.eliminationTurnPlayerId,
+        )!
+        const marker = game.peers[0]!.events.length
+        await nextActor.page.getByTestId('eliminate-btn').nth(1).click()
+        await game.peers[0]!.wait('card_eliminated', marker)
+        await expect(nextActor.page.locator('.sub-card.is-eliminated')).toHaveCount(
+          2 * board.prompt.pick,
+        )
+        await expect(nextActor.page.getByTestId('eliminate-btn').nth(0)).toBeDisabled()
+        await expect(nextActor.page.getByTestId('eliminate-btn').nth(1)).toBeDisabled()
+      }
     } finally {
       await Promise.all(contexts.map((context) => context.close()))
+      game.close()
+    }
+  })
+}
+
+for (const viewport of [
+  { width: 1280, height: 720 },
+  { width: 390, height: 844 },
+]) {
+  test(`normal judge can pick a card at ${viewport.width}px`, async ({ browser }) => {
+    const game = await start()
+    const context = await browser.newContext({ viewport })
+    try {
+      const actor = game.czar!
+      const page = await context.newPage()
+      await page.addInitScript(
+        (session) => localStorage.setItem('cab_session', JSON.stringify(session)),
+        {
+          roomCode: actor.roomCode,
+          playerId: actor.playerId,
+          sessionToken: actor.sessionToken,
+          username: 'Judge',
+          role: 'player',
+          anonId: `normal-judge-${viewport.width}`,
+        },
+      )
+      await page.goto(`/games/${actor.roomCode}/session`)
+      await expect(page.locator('.card-prompt')).toBeVisible()
+      await ready(game)
+      await page.locator('.sub-card').first().click()
+      await actor.wait('round_won')
+      await expect(page.locator('.winner-badge')).toBeVisible()
+    } finally {
+      await context.close()
       game.close()
     }
   })
