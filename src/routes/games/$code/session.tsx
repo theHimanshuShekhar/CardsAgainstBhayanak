@@ -1,5 +1,6 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useEffect, useRef, useState, useCallback } from 'react'
+import { projectSessionPhase } from '~/lib/session-projection'
 import { Topbar } from '~/components/ui/Topbar'
 import { HostMenu } from '~/components/ui/HostMenu'
 import { Scoreboard } from '~/components/game/Scoreboard'
@@ -47,7 +48,8 @@ function SessionScreen() {
   const [round, setRound] = useState(0)
   // Update at the socket boundary so queued frames agree on round identity.
   const roundRef = useRef(0)
-  const [phase, setPhase] = useState<GamePhase>('picking')
+  const [roomPhase, setPhase] = useState<GamePhase>('picking')
+  const [submissionCount, setSubmissionCount] = useState(0)
   const [prompt, setPrompt] = useState<BlackCard | null>(null)
   const [czarId, setCzarId] = useState<string | null>(null)
   const [hostId, setHostId] = useState<string | null>(null)
@@ -131,36 +133,18 @@ function SessionScreen() {
   // Gambling base mechanic: enabled outside modal rules, after round 1,
   // for non-Czars with ≥1 pt who haven't already gambled this round.
   const canGamble = !modalActive && round > 1 && myScore >= 1 && !hasGambled && !isCzar
-  // Godmode renders without a Czar (czarId === null). Voting opens once
-  // every submission has been revealed — the engine flips the phase to
-  // `waiting` post-stagger but doesn't push a phase_changed event, so we
-  // compute readiness from the local revealIndex instead.
-  const canVote =
-    isGodmode &&
-    phase === 'reveal' &&
-    submissions.length > 0 &&
-    revealIndex >= submissions.length &&
-    !myVotedSubmissionId &&
-    winningSubmissionId == null
-  // Survival: only the elimination-turn holder can eliminate, and only
-  // once every card is face-up. The engine flips server phase to
-  // 'eliminating' silently — the client stays on 'reveal' until winner.
-  const canEliminate =
-    isSurvival &&
-    phase === 'reveal' &&
-    submissions.length > 0 &&
-    revealIndex >= submissions.length &&
-    eliminationTurn === myId &&
-    winningSubmissionId == null
-  // Serious Business: the czar ranks top 3 once the reveal completes.
-  const canRank =
-    isSerious &&
-    phase === 'reveal' &&
-    submissions.length > 0 &&
-    revealIndex >= submissions.length &&
-    isCzar &&
-    serverRanking == null &&
-    winningSubmissionId == null
+  const { phase, decision } = projectSessionPhase({
+    phase: roomPhase,
+    rules: config?.rules ?? [],
+    revealIndex,
+    submissionCount,
+    finishedSubmitting: mySubmissionsSent >= (hasGambled ? 2 : 1),
+    isCzar,
+    hasWinner: winningSubmissionId !== null,
+  })
+  const canVote = decision === 'vote' && !myVotedSubmissionId
+  const canEliminate = decision === 'eliminate' && eliminationTurn === myId
+  const canRank = decision === 'rank' && isCzar && serverRanking === null
 
   const { on, send, connected, reconnect } = useGameSocket(
     code,
@@ -246,23 +230,13 @@ function SessionScreen() {
         setEliminatedIds(
           new Set(s.submissions.filter((x) => x.eliminated).map((x) => x.submissionId)),
         )
-        const finishedSubmitting = s.mySubmissionCount >= (s.myHasGambled ? 2 : 1)
-        const snapshotPhase =
-          s.winningSubmissionId != null
-            ? 'reveal'
-            : s.phase === 'picking' && (s.czarId === myId || finishedSubmitting)
-              ? 'waiting'
-              : s.submissions.length > 0 &&
-                  (s.phase === 'judging' ||
-                    (s.config.rules.includes('godmode') && s.phase === 'waiting'))
-                ? 'reveal'
-                : s.phase
+        setSubmissionCount((current) =>
+          sameRound ? Math.max(current, s.submissions.length) : s.submissions.length,
+        )
         setPhase((current) =>
-          sameRound &&
-          current === 'reveal' &&
-          (snapshotPhase === 'picking' || snapshotPhase === 'waiting')
+          sameRound && current === 'reveal' && (s.phase === 'picking' || s.phase === 'waiting')
             ? current
-            : snapshotPhase,
+            : s.phase,
         )
       }
       if (event.type === 'round_started') {
@@ -281,7 +255,8 @@ function SessionScreen() {
         setExpected(event.expected)
         setTimerExpiresAt(event.roundTimerExpiresAt)
         if (event.hand) setHand(event.hand)
-        setPhase(event.czarId === myId ? 'waiting' : 'picking')
+        setPhase('picking')
+        setSubmissionCount(0)
         // Discard mode is per-tap; reset on round boundary so a stale
         // armed state doesn't survive into a new picking phase.
         setDiscardMode(false)
@@ -383,6 +358,7 @@ function SessionScreen() {
       if (event.type === 'reveal_start') {
         setPhase('reveal')
         setRevealIndex(0)
+        setSubmissionCount(event.submissionCount)
         // Rebuild cleanly from card_revealed; the server's permuted index
         // is the authoritative opaque submissionId used by pick/vote.
         setSubmissions([])

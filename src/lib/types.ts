@@ -233,7 +233,7 @@ export type ServerMessage =
   | { type: 'player_gambled'; playerId: string }
   | { type: 'player_skipped'; playerId: string; round: number; submitted: number; expected: number }
   | { type: 'my_submission_ids'; playerId: string; submissionIds: string[] }
-  | { type: 'reveal_start' }
+  | { type: 'reveal_start'; submissionCount: number }
   | { type: 'card_revealed'; submissionIndex: number; fills: Card[] }
   | {
       type: 'round_won'
