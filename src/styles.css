@@ -1637,6 +1637,13 @@ button {
   color: var(--black);
   border-color: var(--white);
 }
+/* Action strips follow the full-height response card. Reserve their height
+   in the grid row so the next row cannot cover voting/ranking/elimination. */
+.sub-card:has(.vote-strip),
+.sub-card:has(.elim-strip),
+.sub-card:has(.rank-strip) {
+  margin-bottom: 42px;
+}
 .sub-card.is-eliminated {
   opacity: 0.35;
   filter: grayscale(1);

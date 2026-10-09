@@ -230,7 +230,7 @@ export type ServerMessage =
   | { type: 'scores_update'; scores: PlayerScore[] }
   | { type: 'player_gambled'; playerId: string }
   | { type: 'player_skipped'; playerId: string; round: number; submitted: number; expected: number }
-  | { type: 'reveal_start' }
+  | { type: 'reveal_start'; submissionCount: number }
   | { type: 'card_revealed'; submissionIndex: number; fills: Card[] }
   | {
       type: 'round_won'
