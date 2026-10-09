@@ -1,4 +1,7 @@
 import { test, expect } from '@playwright/test'
+import Redis from 'ioredis'
+import postgres from 'postgres'
+import { requestStateSnapshot } from '../ws-snapshot'
 import type { ClientToServerEvent, ServerToClientEvent, RuleId } from '../../src/lib/types'
 
 const BASE = process.env['CAB_E2E_BASE'] ?? 'http://localhost:3000'
@@ -42,16 +45,13 @@ async function connect(member: Member) {
       >
     },
     async snapshot() {
-      const after = events.length
-      peer.send({ type: 'rejoin' })
-      return (await peer.wait('state_snapshot', after)).state
+      return requestStateSnapshot(ws, events)
     },
   }
   peer.send({ type: 'auth', sessionToken: member.sessionToken })
   await peer.wait('auth_ok')
   return peer
 }
-type Peer = Awaited<ReturnType<typeof connect>>
 
 async function join(roomCode: string, username: string, role = 'player'): Promise<Member> {
   const response = await post(`/api/games/${roomCode}/join`, {
@@ -63,7 +63,7 @@ async function join(roomCode: string, username: string, role = 'player'): Promis
   return { ...(await response.json()), roomCode }
 }
 
-async function start(rules: RuleId[] = [], roundsToWin = 20, begin = true) {
+async function start(rules: RuleId[] = []) {
   const { packs } = (await (await fetch(BASE + '/api/packs')).json()) as {
     packs: { id: string; name: string }[]
   }
@@ -71,22 +71,17 @@ async function start(rules: RuleId[] = [], roundsToWin = 20, begin = true) {
   const response = await post('/api/games', {
     username: 'ResolutionHost',
     anonId: 'resolution-host',
-    config: { maxPlayers: 10, roundsToWin, timer: 'Off', packs: [pack.id], rules },
+    config: { maxPlayers: 10, roundsToWin: 20, timer: 'Off', packs: [pack.id], rules },
   })
   expect(response.status).toBe(201)
   const host = (await response.json()) as Member
   const members = [host]
   for (let i = 1; i < 4; i++) members.push(await join(host.roomCode, `Player${i}`))
   const peers = await Promise.all(members.map(connect))
-  let czar: Peer | undefined
-  if (begin) {
-    expect((await post(`/api/games/${host.roomCode}/start`, {}, host.sessionToken)).status).toBe(
-      204,
-    )
-    await peers[0]!.wait('round_started')
-    const initial = await peers[0]!.snapshot()
-    czar = peers.find((peer) => peer.playerId === initial.czarId)
-  }
+  expect((await post(`/api/games/${host.roomCode}/start`, {}, host.sessionToken)).status).toBe(204)
+  await peers[0]!.wait('round_started')
+  const initial = await peers[0]!.snapshot()
+  const czar = peers.find((peer) => peer.playerId === initial.czarId)
   return { host, peers, czar, close: () => peers.forEach((peer) => peer.ws.close()) }
 }
 
@@ -363,5 +358,99 @@ test('Czar departure after a normal outcome does not award a second point or voi
     expect(observer.events.some((event) => event.type === 'round_voided')).toBe(false)
   } finally {
     game.close()
+  }
+})
+
+test('a delayed Survival Czar departure cannot resolve after the live room expires', async () => {
+  const game = await start(['survival'])
+  const redis = new Redis(process.env['REDIS_URL']!)
+  const sql = postgres(process.env['DATABASE_URL']!, { max: 2 })
+  let unlock!: () => void
+  let locked!: () => void
+  const readyLock = new Promise<void>((resolve) => {
+    locked = resolve
+  })
+  const release = new Promise<void>((resolve) => {
+    unlock = resolve
+  })
+  let transaction: Promise<unknown> | undefined
+  try {
+    await ready(game)
+    const observer = game.peers.find((peer) => peer !== game.czar)!
+    transaction = sql.begin(async (tx) => {
+      await tx`lock table game_rounds in access exclusive mode`
+      locked()
+      await release
+    })
+    await readyLock
+    const departureAfter = observer.events.length
+    const departure = post(`/api/games/${game.host.roomCode}/leave`, {}, game.czar!.sessionToken)
+    expect(await observer.wait('player_left', departureAfter)).toMatchObject({
+      playerId: game.czar!.playerId,
+    })
+    await expect
+      .poll(async () => {
+        const rows =
+          await sql`select count(*)::int as count from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'`
+        return rows[0]!.count
+      })
+      .toBeGreaterThan(0)
+    // The authenticated leave is already pending; only the live root
+    // expires. Membership, submissions and round identity survive.
+    const root = `game:${game.host.roomCode}`
+    await redis.pexpire(root, 1)
+    await expect.poll(() => redis.exists(root)).toBe(0)
+    const after = observer.events.length
+    unlock()
+    await transaction
+    const response = await departure
+    expect(
+      observer.events
+        .slice(after)
+        .some((event) =>
+          ['card_eliminated', 'round_won', 'round_end', 'round_started'].includes(event.type),
+        ),
+    ).toBe(false)
+    expect(response.status).toBe(204)
+    expect(
+      (await post(`/api/games/${game.host.roomCode}/leave`, {}, observer.sessionToken)).status,
+    ).toBe(401)
+    observer.send({ type: 'ping' })
+    expect(await observer.wait('auth_error', after)).toMatchObject({ code: 'invalid_token' })
+  } finally {
+    unlock?.()
+    await transaction
+    game.close()
+    await redis.quit()
+    await sql.end()
+  }
+})
+
+test('expiry during the reveal delay cannot publish retained answers or advance Survival turns', async () => {
+  const game = await start(['survival'])
+  const redis = new Redis(process.env['REDIS_URL']!)
+  try {
+    const observer = game.peers.find((peer) => peer !== game.czar)!
+    await ready(game, false)
+    await observer.wait('reveal_start')
+    const root = `game:${game.host.roomCode}`
+    await redis.pexpire(root, 1)
+    await expect.poll(() => redis.exists(root)).toBe(0)
+    const after = observer.events.length
+    // The three pending stagger callbacks and final handoff must finish
+    // without delivering retained card data or opening an elimination turn.
+    await new Promise((resolve) => setTimeout(resolve, 2_500))
+    expect(
+      observer.events
+        .slice(after)
+        .some((event) =>
+          ['card_revealed', 'elimination_turn', 'round_won', 'round_end'].includes(event.type),
+        ),
+    ).toBe(false)
+    observer.send({ type: 'ping' })
+    expect(await observer.wait('auth_error', after)).toMatchObject({ code: 'invalid_token' })
+  } finally {
+    game.close()
+    await redis.quit()
   }
 })

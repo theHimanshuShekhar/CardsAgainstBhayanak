@@ -651,6 +651,7 @@ export async function publishEvent(code: string, event: unknown): Promise<void> 
 // round check. Automatic outcomes can finish the reveal they claimed;
 // sleeping stagger callbacks cannot publish into a finished round.
 const PUBLISH_REVEALS_LUA = `
+if not redis.call('HGET', KEYS[4], 'status') then return 0 end
 if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1] then return 0 end
 if ARGV[2] == '1' then
   if redis.call('HGET', KEYS[1], 'phase') ~= 'transition' or redis.call('HGET', KEYS[1], 'outcomeClaim') ~= ARGV[1] then return 0 end
@@ -680,10 +681,11 @@ export async function publishRoundReveals(
   return (
     (await redis.eval(
       PUBLISH_REVEALS_LUA,
-      3,
+      4,
       KEYS.round(code),
       `${KEYS.round(code)}:revealed`,
       KEYS.channel(code),
+      KEYS.game(code),
       roundId,
       claimedOutcome ? '1' : '0',
       JSON.stringify(events),
@@ -960,6 +962,7 @@ export async function claimRoundOutcome(
 
 // A sleeping reveal must not overwrite a claimed outcome or a newer round.
 const ADVANCE_REVEAL_LUA = `
+if not redis.call('HGET', KEYS[2], 'status') then return 0 end
 if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1] then return 0 end
 if redis.call('HGET', KEYS[1], 'phase') ~= 'reveal' then return 0 end
 if redis.call('HEXISTS', KEYS[1], 'outcomeClaim') == 1 then return 0 end
@@ -978,8 +981,9 @@ export async function advanceRevealedRound(
   return (
     (await redis.eval(
       ADVANCE_REVEAL_LUA,
-      1,
+      2,
       KEYS.round(code),
+      KEYS.game(code),
       roundId,
       phase,
       eliminationTurn,
@@ -1141,6 +1145,7 @@ export async function commitElimination(
 // Claim and finish automatic Survival eliminations together: a live turn
 // racing the Czar drop cannot make an already eliminated answer win.
 const AUTO_ELIMINATE_LUA = `
+if not redis.call('HGET', KEYS[3], 'status') then return {} end
 if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1] then return {} end
 if redis.call('HGET', KEYS[1], 'phase') ~= ARGV[2] then return {} end
 if redis.call('HEXISTS', KEYS[1], 'outcomeClaim') == 1 then return {} end
@@ -1175,9 +1180,10 @@ export async function autoEliminateRemaining(
 ): Promise<string[]> {
   return (await redis.eval(
     AUTO_ELIMINATE_LUA,
-    2,
+    3,
     KEYS.round(code),
     submissionsKey(code),
+    KEYS.game(code),
     roundId,
     phase,
     JSON.stringify(order),

@@ -282,7 +282,7 @@ for (const rules of [[], ['serious_business']] as RuleId[][]) {
       game.peers.splice(game.peers.indexOf(queued), 1)
 
       // HTTP leave revokes the former Czar's socket.
-      // Dropping it voids the round; its old command must remain powerless.
+      // The server finishes the revealed round; the old socket loses authority.
       const formerCzar = game.czar!
       expect(
         (await post(`/api/games/${game.host.roomCode}/leave`, {}, formerCzar.sessionToken)).status,
@@ -291,7 +291,9 @@ for (const rules of [[], ['serious_business']] as RuleId[][]) {
       await expect.poll(() => formerCzar.ws.readyState).toBe(WebSocket.CLOSED)
       const observer = game.peers.find((peer) => peer !== formerCzar)!
       await expect.poll(async () => (await observer.snapshot()).round).toBe(2)
-      expect((await observer.snapshot()).scores.every((score) => score.score === 0)).toBe(true)
+      expect((await observer.snapshot()).scores.map((score) => score.score).sort()).toEqual(
+        rules.includes('serious_business') ? [1, 2, 3] : [0, 0, 1],
+      )
     } finally {
       game.close()
     }
