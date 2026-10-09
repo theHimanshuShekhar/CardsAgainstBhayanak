@@ -257,5 +257,5 @@ export type ServerMessage =
   | { type: 'game_over'; finalScores: PlayerScore[]; winnerId: string; mode: GameOverMode }
   | { type: 'game_reset'; mode: ResetMode }
   | { type: 'command_accepted'; commandId: string }
-  | { type: 'error'; code: ErrorCode; message: string; commandId?: string }
+  | { type: 'error'; code: ErrorCode; message: string; commandId?: string; retryAfterMs?: number }
   | { type: 'pong' }

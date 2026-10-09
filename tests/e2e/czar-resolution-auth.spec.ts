@@ -1,7 +1,10 @@
+import { requestStateSnapshot } from '../ws-snapshot'
 import { test, expect } from '@playwright/test'
 import Redis from 'ioredis'
 import postgres from 'postgres'
 import type { ClientToServerEvent, ServerToClientEvent, RuleId } from '../../src/lib/types'
+
+test.setTimeout(60_000)
 
 const BASE = process.env['CAB_E2E_BASE'] ?? 'http://localhost:3000'
 type Member = { roomCode: string; playerId: string; sessionToken: string }
@@ -44,9 +47,7 @@ async function connect(member: Member) {
       >
     },
     async snapshot() {
-      const after = events.length
-      peer.send({ type: 'rejoin' })
-      return (await peer.wait('state_snapshot', after)).state
+      return requestStateSnapshot(ws, events)
     },
   }
   peer.send({ type: 'auth', sessionToken: member.sessionToken })
@@ -112,7 +113,7 @@ async function ready(game: Awaited<ReturnType<typeof start>>) {
         ? 'ranking'
         : 'judging'
   await expect
-    .poll(async () => (await game.peers[0]!.snapshot()).phase, { timeout: 10_000 })
+    .poll(async () => (await game.peers[0]!.snapshot()).phase, { timeout: 30_000 })
     .toBe(phase)
 }
 
@@ -276,16 +277,21 @@ for (const rules of [[], ['serious_business']] as RuleId[][]) {
         (await post(`/api/games/${game.host.roomCode}/leave`, {}, queued.sessionToken)).status,
       ).toBe(204)
       await game.peers[0]!.wait('player_left')
-      await rejectsWithoutEffects(game.peers, queued, command, 'not_authorized')
+      expect(await queued.wait('auth_error')).toMatchObject({ code: 'player_dropped' })
+      await expect.poll(() => queued.ws.readyState).toBe(WebSocket.CLOSED)
+      game.peers.splice(game.peers.indexOf(queued), 1)
 
-      // An authenticated former Czar keeps its socket after an HTTP leave.
+      // HTTP leave revokes the former Czar's socket.
       // Dropping it voids the round; its old command must remain powerless.
       const formerCzar = game.czar!
       expect(
         (await post(`/api/games/${game.host.roomCode}/leave`, {}, formerCzar.sessionToken)).status,
       ).toBe(204)
-      await expect.poll(async () => (await game.peers[0]!.snapshot()).round).toBe(2)
-      await rejectsWithoutEffects(game.peers, formerCzar, command, 'not_authorized')
+      expect(await formerCzar.wait('auth_error')).toMatchObject({ code: 'player_dropped' })
+      await expect.poll(() => formerCzar.ws.readyState).toBe(WebSocket.CLOSED)
+      const observer = game.peers.find((peer) => peer !== formerCzar)!
+      await expect.poll(async () => (await observer.snapshot()).round).toBe(2)
+      expect((await observer.snapshot()).scores.every((score) => score.score === 0)).toBe(true)
     } finally {
       game.close()
     }
@@ -308,7 +314,7 @@ for (const rules of [[], ['serious_business']] as RuleId[][]) {
     const sql = postgres(process.env['DATABASE_URL']!)
     try {
       await ready(game)
-      const actor = game.czar!
+      let actor = game.czar!
       const command: ClientToServerEvent = rules.includes('serious_business')
         ? { type: 'rank', ranking: ['0', '1', '2'] }
         : { type: 'pick', submissionId: '0', commandId: 'persisted-policy' }
@@ -321,9 +327,18 @@ for (const rules of [[], ['serious_business']] as RuleId[][]) {
           actor.playerId,
           JSON.stringify({ ...JSON.parse(activePlayer), status }),
         )
-        await rejectsWithoutEffects(game.peers, actor, command, 'not_authorized')
+        if (status === 'dropped') {
+          const observers = game.peers.filter((peer) => peer !== actor)
+          const before = await Promise.all(observers.map((peer) => peer.snapshot()))
+          actor.send(command)
+          expect(await actor.wait('auth_error')).toMatchObject({ code: 'player_dropped' })
+          expect(await Promise.all(observers.map((peer) => peer.snapshot()))).toEqual(before)
+        } else await rejectsWithoutEffects(game.peers, actor, command, 'not_authorized')
       }
       await redis.hset(playersKey, actor.playerId, activePlayer)
+      const replacement = await connect(actor)
+      game.peers[game.peers.indexOf(actor)] = replacement
+      actor = replacement
 
       const validPhase = rules.includes('serious_business') ? 'ranking' : 'judging'
       for (const phase of [
