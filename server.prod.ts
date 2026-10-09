@@ -7,9 +7,8 @@
 import { readFile } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
 import { serve } from 'srvx'
-import { plugin as ws } from 'crossws/server'
+import { gameWebSocketPlugin } from './src/ws/server'
 import tssServer from './dist/server/server.js'
-import { wsHooks } from './src/ws/handler'
 // Validate the ingress allowlist before listening, including when API route
 // chunks have not yet been loaded by the SSR handler.
 import './src/lib/client-identity.server'
@@ -49,7 +48,7 @@ async function serveAsset(pathname: string): Promise<Response> {
 serve({
   port,
   hostname: '0.0.0.0',
-  plugins: [ws(wsHooks)],
+  plugins: [gameWebSocketPlugin],
   fetch: (request: Request) => {
     const { pathname } = new URL(request.url)
     if (pathname.startsWith('/assets/')) return serveAsset(pathname)

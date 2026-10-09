@@ -1,3 +1,4 @@
+import { requestStateSnapshot } from '../ws-snapshot'
 import { test, expect } from '@playwright/test'
 import type { ClientToServerEvent, ServerToClientEvent, RuleId } from '../../src/lib/types'
 
@@ -111,9 +112,7 @@ async function connect(member: Member) {
       >
     },
     async snapshot() {
-      const after = events.length
-      peer.send({ type: 'rejoin' })
-      return (await peer.wait('state_snapshot', after)).state
+      return requestStateSnapshot(ws, events)
     },
   }
   peer.send({ type: 'auth', sessionToken: member.sessionToken })
