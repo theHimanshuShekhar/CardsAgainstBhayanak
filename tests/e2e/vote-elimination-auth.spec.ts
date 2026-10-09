@@ -325,11 +325,10 @@ for (const mode of ['godmode', 'serious_business'] as const) {
 
 test('private own-answer eligibility survives rejoin and a rejected self-vote leaves round voting actionable', async () => {
   const game = await start(['godmode'])
+  let spectator: Peer | undefined
   try {
     const originals = await Promise.all(game.peers.map((peer) => peer.snapshot()))
-    const spectator = await connect(
-      await join(game.host.roomCode, 'EligibilityWatcher', 'spectator'),
-    )
+    spectator = await connect(await join(game.host.roomCode, 'EligibilityWatcher', 'spectator'))
     await ready(game)
     const snapshots = await Promise.all(game.peers.map((peer) => peer.snapshot()))
     const ownIds = snapshots.map(
@@ -354,14 +353,10 @@ test('private own-answer eligibility survives rejoin and a rejected self-vote le
         true,
       )
     }
-    try {
-      expect(await spectator.snapshot()).toHaveProperty('mySubmissionIds', [])
-      expect(spectator.events.filter((event) => event.type === 'my_submission_ids')).toEqual([
-        { type: 'my_submission_ids', playerId: spectator.playerId, submissionIds: [] },
-      ])
-    } finally {
-      spectator.ws.close()
-    }
+    expect(await spectator.snapshot()).toHaveProperty('mySubmissionIds', [])
+    expect(spectator.events.filter((event) => event.type === 'my_submission_ids')).toEqual([
+      { type: 'my_submission_ids', playerId: spectator.playerId, submissionIds: [] },
+    ])
     const observer = game.peers[0]!
     const marker = observer.events.length
     observer.send({ type: 'vote', submissionId: ownIds[0]!, commandId: 'self-vote' })
@@ -384,6 +379,7 @@ test('private own-answer eligibility survives rejoin and a rejected self-vote le
     await observer.wait('round_end', marker)
     expect(await observer.wait('round_started', marker)).toMatchObject({ round: 2 })
   } finally {
+    spectator?.ws.close()
     game.close()
   }
 })
