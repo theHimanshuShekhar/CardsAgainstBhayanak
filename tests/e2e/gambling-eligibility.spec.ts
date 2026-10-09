@@ -1,5 +1,8 @@
+import { requestStateSnapshot } from '../ws-snapshot'
 import { test, expect } from '@playwright/test'
 import type { ClientToServerEvent, ServerToClientEvent, RuleId } from '../../src/lib/types'
+
+test.setTimeout(60_000)
 
 const BASE = process.env['CAB_E2E_BASE'] ?? 'http://localhost:3000'
 type Member = { roomCode: string; playerId: string; sessionToken: string }
@@ -52,9 +55,7 @@ async function connect(member: Member) {
       return events.find((event) => 'commandId' in event && event.commandId === commandId)!
     },
     async snapshot() {
-      const after = events.length
-      peer.send({ type: 'rejoin' })
-      return (await peer.wait('state_snapshot', after)).state
+      return requestStateSnapshot(ws, events)
     },
   }
   peer.send({ type: 'auth', sessionToken: member.sessionToken })

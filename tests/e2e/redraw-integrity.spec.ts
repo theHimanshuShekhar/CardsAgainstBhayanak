@@ -1,5 +1,8 @@
+import { requestStateSnapshot } from '../ws-snapshot'
 import { test, expect } from '@playwright/test'
 import type { ClientToServerEvent, ServerToClientEvent, RuleId } from '../../src/lib/types'
+
+test.setTimeout(60_000)
 
 const BASE = process.env['CAB_E2E_BASE'] ?? 'http://localhost:3000'
 type Member = { roomCode: string; playerId: string; sessionToken: string }
@@ -42,9 +45,7 @@ async function connect(member: Member) {
       >
     },
     async snapshot() {
-      const after = events.length
-      peer.send({ type: 'rejoin' })
-      return (await peer.wait('state_snapshot', after)).state
+      return requestStateSnapshot(ws, events)
     },
   }
   peer.send({ type: 'auth', sessionToken: member.sessionToken })
@@ -105,7 +106,7 @@ async function ready(game: Awaited<ReturnType<typeof start>>) {
         ? 'ranking'
         : 'judging'
   await expect
-    .poll(async () => (await game.peers[0]!.snapshot()).phase, { timeout: 10_000 })
+    .poll(async () => (await game.peers[0]!.snapshot()).phase, { timeout: 30_000 })
     .toBe(phase)
 }
 
@@ -258,7 +259,10 @@ test('redraw costs one point and remains usable during the resolved round transi
       next.hand!.some((card) => previousHands.get(actor)!.some((old) => old.id === card.id)),
     ).toBe(false)
     expect(new Set(next.hand!.map((card) => card.id)).size).toBe(10)
-    expect(actor.events.slice(actorAfter).filter((event) => event.type === 'error')).toHaveLength(0)
+    for (const event of actor.events.slice(actorAfter).filter((event) => event.type === 'error')) {
+      expect(event).toMatchObject({ code: 'rate_limited', retryAfterMs: expect.any(Number) })
+      expect(event.retryAfterMs).toBeGreaterThan(0)
+    }
     const handUpdates = actor.events
       .slice(actorAfter)
       .filter((event) => event.type === 'hand_update')

@@ -15,6 +15,12 @@ export function useGameSocket(code: string | null, sessionToken: string | null, 
     let backoffMs = 1000
     let pingTimer: ReturnType<typeof setInterval> | null = null
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+    let syncTimer: ReturnType<typeof setTimeout> | null = null
+    let syncAttempts = 0
+    const clearSyncRetry = () => {
+      if (syncTimer) clearTimeout(syncTimer)
+      syncTimer = null
+    }
     let connectTime = 0
     let attempt = 0
     // S2-18: an intentional close (unmount / deps change) must stop the
@@ -23,11 +29,25 @@ export function useGameSocket(code: string | null, sessionToken: string | null, 
     const isReconnect = () => attempt > 1
 
     function connect() {
+      clearSyncRetry()
+      syncAttempts = 0
       attempt++
       const ws = new WebSocket(`${location.origin.replace('http', 'ws')}/api/games/${code}/ws`)
       wsRef.current = ws
       synchronizedRef.current = false
 
+      const requestSnapshot = () => {
+        if (
+          cancelled ||
+          synchronizedRef.current ||
+          wsRef.current !== ws ||
+          ws.readyState !== WebSocket.OPEN
+        )
+          return
+        clearSyncRetry()
+        syncAttempts++
+        ws.send(JSON.stringify({ type: 'rejoin' } satisfies ClientToServerEvent))
+      }
       ws.onopen = () => {
         connectTime = Date.now()
         setConnected(true)
@@ -58,7 +78,7 @@ export function useGameSocket(code: string | null, sessionToken: string | null, 
         }
         if (event.type === 'auth_ok') {
           setAuthed(true)
-          ws.send(JSON.stringify({ type: 'rejoin' } satisfies ClientToServerEvent))
+          requestSnapshot()
         }
         if (event.type === 'auth_error') setAuthed(false)
         if (
@@ -66,18 +86,34 @@ export function useGameSocket(code: string | null, sessionToken: string | null, 
           (event.type === 'lobby_snapshot' &&
             event.gameStatus !== 'active' &&
             event.gameStatus !== 'paused')
-        )
+        ) {
           synchronizedRef.current = true
+          clearSyncRetry()
+        }
+        if (
+          event.type === 'error' &&
+          event.code === 'rate_limited' &&
+          !synchronizedRef.current &&
+          !syncTimer
+        ) {
+          if (syncAttempts >= 8) ws.close()
+          else
+            syncTimer = setTimeout(
+              requestSnapshot,
+              Math.min(120_000, Math.max(250, event.retryAfterMs ?? 1000)),
+            )
+        }
         // A session can connect after startGame marks the room active,
         // before startRound creates the first round. That rejoin receives
         // an active lobby snapshot without a hand. The round announcement
         // guarantees the row exists, so finish synchronizing then.
-        if (event.type === 'round_started' && !synchronizedRef.current) {
-          ws.send(JSON.stringify({ type: 'rejoin' } satisfies ClientToServerEvent))
+        if (event.type === 'round_started' && !synchronizedRef.current && !syncTimer) {
+          requestSnapshot()
         }
         for (const h of handlersRef.current) h(event)
       }
       ws.onclose = () => {
+        clearSyncRetry()
         synchronizedRef.current = false
         setConnected(false)
         setAuthed(false)
@@ -98,6 +134,7 @@ export function useGameSocket(code: string | null, sessionToken: string | null, 
     connect()
     return () => {
       cancelled = true
+      clearSyncRetry()
       wsRef.current?.close()
       if (pingTimer) clearInterval(pingTimer)
       if (reconnectTimer) clearTimeout(reconnectTimer)
