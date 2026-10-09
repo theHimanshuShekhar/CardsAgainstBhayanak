@@ -1036,11 +1036,11 @@ async function finalizeRoundAfterPause(code: string): Promise<void> {
   const refreshed = await state.getAllPlayers(code)
 
   // Happy Ending: this was the forced "Make a Haiku" final round —
-  // end now regardless of score; the current leader wins.
+  // end now regardless of score; the Haiku round winner wins the game.
   if (await redis.hget(KEYS.game(code), 'happyEndingFinal')) {
     await redis.hdel(KEYS.game(code), 'happyEndingFinal', 'happyEndingArmed')
-    const leader = [...refreshed].sort((a, b) => b.score - a.score)[0]
-    await endGame(code, 'happy_ending', leader?.id)
+    const { winningPlayerId } = await state.getRoundOutcome(code)
+    await endGame(code, 'happy_ending', winningPlayerId ?? undefined)
     return
   }
 
