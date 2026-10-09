@@ -1,3 +1,4 @@
+import { requestStateSnapshot } from '../ws-snapshot'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { once } from 'node:events'
 import { resolve } from 'node:path'
@@ -49,9 +50,7 @@ async function connect(member: Member) {
     send,
     wait,
     async snapshot() {
-      const marker = events.length
-      send({ type: 'rejoin' })
-      return (await wait('state_snapshot', marker)).state
+      return requestStateSnapshot(ws, events)
     },
   }
 }

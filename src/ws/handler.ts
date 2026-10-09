@@ -1,5 +1,7 @@
 import type { Peer, Message } from 'crossws'
 import { randomUUID } from 'node:crypto'
+import { getClientIp } from '~/lib/client-identity.server'
+import { admitConnection, admitFrame, admitCommand, type ConnectionLease } from './traffic-budget'
 import { eq, inArray, desc } from 'drizzle-orm'
 import { db } from '~/db'
 import { blackCards, whiteCards, gameSessions, gameRounds } from '~/db/schema'
@@ -46,6 +48,8 @@ const GAME_ACTIONS = new Set<ClientToServerEvent['type']>([
 
 type PeerCtx = {
   code: string
+  lease: ConnectionLease
+  frameBucket: { tokens: number; updatedAt: number }
   playerId?: string
   anonId?: string
   lastPing: number
@@ -137,7 +141,7 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
   // All recipients, including the submitter and Czar, see only answers
   // whose scheduled reveal has happened. Empty fills retain stable slots
   // without transmitting a hidden card ID, text, or submitter identity.
-  const submissions: Submission[] =
+  let submissions: Submission[] =
     phase === 'picking'
       ? []
       : subOrder.map((key, index) => ({
@@ -160,7 +164,10 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
   // being lost. clearRoundResolution wipes these at the next startRound.
   const { submitted, expected } = await engine.submissionProgress(code)
   const roundTimerExpiresAt = await state.getRoundTimerExpiresAt(code)
-  const winnerId = await state.getRoundWinner(code)
+  const outcome = await state.getRoundOutcome(code)
+  if (phase === 'transition' && submissions.length === 0) {
+    submissions = JSON.parse((await redis.hget(KEYS.round(code), 'resolvedSubmissions')) ?? '[]')
+  }
   const eliminationTurnPlayerId = config.rules.includes('survival')
     ? ((await state.getEliminationTurn(code)) ?? undefined)
     : undefined
@@ -178,8 +185,9 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
     hand,
     submissions,
     scores,
-    revealIndex,
-    winnerId,
+    revealIndex: phase === 'transition' ? submissions.length : revealIndex,
+    winnerId: outcome.winningPlayerId,
+    ...outcome,
     submitted,
     expected,
     roundTimerExpiresAt,
@@ -262,6 +270,7 @@ function revokePlayerSockets(
 ): void {
   for (const peer of roomPeers.get(code) ?? []) {
     if (peerContext.get(peer)?.playerId !== playerId) continue
+    peerContext.get(peer)?.lease.release()
     roomPeers.get(code)?.delete(peer)
     openPeers.delete(peer)
     peerContext.delete(peer)
@@ -314,14 +323,46 @@ async function ensureSubscriber(code: string): Promise<void> {
 }
 
 export const wsHooks = {
+  upgrade(request: Request) {
+    if (!extractCode(request.url)) return new Response('Invalid room', { status: 404 })
+    const admission = admitConnection(getClientIp(request))
+    if (!admission.lease)
+      return Response.json(
+        {
+          code: 'rate_limited',
+          message: 'Too many connections. Retry later.',
+          retryAfterMs: admission.retryAfterMs,
+        },
+        {
+          status: 429,
+          headers: { 'retry-after': String(Math.ceil(admission.retryAfterMs / 1000)) },
+        },
+      )
+    return { context: { trafficLease: admission.lease } }
+  },
   async open(peer: Peer) {
     const code = extractCode(peer.request.url)
     if (!code) {
       peer.close(1008, 'invalid room')
       return
     }
-    peerContext.set(peer, { code, lastPing: Date.now() })
+    const lease = peer.context.trafficLease as ConnectionLease | undefined
+    if (!lease) {
+      peer.close(1008, 'connection admission required')
+      return
+    }
+    peerContext.set(peer, {
+      code,
+      lease,
+      frameBucket: { tokens: 120, updatedAt: performance.now() },
+      lastPing: Date.now(),
+    })
     openPeers.add(peer)
+    lease.attach(() => {
+      // Invalidate a slow authentication before it can acknowledge a timed-out socket.
+      void wsHooks.close(peer)
+      peer.close(1008, 'authentication timeout')
+    })
     wsLogger.info({ code }, 'peer opened')
   },
 
@@ -332,6 +373,7 @@ export const wsHooks = {
     let eventType: ClientToServerEvent['type'] | undefined
     let commandId: string | undefined
     let accepted = false
+    let releaseCommand: (() => void) | undefined
     const accept = (ok: boolean) => {
       accepted = ok
       if (!commandId) return
@@ -348,6 +390,18 @@ export const wsHooks = {
       )
     }
     try {
+      const frameRetry = ctx.lease.frame() || admitFrame(ctx.code, ctx.playerId, ctx.frameBucket)
+      if (frameRetry) {
+        send(peer, {
+          type: 'error',
+          code: 'rate_limited',
+          message: 'Too many frames. Retry later.',
+          retryAfterMs: frameRetry,
+        })
+        ctx.lease.release()
+        peer.close(1008, 'frame rate limit')
+        return
+      }
       if (ctx.authenticating)
         return send(peer, { type: 'error', code: 'not_authorized', message: 'auth first' })
       let input: unknown
@@ -383,6 +437,18 @@ export const wsHooks = {
             message: 'auth first',
             ...(commandId ? { commandId } : {}),
           })
+        const authRetry = ctx.lease.authenticate()
+        if (authRetry) {
+          send(peer, {
+            type: 'error',
+            code: 'rate_limited',
+            message: 'Too many authentication attempts. Retry later.',
+            retryAfterMs: authRetry,
+          })
+          ctx.lease.release()
+          peer.close(1008, 'authentication rate limit')
+          return
+        }
         ctx.authenticating = true
         const auth = await authenticateSocket(ctx.code, parsed)
         if (peerContext.get(peer) !== ctx) return
@@ -392,6 +458,7 @@ export const wsHooks = {
             code: auth.code,
             message: auth.code === 'player_dropped' ? 'player dropped' : 'invalid token',
           })
+          ctx.lease.release()
           roomPeers.get(ctx.code)?.delete(peer)
           openPeers.delete(peer)
           peerContext.delete(peer)
@@ -409,6 +476,7 @@ export const wsHooks = {
             code: participation.code,
             message: participation.code === 'player_dropped' ? 'player dropped' : 'invalid token',
           })
+          ctx.lease.release()
           openPeers.delete(peer)
           peerContext.delete(peer)
           peer.close(1008, 'authentication failed')
@@ -430,10 +498,21 @@ export const wsHooks = {
         }
         ctx.lastPing = Date.now()
         ctx.authenticating = false
+        ctx.lease.authenticated()
         send(peer, { type: 'auth_ok' })
         return
       }
 
+      const admission = admitCommand(ctx.code, ctx.playerId, parsed.type)
+      if (admission.retryAfterMs)
+        return send(peer, {
+          type: 'error',
+          code: 'rate_limited',
+          message: 'Too many commands. Retry later.',
+          retryAfterMs: admission.retryAfterMs,
+          ...(commandId ? { commandId } : {}),
+        })
+      releaseCommand = admission.release
       ctx.lastPing = Date.now()
 
       // A socket authenticates identity, not permanent participation.
@@ -554,6 +633,8 @@ export const wsHooks = {
           eventType,
         },
       )
+    } finally {
+      releaseCommand?.()
     }
   },
 
@@ -561,6 +642,7 @@ export const wsHooks = {
     openPeers.delete(peer)
     const ctx = peerContext.get(peer)
     if (!ctx) return
+    ctx.lease.release()
     roomPeers.get(ctx.code)?.delete(peer)
     peerContext.delete(peer)
 

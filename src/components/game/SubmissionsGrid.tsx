@@ -7,8 +7,8 @@ type Props = {
   pickCount: 1 | 2 | 3
   phase: 'judging' | 'reveal'
   revealIndex: number
-  winnerId: string | null
-  // Winner's display handle, resolved server-side from scores. The
+  winningSubmissionId: string | null
+  // Winner's display handle, resolved separately from player scores. The
   // client never learns submission→playerId (privacy), so this is the
   // only place the winning player's name is available.
   winnerName: string | null
@@ -51,7 +51,7 @@ export function SubmissionsGrid({
   pickCount,
   phase,
   revealIndex,
-  winnerId,
+  winningSubmissionId,
   winnerName,
   isCzar,
   pending = false,
@@ -125,8 +125,8 @@ export function SubmissionsGrid({
         <div className="subs-grid subs-grid-large">
           {submissions.filter(Boolean).flatMap((s, i) => {
             const revealed = i < revealIndex
-            const isWinner = s.submissionId === winnerId
-            const isLoser = winnerId != null && !isWinner
+            const isWinner = s.submissionId === winningSubmissionId
+            const isLoser = winningSubmissionId != null && !isWinner
             const votes = voteTally[s.submissionId] ?? 0
             const iVotedThis = myVotedSubmissionId === s.submissionId
             const isEliminated =
@@ -141,7 +141,7 @@ export function SubmissionsGrid({
               !isSerious &&
               isCzar &&
               revealed &&
-              winnerId == null
+              winningSubmissionId == null
             const slots = revealed ? s.fills : Array.from({ length: pickCount }, () => null)
             return slots.map((card, fi) => (
               <div
@@ -181,7 +181,7 @@ export function SubmissionsGrid({
                         <button
                           className="btn btn-ghost btn-sm elim-btn"
                           data-testid="eliminate-btn"
-                          disabled={!canEliminate || isEliminated || winnerId != null}
+                          disabled={!canEliminate || isEliminated || winningSubmissionId != null}
                           onClick={() => onEliminate?.(s.submissionId)}
                         >
                           {isEliminated ? 'Eliminated' : 'Eliminate'}

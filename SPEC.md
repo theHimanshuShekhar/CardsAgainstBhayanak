@@ -84,8 +84,30 @@ Client clears `cab_session` on **explicit Leave button**, on **"Go home" from th
 
 - **CSRF:** Not required. `sessionToken` lives in `localStorage` and is sent via `Authorization: Bearer` header (not cookies). Same-origin policy + bearer token = no CSRF attack surface.
 - **Token replay (accepted risk):** Tokens are HMAC-bound to `playerId` for 24h. If leaked (e.g. shared screenshot, browser extension), an attacker can impersonate that player until the room expires. This is acceptable for a party game's threat model; not worth adding rotation or IP-binding which would break mobile users on flaky networks.
-- **Rate limiting:** Per-IP sliding-window limits using Redis: `10 join attempts/min/IP`, `5 game-create attempts/hour/IP`, `60 WS messages/min/connection`. Exceeding returns HTTP 429 / WS `error` with code `rate_limited`. Cloudflare's WAF provides upstream DDoS protection; app-level limits handle abuse from legitimate clients.
-  - HTTP client identity uses the socket peer. Only immediate peers explicitly listed in `CAB_TRUSTED_PROXY_IPS` may supply a validated `CF-Connecting-IP`; the allowlist defaults to empty. Missing/invalid CF identity falls back to the socket peer. Equivalent IPv6/IPv4-mapped spellings share budgets. `X-Forwarded-For` and `Forwarded` are ignored. Trusted ingress must overwrite incoming CF identity and restrict access through trusted peers; see README for the host/Docker NAT trust boundary.
+- **Rate limiting:** HTTP uses per-IP Redis sliding-window limits: `10 join attempts/min/IP`, `5 game-create attempts/hour/IP`. Exceeding returns HTTP 429. WebSocket ingress/work limits below apply in every environment, before parsing or database/snapshot work. Cloudflare's WAF provides upstream DDoS protection; app-level limits handle abuse from legitimate clients.
+  - HTTP and WebSocket upgrade client identity use the socket peer. Only immediate peers explicitly listed in `CAB_TRUSTED_PROXY_IPS` may supply a validated `CF-Connecting-IP`; the allowlist defaults to empty. Missing/invalid CF identity falls back to the socket peer. Equivalent IPv6/IPv4-mapped spellings share budgets. `X-Forwarded-For` and `Forwarded` are ignored. Trusted ingress must overwrite incoming CF identity and restrict access through trusted peers; see README for the host/Docker NAT trust boundary.
+
+### WebSocket traffic limits
+
+Limits are process-local token buckets with the listed initial burst and continuous refill over the listed interval. Refill and idle pruning measure elapsed monotonic process time, independently of wall-clock adjustments. They are shared by all rooms/sockets for the same transport IP, or by all sockets for the same verified room/player identity. Reconnecting cannot reset those shared budgets.
+
+| Boundary                                              | Limit                                                            |
+| ----------------------------------------------------- | ---------------------------------------------------------------- |
+| Upgrade attempts                                      | 120/min/IP                                                       |
+| Open connections                                      | 64/IP, 1,024/server                                              |
+| Pending authentication                                | 16/IP, 256/server; 15-second deadline from upgrade admission     |
+| Authentication attempts                               | 60/min/IP, checked before token verification/participant lookups |
+| Incoming frame assembly                               | 8,192 bytes, including binary and fragmented messages            |
+| Incoming frames, including malformed frames and pings | 120/min/socket, 120/min/verified player, 600/min/IP              |
+| Validated commands, excluding pings                   | 60/min/verified player                                           |
+| Rejoin snapshots                                      | 6/10 seconds/verified player, also charged to the command budget |
+| Concurrent commands                                   | 2/verified player across sockets                                 |
+
+Upgrade rejection returns HTTP 429 with `Retry-After` seconds and JSON `{ code: "rate_limited", message, retryAfterMs }`; browsers cannot read upgrade responses and use the existing capped reconnect backoff. Authentication/frame-budget rejection sends WS `error` with `code: "rate_limited"`, `message`, and positive `retryAfterMs`, then closes with 1008. These temporary errors preserve the client's session token. An authentication deadline closes with 1008; an oversized message closes with 1009 without parsing or echoing the payload. Command/snapshot/concurrency rejection sends the same `error`, preserves a validated `commandId` when present, and leaves the socket open. The rejected command has no effect; retry after the stated delay. An unsynchronized browser automatically retries its snapshot on the same socket, with one pending retry timer and at most eight attempts before reconnecting. Successful synchronization, socket closure and navigation cancel pending retries. Pings continue to use the frame budgets without consuming the gameplay allowance. A retry delay indicates when that budget may admit a request; another shared-budget user or connection occupancy may require a further retry.
+
+Connection reservations are released on close, authentication failure, and participation revocation. Failed/abandoned native upgrades expire at the authentication deadline. Bucket memory is capped at 4,096 IP/player identities; admission fails closed when full. Idle identities without open connections or running commands expire after two minutes and are pruned on subsequent admission at most once per ten seconds. Closing a socket does not clear its shared IP/player bucket. Multiple server processes each enforce their own ingress/work limits; these are not a distributed fleet budget.
+
+Traffic-limit protocol tests run against real isolated PostgreSQL/Redis services with the production WebSocket entry, including under `NODE_ENV=test`. Redis teardown does not reset process-local buckets. Start focused `ws-traffic.spec.ts` checks against a freshly started application process when verifying initial burst capacities. The deliberate abuse file waits one full refill interval before completing so subsequent files do not inherit exhausted shared localhost IP budgets. Ordinary protocol test clients retry snapshot requests only after explicit `rate_limited` replies, with bounded attempts honoring `retryAfterMs`; unexpected errors still fail. Build once and reuse the compiled build for owned application restarts. Keep PostgreSQL/Redis setup and teardown serial for each isolated database. Do not disable traffic admission in tests or point these cleanup hooks at production services.
 
 ---
 
@@ -404,7 +426,9 @@ type SessionState = {
   submissions: Submission[] // server pre-shuffles between players
   scores: PlayerScore[]
   revealIndex: number
-  winnerId: string | null
+  winningPlayerId: string | null // attribution / scoreboard identity
+  winningSubmissionId: string | null // opaque answer slot for highlighting
+  winnerId: string | null // deprecated player-only compatibility alias
   eliminationTurnPlayerId?: string // Survival of the Fittest current turn
   voteTally?: Record<string, number> // God Is Dead live votes
   ranking?: Submission[] // Serious Business top-3 (rank+points filled)
@@ -526,8 +550,8 @@ All client messages are scoped to the socket's authenticated `playerId` + `roomC
 { type: "player_skipped",   playerId, round }           // timer expired before submission
 { type: "reveal_start" }
 { type: "card_revealed",    submissionIndex, fills: Card[] }
-{ type: "round_won",        winnerId, submissionId, scores: PlayerScore[] }      // normal & God-Is-Dead resolution
-{ type: "round_ranked",     ranking: Submission[], scoresDelta: Record<playerId, number> } // Serious Business
+{ type: "round_won",        winningPlayerId, winningSubmissionId, winnerId, submissionId, scores: PlayerScore[] }      // normal & God-Is-Dead resolution
+{ type: "round_ranked",     winningPlayerId, winningSubmissionId, ranking: Submission[], scoresDelta: Record<playerId, number> } // Serious Business
 { type: "elimination_turn", playerId }                  // Survival: whose turn to eliminate
 { type: "card_eliminated",  submissionId, byPlayerId }  // Survival
 { type: "vote_tally",       votes: Record<submissionId, number> } // God Is Dead live
@@ -539,6 +563,8 @@ All client messages are scoped to the socket's authenticated `playerId` + `roomC
 ```
 
 `round_end` is the single source of truth for round termination across all modes. Mode-specific events (`round_won`, `round_ranked`) precede `round_end` to describe the outcome. Before `round_end`, each refilled submitter and newly activated player receives their own full hand through recipient-private `hand_update`; clients refresh their hand through that event. `round_end` contains only public activation metadata. This intentionally replaces the former all-player `handsRefilled` map, which exposed opponents' hands to players and spectators.
+
+`round_won.winnerId` and `round_won.submissionId` remain compatibility aliases for `winningPlayerId` and `winningSubmissionId`. Clients use the explicit identities. Completed-round snapshots retain the public response board until the next round, so winner attribution and highlighting survive reconnect without mapping a player ID into a submission slot.
 
 ### Submission ordering
 
@@ -817,7 +843,9 @@ game:{code}:round          hash with mode-aware fields:
                              blackCardId         (always)
                              czarId              (null in God Is Dead)
                              submissions         (always, JSON: playerId → Submission)
-                             winnerId            (filled at round_won)
+                             winningPlayerId     (filled by every terminal outcome)
+                             winningSubmissionId (opaque answer slot, recorded alongside player identity)
+                             resolvedSubmissions (public result board, retained through pause)
                              ranking             (only in Serious Business: JSON)
                              voteTally           (only in God Is Dead: JSON)
                              eliminationTurnPlayerId (only in Survival: current eliminator)

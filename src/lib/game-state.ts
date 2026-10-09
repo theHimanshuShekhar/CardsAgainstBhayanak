@@ -878,11 +878,6 @@ export async function getPhase(code: string): Promise<GamePhase | null> {
 // S2-9: persist the round outcome so a reconnect during the post-resolve
 // 'transition' window (and the Survival turn / Serious Business ranking)
 // can be restored in the snapshot instead of being lost.
-export async function setRoundWinner(code: string, winnerId: string): Promise<void> {
-  await redis.hset(KEYS.round(code), 'winnerId', winnerId)
-  await redis.expire(KEYS.round(code), ROOM_TTL_SECONDS)
-}
-
 // Every terminal mode competes for this same generation-bound claim. Checking
 // phase and identity in Redis prevents a delayed command from claiming a new
 // round after its own round's resolution fields have been cleared.
@@ -891,7 +886,7 @@ if not redis.call('HGET', KEYS[2], 'status') then return 0 end
 if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1] then return 0 end
 if redis.call('HGET', KEYS[1], 'phase') ~= ARGV[2] then return 0 end
 if redis.call('HEXISTS', KEYS[1], 'outcomeClaim') == 1 then return 0 end
-redis.call('HSET', KEYS[1], 'outcomeClaim', ARGV[1], 'winnerId', ARGV[3], 'phase', 'transition')
+redis.call('HSET', KEYS[1], 'outcomeClaim', ARGV[1], 'winningPlayerId', ARGV[3], 'winningSubmissionId', ARGV[5], 'phase', 'transition')
 redis.call('EXPIRE', KEYS[1], ARGV[4])
 return 1
 `
@@ -900,7 +895,8 @@ export async function claimRoundOutcome(
   code: string,
   roundId: string,
   phase: GamePhase,
-  winnerId: string,
+  winningPlayerId: string,
+  winningSubmissionId: string,
 ): Promise<boolean> {
   return (
     (await redis.eval(
@@ -910,8 +906,9 @@ export async function claimRoundOutcome(
       KEYS.game(code),
       roundId,
       phase,
-      winnerId,
+      winningPlayerId,
       ROOM_TTL_SECONDS,
+      winningSubmissionId,
     )) === 1
   )
 }
@@ -938,9 +935,29 @@ export async function claimRoundCompletion(code: string, roundId: string): Promi
   )
 }
 
-export async function getRoundWinner(code: string): Promise<string | null> {
-  const val = await redis.hget(KEYS.round(code), 'winnerId')
-  return val || null
+export async function getRoundOutcome(code: string): Promise<{
+  winningPlayerId: string | null
+  winningSubmissionId: string | null
+}> {
+  const [playerId, submissionId, legacyPlayerId] = await redis.hmget(
+    KEYS.round(code),
+    'winningPlayerId',
+    'winningSubmissionId',
+    'winnerId',
+  )
+  // Rooms resolved before deployment retain the historical player field.
+  const winningPlayerId = playerId || legacyPlayerId || null
+  if (!winningPlayerId || submissionId)
+    return { winningPlayerId, winningSubmissionId: submissionId || null }
+  const ranking = await getRoundRanking(code)
+  if (winningPlayerId && ranking?.[0])
+    return { winningPlayerId, winningSubmissionId: ranking[0].submissionId }
+  const order: string[] = JSON.parse((await redis.get(`${KEYS.round(code)}:order`)) ?? '[]')
+  const matches = order.flatMap((key, index) =>
+    key.split(':')[0] === winningPlayerId ? [String(index)] : [],
+  )
+  // A legacy gambling outcome did not record which answer won; never guess.
+  return { winningPlayerId, winningSubmissionId: matches.length === 1 ? matches[0]! : null }
 }
 
 export async function setRoundRanking(code: string, ranking: Submission[]): Promise<void> {
@@ -964,6 +981,9 @@ export async function clearRoundResolution(code: string): Promise<void> {
   await redis.hdel(
     KEYS.round(code),
     'winnerId',
+    'winningPlayerId',
+    'winningSubmissionId',
+    'resolvedSubmissions',
     'ranking',
     'eliminationTurnPlayerId',
     'outcomeClaim',
