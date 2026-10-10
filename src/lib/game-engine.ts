@@ -663,6 +663,17 @@ export async function checkRoundReady(code: string): Promise<void> {
   await redis.set(subOrderKey(code), orderJson, 'EX', ROOM_TTL_SECONDS)
 
   await state.setPhase(code, 'reveal')
+  for (const player of players.filter(
+    (player) => config.rules.includes('godmode') && !player.isRando,
+  )) {
+    await state.publishEvent(code, {
+      type: 'my_submission_ids',
+      playerId: player.id,
+      submissionIds: order.flatMap((key, index) =>
+        resolvePlayerId(key) === player.id ? [String(index)] : [],
+      ),
+    })
+  }
   await state.publishEvent(code, { type: 'reveal_start', submissionCount: order.length })
   for (let i = 0; i < order.length; i++) {
     const sub = submissions[order[i]!]
