@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { chooseDeckExhaustionWinner } from './deck-exhaustion'
+import { chooseDeckExhaustionWinner, decideDeckExhaustion } from './deck-exhaustion'
 import type { GamePlayer } from './types'
 
 type Candidate = Pick<GamePlayer, 'id' | 'score' | 'role' | 'status' | 'isRando'>
@@ -49,4 +49,16 @@ describe('deck exhaustion winner policy', () => {
       ),
     ).toBe('remaining')
   })
+})
+
+it('parks an exhausted deck without a terminal result when its last eligible player has left', () => {
+  expect(
+    decideDeckExhaustion(
+      [
+        player('departed-leader', 5, { status: 'dropped' }),
+        player('observer', 0, { role: 'spectator', status: 'spectator' }),
+      ],
+      ['departed-leader'],
+    ),
+  ).toEqual({ status: 'paused' })
 })

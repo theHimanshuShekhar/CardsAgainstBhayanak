@@ -19,7 +19,7 @@ import type {
 } from './types'
 import { createId } from '@paralleldrive/cuid2'
 import { GameCommandError } from './game-command-error'
-import { chooseDeckExhaustionWinner } from './deck-exhaustion'
+import { decideDeckExhaustion } from './deck-exhaustion'
 
 export function chooseFirstCzar(activePlayerCount: number): number {
   return randomInt(0, activePlayerCount)
@@ -213,11 +213,12 @@ export async function startRound(
   if (!black) {
     const blackIds = await state.drawCards(code, 'black', 1)
     if (blackIds.length === 0) {
-      const winnerId = chooseDeckExhaustionWinner(
+      const outcome = decideDeckExhaustion(
         await state.getAllPlayers(code),
         await state.getCzarOrder(code),
       )
-      await endGame(code, 'deck_exhausted', winnerId)
+      if (outcome.status === 'paused') await pauseGame(code)
+      else await endGame(code, 'deck_exhausted', outcome.winnerId)
       throw new Error('deck_exhausted')
     }
     const [row] = await db

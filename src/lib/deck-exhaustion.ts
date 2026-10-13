@@ -1,5 +1,13 @@
 import type { GamePlayer } from './types'
 
+export function decideDeckExhaustion(
+  players: Pick<GamePlayer, 'id' | 'score' | 'role' | 'status' | 'isRando'>[],
+  seatOrder: readonly string[],
+): { status: 'ended'; winnerId: string } | { status: 'paused' } {
+  const winnerId = chooseDeckExhaustionWinner(players, seatOrder)
+  return winnerId ? { status: 'ended', winnerId } : { status: 'paused' }
+}
+
 /** Highest score wins; tied humans follow stable seat order, then Rando.
  * IDs break a tie only for players absent from the authoritative seat order.
  */
