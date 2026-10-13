@@ -327,3 +327,64 @@ for (const mode of ['godmode', 'serious_business'] as const) {
     }
   })
 }
+
+test('private own-answer eligibility survives rejoin and a rejected self-vote leaves round voting actionable', async () => {
+  const game = await start(['godmode'])
+  let spectator: Peer | undefined
+  try {
+    const originals = await Promise.all(game.peers.map((peer) => peer.snapshot()))
+    spectator = await connect(await join(game.host.roomCode, 'EligibilityWatcher', 'spectator'))
+    await ready(game)
+    const snapshots = await Promise.all(game.peers.map((peer) => peer.snapshot()))
+    const ownIds = snapshots.map(
+      (snapshot, index) =>
+        snapshot.submissions.find((submission) =>
+          originals[index]!.hand!.some((card) => card.id === submission.fills[0]!.id),
+        )!.submissionId,
+    )
+    for (const [index, snapshot] of snapshots.entries()) {
+      expect(snapshot).toHaveProperty('mySubmissionIds', [ownIds[index]])
+      const receipt = game.peers[index]!.events.filter(
+        (event) => event.type === 'my_submission_ids',
+      )
+      expect(receipt).toEqual([
+        {
+          type: 'my_submission_ids',
+          playerId: game.peers[index]!.playerId,
+          submissionIds: [ownIds[index]],
+        },
+      ])
+      expect(snapshot.submissions.every((submission) => submission.playerId === undefined)).toBe(
+        true,
+      )
+    }
+    expect(await spectator.snapshot()).toHaveProperty('mySubmissionIds', [])
+    expect(spectator.events.filter((event) => event.type === 'my_submission_ids')).toEqual([
+      { type: 'my_submission_ids', playerId: spectator.playerId, submissionIds: [] },
+    ])
+    const observer = game.peers[0]!
+    const marker = observer.events.length
+    observer.send({ type: 'vote', submissionId: ownIds[0]!, commandId: 'self-vote' })
+    expect(await observer.wait('error', marker)).toMatchObject({
+      code: 'invalid_state',
+      commandId: 'self-vote',
+    })
+    expect((await observer.snapshot()).myVotedSubmissionId).toBeNull()
+    for (const [index, peer] of game.peers.entries()) {
+      const after = peer.events.length
+      peer.send({
+        type: 'vote',
+        submissionId: ownIds[index] === '0' ? '1' : '0',
+        commandId: `legal-${index}`,
+      })
+      expect(await peer.wait('command_accepted', after)).toMatchObject({
+        commandId: `legal-${index}`,
+      })
+    }
+    await observer.wait('round_end', marker)
+    expect(await observer.wait('round_started', marker)).toMatchObject({ round: 2 })
+  } finally {
+    spectator?.ws.close()
+    game.close()
+  }
+})
