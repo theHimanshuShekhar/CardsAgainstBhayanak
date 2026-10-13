@@ -1,10 +1,10 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { db } from '~/db'
-import { gameSessions, gamePlayers } from '~/db/schema'
+import { gameSessions } from '~/db/schema'
 import { authenticate } from '~/lib/api-auth'
 import { GameConfigSchema, conflictingModalRules, errorResponse } from '~/lib/api-helpers'
 import { apiLogger } from '~/lib/logger'
-import { eq, and, sql } from 'drizzle-orm'
+import { eq } from 'drizzle-orm'
 import { z } from 'zod'
 import * as state from '~/lib/game-state'
 import type { SessionStatus } from '~/lib/types'
@@ -54,17 +54,10 @@ export const Route = createFileRoute('/api/games/$code/config')({
         // the existing lobby UI shows more chips than the new cap allows.
         // Zod already enforces the absolute 3..10 bound; this is the
         // dynamic floor based on who's already in the room.
-        const [activePlayers] = await db
-          .select({ cnt: sql<number>`count(*)` })
-          .from(gamePlayers)
-          .where(
-            and(
-              eq(gamePlayers.sessionId, session.id),
-              eq(gamePlayers.role, 'player'),
-              sql`${gamePlayers.status} != 'dropped'`,
-            ),
-          )
-        const rosterSize = Number(activePlayers?.cnt ?? 0)
+        const rosterSize = (await state.getLivePlayers(code)).filter(
+          (player) => player.role === 'player',
+        ).length
+
         if (config.maxPlayers < rosterSize)
           return errorResponse(
             409,
