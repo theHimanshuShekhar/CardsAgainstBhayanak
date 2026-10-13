@@ -295,11 +295,13 @@ export async function startRound(
     // queued; an unhandled rejection from setTimeout crashes the process.
     // Treating these as no-ops is correct: a missing session means the
     // game is gone, so there's nothing for the timer to drive forward.
-    setTimeout(() => {
-      expireRoundTimer(code, round, czarId, armedAt).catch((err) =>
-        engineLogger.warn({ err, code, round }, 'round timer expiry suppressed'),
-      )
-    }, ms)
+    setTimeout(
+      () =>
+        expireRoundTimer(code, round, czarId, armedAt).catch((err) =>
+          engineLogger.warn({ err, code, round }, 'round timer expiry suppressed'),
+        ),
+      ms,
+    )
   } else {
     await redis.hdel(KEYS.round(code), 'roundTimerExpiresAt')
   }
@@ -341,25 +343,17 @@ export async function expireRoundTimer(
   code: string,
   round: number,
   czarId: string | null,
-  armedAt: number | null,
+  armedAt: number,
 ): Promise<void> {
   // Guard 1: round already advanced past this timer.
   const currentRound = await state.getCurrentRound(code)
   if (currentRound !== round) return
 
-  // Guard 2 (S3-NEW-A): the persisted expiry no longer matches ours. A
-  // setTimeout queued for the old game's round N can otherwise fire inside
-  // a rematch's round N (resetGame zeroes currentRound first, but startGame
-  // immediately re-stamps it back to round 1) and force-voids the new
-  // round. A non-null `armedAt` means the timer was armed at a known epoch
-  // ms; if persisted is null (round hash wiped by reset) or different
-  // (round armed a fresh timer), this is a stale callback. The legacy
-  // restoreRoundTimers path passes null and skips this guard, since the
-  // re-armed timer IS by definition the authoritative one.
-  if (armedAt !== null) {
-    const persisted = await state.getRoundTimerExpiresAt(code)
-    if (persisted !== armedAt) return
-  }
+  // Both freshly armed and restored callbacks belong to the deadline they
+  // scheduled. Resetting a match can reuse the round number, but replaces
+  // this persisted deadline; recheck it when the callback executes.
+  const persisted = await state.getRoundTimerExpiresAt(code)
+  if (persisted !== armedAt) return
 
   const [submissions, players] = await Promise.all([
     state.getSubmissions(code),
@@ -467,14 +461,10 @@ export async function restoreRoundTimers(): Promise<void> {
         .limit(1)
       const czarId = roundRow?.czarPlayerId ?? null
       const ms = expiresAt - Date.now()
-      // armedAt=null bypasses the persisted-expiry guard: the boot-restore
-      // path IS the authoritative re-arm, and the persisted value is what
-      // we just read, so a match-check would be tautological.
-      const onExpire = (): void => {
-        expireRoundTimer(code, round, czarId, null).catch((err) =>
+      const onExpire = (): Promise<void> =>
+        expireRoundTimer(code, round, czarId, expiresAt).catch((err) =>
           engineLogger.warn({ err, code, round }, 'round timer expiry suppressed'),
         )
-      }
       if (ms <= 0) onExpire()
       else setTimeout(onExpire, ms)
       engineLogger.info({ code, round, ms: Math.max(0, ms) }, 'round timer restored')
