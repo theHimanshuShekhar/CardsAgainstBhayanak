@@ -52,11 +52,7 @@ function clearLastGameOver(): void {
 function EndScreen() {
   const navigate = useNavigate()
   const { code } = Route.useParams()
-  const { session, setSession, ready } = useSession()
-
-  useEffect(() => {
-    if (ready && !session) void navigate({ to: '/games/join' })
-  }, [ready, session, navigate])
+  const { session, setSession } = useSession()
   const [result] = useState<LastGameOver | null>(() => readLastGameOver(code))
 
   // #3: the end screen joins the room socket purely as a redirect hub —

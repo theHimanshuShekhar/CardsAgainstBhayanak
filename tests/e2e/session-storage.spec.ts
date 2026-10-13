@@ -143,7 +143,7 @@ for (const version of [undefined, 1]) {
   })
 }
 
-for (const route of ['session', 'end']) {
+for (const route of ['session']) {
   test(`invalid saved session on ${route} recovers to join`, async ({ page }) => {
     await page.addInitScript(() => localStorage.setItem('cab_session', '{}'))
     await page.goto(`/games/ABCDEF/${route}`)
@@ -151,3 +151,11 @@ for (const route of ['session', 'end']) {
     await expect(page.getByRole('heading', { name: 'Enter the room' })).toBeVisible()
   })
 }
+
+test('invalid saved session on end still allows going home', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('cab_session', '{}'))
+  await page.goto('/games/ABCDEF/end')
+  await expect(page.getByRole('heading', { name: "That's a wrap" })).toBeVisible()
+  await page.getByRole('button', { name: 'Go home', exact: true }).first().click()
+  await expect(page.getByRole('button', { name: 'Create a game' })).toBeVisible()
+})
