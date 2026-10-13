@@ -20,6 +20,7 @@ import type {
 import { createId } from '@paralleldrive/cuid2'
 import { GameCommandError } from './game-command-error'
 import { decideDeckExhaustion } from './deck-exhaustion'
+import { decideNormalRound } from './normal-round'
 
 export function chooseFirstCzar(activePlayerCount: number): number {
   return randomInt(0, activePlayerCount)
@@ -891,8 +892,15 @@ async function resolvePickedWinner(
 
   const winner = await state.getPlayer(code, winnerPlayerId)
   if (!winner) throw new Error('winner not found')
-  const transfer = await settleGambles(code, winnerPlayerId)
-  await state.adjustScore(code, winnerPlayerId, 1 + transfer)
+  const decision = decideNormalRound({
+    winnerKey,
+    submissions,
+    players: await state.getAllPlayers(code),
+  })
+  if (!decision) throw new Error('winner not found')
+  for (const adjustment of decision.scoreAdjustments) {
+    await state.adjustScore(code, adjustment.playerId, adjustment.delta)
+  }
   onOutcome?.(true)
 
   const players = await state.getAllPlayers(code)
@@ -913,9 +921,9 @@ async function resolvePickedWinner(
   })
   await persistRoundOutcome(code, {
     winnerPlayerId,
-    winningFills: submissions[winnerKey]!.fills,
+    winningFills: decision.winningFills,
   })
-  await endRound(code, Object.keys(submissions), roundId)
+  await endRound(code, decision.submitterKeys, roundId)
 }
 
 // Round outcomes live in Redis during play; the game_rounds row is
