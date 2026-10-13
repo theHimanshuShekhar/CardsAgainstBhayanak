@@ -1,6 +1,7 @@
 import { ErrorNotice } from '~/components/ui/ErrorNotice'
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
+import { z } from 'zod'
 import { Topbar } from '~/components/ui/Topbar'
 import { Avatar } from '~/components/ui/Avatar'
 import { GameConfigEditor } from '~/components/game/GameConfigEditor'
@@ -14,6 +15,17 @@ export const Route = createFileRoute('/games/create')({
   component: CreateScreen,
 })
 
+const packResponse = z.object({
+  packs: z.array(
+    z.object({
+      id: z.string().min(1),
+      name: z.string().min(1),
+      slug: z.string().min(1),
+      cardCount: z.number().int().nonnegative(),
+    }),
+  ),
+})
+
 function CreateScreen() {
   const navigate = useNavigate()
   const { draft, setDraft } = useGameContext()
@@ -22,26 +34,41 @@ function CreateScreen() {
   const [loading, setLoading] = useState(false)
   const [packs, setPacks] = useState<Pack[]>([])
 
+  const [packStatus, setPackStatus] = useState<'loading' | 'error' | 'empty' | 'ready'>('loading')
+  const [packAttempt, setPackAttempt] = useState(0)
+
   // S2-6/S2-16: load packs and auto-select (and lock) the Core base set.
   useEffect(() => {
     let cancelled = false
-    fetch('/api/packs')
-      .then((r) => r.json() as Promise<{ packs: Pack[] }>)
+    const controller = new AbortController()
+    fetch('/api/packs', { signal: controller.signal, cache: 'no-store' })
+      .then(async (r) => {
+        if (!r.ok) throw new Error('Pack request failed')
+        return packResponse.parse(await r.json())
+      })
       .then((data) => {
         if (cancelled) return
         setPacks(data.packs)
+        setPackStatus(data.packs.length ? 'ready' : 'empty')
         const base = data.packs.find(isBasePack)
         if (base) {
           setDraft((d) => (d.packs.includes(base.id) ? d : { ...d, packs: [base.id, ...d.packs] }))
         }
       })
-      .catch(() => {})
+      .catch(() => {
+        if (!cancelled) setPackStatus('error')
+      })
     return () => {
       cancelled = true
+      controller.abort()
     }
-  }, [setDraft])
+  }, [setDraft, packAttempt])
 
-  const canStart = draft.username.trim().length >= 2 && draft.packs.length >= 1
+  const canStart =
+    packStatus === 'ready' &&
+    draft.username.trim().length >= 2 &&
+    draft.packs.length >= 1 &&
+    draft.packs.every((id) => packs.some((pack) => pack.id === id))
 
   async function handleCreate() {
     if (!canStart || loading) return
@@ -136,6 +163,30 @@ function CreateScreen() {
               }}
               onChange={(next) => setDraft((d) => ({ ...d, ...next }))}
               packs={packs}
+              packNotice={
+                packStatus !== 'ready' && (
+                  <div role="status">
+                    <p className="muted">
+                      {packStatus === 'loading'
+                        ? 'Loading card packs…'
+                        : packStatus === 'error'
+                          ? 'Card packs could not be loaded. Please retry.'
+                          : 'No card packs are available yet. Please retry shortly.'}
+                    </p>
+                    {packStatus !== 'loading' && (
+                      <button
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => {
+                          setPackStatus('loading')
+                          setPackAttempt((attempt) => attempt + 1)
+                        }}
+                      >
+                        Retry loading packs
+                      </button>
+                    )}
+                  </div>
+                )
+              }
             />
           </div>
 
@@ -186,9 +237,11 @@ function CreateScreen() {
               </button>
               {!canStart && (
                 <div className="muted" style={{ fontSize: 11, marginTop: 12, textAlign: 'center' }}>
-                  {draft.username.trim().length < 2
-                    ? 'Pick a handle (2+ characters) to continue.'
-                    : 'Select at least one card pack to continue.'}
+                  {packStatus !== 'ready'
+                    ? 'Card packs must be loaded before creating a lobby.'
+                    : draft.username.trim().length < 2
+                      ? 'Pick a handle (2+ characters) to continue.'
+                      : 'Select at least one card pack to continue.'}
                 </div>
               )}
             </div>
