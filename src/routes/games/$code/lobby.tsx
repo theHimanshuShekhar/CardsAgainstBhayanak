@@ -1,6 +1,6 @@
 import { ErrorNotice } from '~/components/ui/ErrorNotice'
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Topbar } from '~/components/ui/Topbar'
 import { Avatar } from '~/components/ui/Avatar'
 import { GameConfigEditor } from '~/components/game/GameConfigEditor'
@@ -22,8 +22,13 @@ function LobbyScreen() {
   const { leaveGame, leaving, leaveError } = useLeaveGame()
   const formatted = formatRoomCode(code)
 
+  const checkedSavedSession = useRef(false)
   useEffect(() => {
-    if (ready && !session) void navigate({ to: '/games/join' })
+    if (!ready || checkedSavedSession.current) return
+    checkedSavedSession.current = true
+    // Recover an absent/invalid saved session on arrival. Later session
+    // clearing (auth rejection or Leave) already chooses its destination.
+    if (!session) void navigate({ to: '/games/join' })
   }, [ready, session, navigate])
 
   const [players, setPlayers] = useState<GamePlayer[]>([])
