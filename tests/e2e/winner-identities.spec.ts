@@ -171,7 +171,7 @@ async function ready(game: Awaited<ReturnType<typeof start>>) {
     peer.send({
       type: 'play',
       cardIds: snapshot.hand!.slice(0, snapshot.prompt.pick).map((card) => card.id),
-      commandId: `play-${peer.playerId}`,
+      commandId: `play-${snapshot.round}-${peer.playerId}`,
     })
     await peer.wait('command_accepted')
   }
@@ -201,6 +201,12 @@ test('normal winner keeps player attribution and submission highlight on rejoin'
       winningSubmissionId: '1',
     })
     expect(outcome.winnerId).not.toBe('1')
+    expect(outcome.scores.find((player) => player.playerId === outcome.winnerId)?.score).toBe(1)
+    expect(
+      outcome.scores
+        .filter((player) => player.playerId !== outcome.winnerId)
+        .map((player) => player.score),
+    ).toEqual([0, 0, 0])
     await game.czar!.wait('round_end')
     const settled = await game.czar!.snapshot()
     expect(settled.submissions[1]!.fills).toEqual(snapshot.submissions[1]!.fills)
@@ -211,6 +217,47 @@ test('normal winner keeps player attribution and submission highlight on rejoin'
       winningSubmissionId: null,
       submissions: [],
     })
+  } finally {
+    game.close()
+  }
+})
+
+test('normal scoring reaches the target and ends after the final round instead of starting another', async () => {
+  test.setTimeout(90_000)
+  const game = await start([], 3)
+  try {
+    let target: string | undefined
+    for (let round = 1; round <= 8; round++) {
+      const initial = await game.peers[0]!.snapshot()
+      game.czar = game.peers.find((peer) => peer.playerId === initial.czarId)
+      const after = game.peers[0]!.events.length
+      const candidates = game.peers.filter((peer) => peer !== game.czar)
+      const chosen = candidates.find((peer) => peer.playerId === target) ?? candidates[0]!
+      const beforePlay = await chosen.snapshot()
+      const chosenCardIds = beforePlay.hand!.slice(0, beforePlay.prompt.pick).map((card) => card.id)
+      await ready(game)
+      const submissionId = (await game.czar!.snapshot()).submissions.find(
+        (submission) =>
+          submission.fills.length === chosenCardIds.length &&
+          submission.fills.every((card, index) => card.id === chosenCardIds[index]),
+      )!.submissionId
+      game.czar!.send({ type: 'pick', submissionId })
+      const outcome = await game.peers[0]!.wait('round_won', after)
+      target ??= outcome.winnerId
+      await game.peers[0]!.wait('round_end', after)
+      if (outcome.scores.some((player) => player.score === 3)) {
+        const over = await game.peers[0]!.wait('game_over', after)
+        expect(over).toMatchObject({ mode: 'normal', winnerId: target })
+        expect(over.finalScores.find((player) => player.playerId === target)?.score).toBe(3)
+        expect(
+          game.peers[0]!.events.slice(after).filter((event) => event.type === 'round_started'),
+        ).toEqual([])
+        return
+      }
+      await game.peers[0]!.wait('round_started', after)
+      expect((await game.peers[0]!.snapshot()).round).toBe(round + 1)
+    }
+    throw new Error('The normal game did not reach its score target')
   } finally {
     game.close()
   }

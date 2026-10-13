@@ -27,7 +27,11 @@ export const Route = createFileRoute('/games/$code/session')({
 function SessionScreen() {
   const navigate = useNavigate()
   const { code } = Route.useParams()
-  const { session, setSession } = useSession()
+  const { session, setSession, ready } = useSession()
+
+  useEffect(() => {
+    if (ready && !session) void navigate({ to: '/games/join' })
+  }, [ready, session, navigate])
   const { leaveGame, leaving, leaveError } = useLeaveGame()
 
   type PendingAction = {
