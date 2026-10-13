@@ -1102,7 +1102,7 @@ export async function endGame(code: string, mode: GameOverMode, winnerId?: strin
 // code and keeps players (and their handles); wipes all per-round Redis
 // state, zeroes carried players, and either drops back to the lobby
 // (`lobby`) or starts a fresh game immediately (`rematch`). The session
-// must be `ended` — the endpoint enforces that and host-only.
+// must be `ended` — claim it atomically before clearing state.
 export async function resetGame(
   code: string,
   mode: ResetMode,
@@ -1118,15 +1118,21 @@ export async function resetGame(
   // Wipe all per-round Redis state. The room hash and players hash
   // survive; the round hash, decks, discards, czarOrder and every hand
   // are rebuilt fresh by startGame (rematch) or left empty (lobby).
-  await state.updateLiveRoom(code, { currentRound: '0', czarIndex: '-1' }, hostPlayerId, [
-    KEYS.round(code),
-    KEYS.deckBlack(code),
-    KEYS.deckWhite(code),
-    KEYS.discardWhite(code),
-    KEYS.discardBlack(code),
-    KEYS.czarOrder(code),
-    ...before.map((p) => KEYS.hand(code, p.id)),
-  ])
+  await state.updateLiveRoom(
+    code,
+    { status: 'resetting', currentRound: '0', czarIndex: '-1' },
+    hostPlayerId,
+    [
+      KEYS.round(code),
+      KEYS.deckBlack(code),
+      KEYS.deckWhite(code),
+      KEYS.discardWhite(code),
+      KEYS.discardBlack(code),
+      KEYS.czarOrder(code),
+      ...before.map((p) => KEYS.hand(code, p.id)),
+    ],
+    'ended',
+  )
   await redis.hdel(KEYS.game(code), 'czarStartOffset', 'happyEndingArmed', 'happyEndingFinal')
 
   // Drop the prior game's round history. buildSnapshot derives the live

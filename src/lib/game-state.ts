@@ -40,6 +40,7 @@ export async function updateLiveRoom(
   patch: Record<string, string>,
   hostPlayerId?: string,
   clearKeys: string[] = [],
+  expectedStatus?: string,
 ): Promise<void> {
   const result = await redis.eval(
     `
@@ -50,6 +51,9 @@ export async function updateLiveRoom(
       local player = cjson.decode(raw)
       if player.status == 'dropped' then return 'player_dropped' end
       if redis.call('HGET', KEYS[1], 'hostId') ~= ARGV[2] then return 'host_only' end
+    end
+    if ARGV[4] ~= '' and redis.call('HGET', KEYS[1], 'status') ~= ARGV[4] then
+      return 'invalid_state'
     end
     for i = 3, #KEYS do redis.call('DEL', KEYS[i]) end
     for field, value in pairs(cjson.decode(ARGV[1])) do
@@ -65,7 +69,10 @@ export async function updateLiveRoom(
     JSON.stringify(patch),
     hostPlayerId ?? '',
     ROOM_TTL_SECONDS,
+    expectedStatus ?? '',
   )
+  if (result === 'invalid_state')
+    throw new GameCommandError('invalid_state', 'Game is not over or reset already in progress')
   if (result === 'player_dropped') throw new GameCommandError('player_dropped', 'Player dropped')
   if (result === 'host_only') throw new GameCommandError('host_only', 'Only the host can act')
   if (result !== 1) throw new GameCommandError('invalid_token', 'Room session expired')
