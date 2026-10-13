@@ -51,9 +51,12 @@ function CreateScreen() {
         setPacks(data.packs)
         setPackStatus(data.packs.length ? 'ready' : 'empty')
         const base = data.packs.find(isBasePack)
-        if (base) {
-          setDraft((d) => (d.packs.includes(base.id) ? d : { ...d, packs: [base.id, ...d.packs] }))
-        }
+        setDraft((d) => {
+          const available = d.packs.filter((id) => data.packs.some((pack) => pack.id === id))
+          const selected =
+            base && !available.includes(base.id) ? [base.id, ...available] : available
+          return { ...d, packs: selected }
+        })
       })
       .catch(() => {
         if (!cancelled) setPackStatus('error')

@@ -87,3 +87,53 @@ test('an empty pack catalog explains why creation is unavailable and can be retr
   await page.getByRole('button', { name: 'Retry loading packs' }).click()
   await expect(page.getByRole('button', { name: 'Create lobby', exact: true })).toBeEnabled()
 })
+
+test('retry removes unavailable selected packs and preserves available selections', async ({
+  page,
+  request,
+}) => {
+  const catalog = await request.get('/api/packs')
+  const { packs } = (await catalog.json()) as {
+    packs: { id: string; name: string; slug: string }[]
+  }
+  const extras = packs.filter(
+    (pack) => pack.slug !== 'cah-base-set' && !/^CAH Base Set/i.test(pack.name),
+  )
+  const [removed, retained] = extras
+  expect(removed).toBeDefined()
+  expect(retained).toBeDefined()
+  if (!removed || !retained) throw new Error('Real catalog needs two expansion packs')
+  await page.goto('/games/create')
+  await page.getByRole('textbox', { name: 'Your handle' }).fill('returning_host')
+  await page.getByRole('radio', { name: '90s', exact: true }).click()
+  await page
+    .locator('.check-card')
+    .filter({ has: page.locator('.check-card-title', { hasText: removed.name }) })
+    .click()
+  await page
+    .locator('.check-card')
+    .filter({ has: page.locator('.check-card-title', { hasText: retained.name }) })
+    .click()
+  await page.getByRole('button', { name: '← Back' }).click()
+  let attempt = 0
+  await page.route('**/api/packs', async (route) => {
+    attempt += 1
+    if (attempt === 1) await route.abort('failed')
+    else await route.fulfill({ json: { packs: packs.filter((pack) => pack.id !== removed.id) } })
+  })
+  await page.getByRole('button', { name: /Create a game/i }).click()
+  await expect(page.getByText('Card packs could not be loaded. Please retry.')).toBeVisible()
+  await page.getByRole('button', { name: 'Retry loading packs' }).click()
+  await expect(page.getByRole('button', { name: 'Create lobby', exact: true })).toBeEnabled()
+  await expect(
+    page
+      .locator('.check-card')
+      .filter({ has: page.locator('.check-card-title', { hasText: retained.name }) }),
+  ).toHaveClass(/on/)
+  await expect(page.locator('.summary-row', { hasText: 'Packs' })).toContainText('2')
+  await expect(page.getByRole('textbox', { name: 'Your handle' })).toHaveValue('returning_host')
+  await expect(page.getByRole('radio', { name: '90s', exact: true })).toHaveAttribute(
+    'aria-checked',
+    'true',
+  )
+})
