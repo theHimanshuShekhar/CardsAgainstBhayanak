@@ -200,3 +200,41 @@ test('lobby capacity changes count live seats after departure and retain grace s
     peer.ws.close()
   }
 })
+
+test('retrying a departed handle returns a recoverable conflict without consuming its seat', async () => {
+  const { host, second, third } = await lobby()
+  const peer = await connect(host)
+  try {
+    expect((await post(`/api/games/${host.roomCode}/leave`, {}, third.sessionToken)).status).toBe(
+      204,
+    )
+    const retry = await post(`/api/games/${host.roomCode}/join`, {
+      username: 'Third',
+      anonId: 'departed-retry',
+      role: 'player',
+    })
+    expect(retry.status).toBe(409)
+    expect(await retry.json()).toMatchObject({ code: 'duplicate_username' })
+    const replacement = await join(host.roomCode, 'DifferentHandle')
+    expect(
+      (
+        await post(`/api/games/${host.roomCode}/join`, {
+          username: 'Extra',
+          anonId: 'extra',
+          role: 'player',
+        })
+      ).status,
+    ).toBe(423)
+    expect((await post(`/api/games/${host.roomCode}/start`, {}, host.sessionToken)).status).toBe(
+      204,
+    )
+    await peer.wait('round_started')
+    const snapshot = await peer.snapshot()
+    expect(snapshot.scores.map((player) => player.playerId).sort()).toEqual(
+      [host.playerId, second.playerId, replacement.playerId].sort(),
+    )
+    expect(snapshot.expected).toBe(2)
+  } finally {
+    peer.ws.close()
+  }
+})
