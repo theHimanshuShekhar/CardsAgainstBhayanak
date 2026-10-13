@@ -1243,7 +1243,12 @@ export async function playConcurrentReset(base: string, modes: ('rematch' | 'lob
         })
     }
     await waitForNth(czar, 'reveal_start', previousReveals + 1, 14_000)
-    await sleep(3700)
+    // Observe the server's completed reveal rather than predicting its duration.
+    for (let attempt = 0; attempt < 40 && czar.snapshot?.phase !== 'judging'; attempt++) {
+      send(czar, { type: 'rejoin' })
+      await sleep(250)
+    }
+    if (czar.snapshot?.phase !== 'judging') throw new Error('fresh round never reached judging')
     const previousWins = czar.events.filter((event) => event.type === 'round_won').length
     send(czar, { type: 'pick', submissionId: '0' })
     const won = await waitForNth(czar, 'round_won', previousWins + 1, 8_000)
