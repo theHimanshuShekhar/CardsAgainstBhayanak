@@ -29,8 +29,13 @@ function SessionScreen() {
   const { code } = Route.useParams()
   const { session, setSession, ready } = useSession()
 
+  const checkedSavedSession = useRef(false)
   useEffect(() => {
-    if (ready && !session) void navigate({ to: '/games/join' })
+    if (!ready || checkedSavedSession.current) return
+    checkedSavedSession.current = true
+    // Recover an absent/invalid saved session on arrival. Later session
+    // clearing (auth rejection or Leave) already chooses its destination.
+    if (!session) void navigate({ to: '/games/join' })
   }, [ready, session, navigate])
   const { leaveGame, leaving, leaveError } = useLeaveGame()
 
