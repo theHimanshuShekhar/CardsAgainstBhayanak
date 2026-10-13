@@ -60,12 +60,21 @@ export function identifyAnon(anonId: string, properties?: Record<string, unknown
   posthog.identify(anonId, properties)
 }
 
+let memoryAnonId: string | null = null
+
 export function getOrCreateAnonId(): string {
   if (typeof window === 'undefined') return 'ssr'
-  let id = localStorage.getItem('cab_anon_id')
-  if (!id) {
-    id = crypto.randomUUID()
-    localStorage.setItem('cab_anon_id', id)
+  try {
+    const saved = window.localStorage.getItem('cab_anon_id')
+    if (saved) return saved
+  } catch {
+    // Anonymous identity still works when browser persistence is denied.
   }
-  return id
+  memoryAnonId ??= crypto.randomUUID()
+  try {
+    window.localStorage.setItem('cab_anon_id', memoryAnonId)
+  } catch {
+    // Keep a stable identity for this tab until it is reloaded.
+  }
+  return memoryAnonId
 }
