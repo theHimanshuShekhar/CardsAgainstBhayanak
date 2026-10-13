@@ -21,7 +21,13 @@
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
-    "prepare": "husky"
+    "prepare": "husky",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "tsx scripts/migrate.ts apply",
+    "db:check": "tsx scripts/migrate.ts check",
+    "db:baseline": "tsx scripts/migrate.ts adopt",
+    "db:signature": "tsx scripts/schema-signature.ts",
+    "test:migrations": "node --test tests/deployment/migrations.test.mjs"
   },
   "dependencies": {
     "@axiomhq/pino": "^1.6.1",

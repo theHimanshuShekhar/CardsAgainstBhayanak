@@ -102,7 +102,7 @@ export async function replayInfrastructure() {
       }
     }
     await cache.connect()
-    await exec('pnpm', ['exec', 'drizzle-kit', 'push', '--force'], {
+    await exec('pnpm', ['db:migrate'], {
       env: { ...process.env, DATABASE_URL: databaseUrl, REDIS_URL: redisUrl },
       maxBuffer: 1024 * 1024,
     })

@@ -12,7 +12,7 @@ A real-time multiplayer card game in the Cards Against Humanity genre. Players j
 
 - **Framework:** TanStack Start (React 19, SSR, file-based routing via `@tanstack/react-router`, Vinxi/h3 bundler)
 - **Styling:** Tailwind CSS v4 — configured via `src/styles.css` (`@theme` block), no `tailwind.config.ts`
-- **Database:** PostgreSQL via Drizzle ORM (`pnpm db:push`, no migrations)
+- **Database:** PostgreSQL via Drizzle ORM (reviewed versioned migrations; explicit `pnpm db:migrate`)
 - **Cache / pub-sub:** Redis (Valkey image in Docker)
 - **Real-time:** Native WebSocket via Vinxi/h3 (`crossws`), attached to the same port as the HTTP server — no separate WS process
 - **Testing:** Playwright E2E (multi-context, real DB + Redis, no mocks)
@@ -1026,7 +1026,7 @@ Cloudflare Tunnel runs **outside** the Compose stack — user manages it indepen
 - A single `docker-compose.yml` is used for dev and prod; production settings (`restart: unless-stopped`, memory limits — app: 512M, postgres: 1G, redis: 256M — and `NODE_ENV=production`) are applied via environment overrides rather than a separate `docker-compose.prod.yml`
 - Health checks: postgres `pg_isready`, redis `redis-cli ping`, app `GET /healthz` (returns 200 with `{ db, redis, activeGames, uptime }` or 503 if any dependency is down)
 - Volumes: `postgres_data`, `redis_data` (both backed up via host volume mount)
-- **DB schema management:** `pnpm db:push` for both dev and prod (no generated migrations). Acceptable risk for an MVP party game where data loss isn't catastrophic and the schema is rarely modified. Always review the diff plan before confirming a push.
+- **DB schema management:** reviewed versioned SQL migrations with a checksummed manifest. Production deployment explicitly runs `pnpm db:migrate` after backup and review. Startup only verifies schema/history compatibility and refuses pending, newer, altered or drifted databases. Existing pre-migration databases require explicit verified `pnpm db:baseline` adoption. See README for migration generation, rehearsal and restore procedures.
 
 ---
 
@@ -1181,7 +1181,7 @@ PostHog client auto-opts-out on `localhost` to keep dev events out of the prod p
 | `pnpm dev`                                 | Start dev server with HMR (http://localhost:3000)    |
 | `pnpm build`                               | Production build to `.output/`                       |
 | `pnpm start`                               | Run the production build locally                     |
-| `pnpm db:push`                             | Apply Drizzle schema to Postgres (no migrations)     |
+| `pnpm db:migrate`                          | Apply reviewed versioned migrations explicitly       |
 | `pnpm db:studio`                           | Open Drizzle Studio (DB browser)                     |
 | `pnpm seed`                                | Manually trigger card pack seeding from REST AH      |
 | `pnpm typecheck`                           | Run TypeScript type check                            |

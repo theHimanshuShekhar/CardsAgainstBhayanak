@@ -7,11 +7,16 @@
 import { readFile } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
 import { serve } from 'srvx'
-import { gameWebSocketPlugin } from './src/ws/server'
-import tssServer from './dist/server/server.js'
 // Validate the ingress allowlist before listening, including when API route
 // chunks have not yet been loaded by the SSR handler.
 import './src/lib/client-identity.server'
+
+import { manageSchema } from './src/db/migrations'
+
+await manageSchema('check')
+// Load modules that start seeding/jobs only after compatibility succeeds.
+const { gameWebSocketPlugin } = await import('./src/ws/server')
+const { default: tssServer } = await import('./dist/server/server.js')
 
 const port = Number(process.env['PORT'] ?? 3000)
 
