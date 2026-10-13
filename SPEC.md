@@ -677,7 +677,7 @@ export function pick<T>(array: T[]): T // single random element
 
 - **Discard policy:** When a round ends (winner picked), all submitted white cards — winning and losing — move from `game:{code}:round.submissions` to `game:{code}:discard:white`. Submitters' hands replenish by drawing fresh cards from `deck:white`. The black card just played also moves to a `discard:black` list (informational; black discards never reshuffle).
 - **White cards run low:** When `LLEN game:{code}:deck:white < activePlayers * 3`, server shuffles `discard:white` back into `deck:white`, clears the discard list. Deal continues seamlessly.
-- **Black cards exhausted:** Game ends naturally — server emits `game_over` with the current leader as winner. Edge note: a fresh setup loading all CAH packs has thousands of black cards; this is practically rare.
+- **Black cards exhausted:** Game ends naturally — server persists and emits the same winner with mode `deck_exhausted`. The highest-scoring eligible player wins: active or grace players (including Rando) qualify; dropped players, queued players and spectators do not. Ties favor human players in stable `czarOrder` seat order (initial join order, with activated mid-game players appended), then Rando. A player missing from that order sorts after seated humans; IDs break any remaining tie deterministically. A Rando leader still uses `deck_exhausted`, preserving the reason the game ended. If no eligible player remains, pause the deserted game instead of persisting or broadcasting a terminal result without a winner. Edge note: a fresh setup loading all CAH packs has thousands of black cards; this is practically rare.
 
 ### Round timer expiration
 

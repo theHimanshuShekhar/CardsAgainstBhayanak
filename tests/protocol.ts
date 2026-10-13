@@ -1202,3 +1202,65 @@ export async function playStageTimer(base: string): Promise<StageTimerResult> {
     offExpiresAt: off.expiresAt,
   }
 }
+
+// Race public host reset requests, then play the resulting fresh game.
+export async function playConcurrentReset(base: string, modes: ('rematch' | 'lobby')[]) {
+  const g = await _playToGameOver(base)
+  try {
+    const replies = await Promise.all(
+      modes.map((mode) => post(base, `/api/games/${g.code}/reset`, { mode }, g.hostToken)),
+    )
+    const winner = modes[replies.findIndex((reply) => reply.status === 204)]
+    await sleep(500)
+    const resets = g.peers.host!.events.filter((event) => event.type === 'game_reset')
+    if (winner === 'lobby') {
+      const started = await post(base, `/api/games/${g.code}/start`, {}, g.hostToken)
+      if (started.status !== 204) throw new Error(`restart ${started.status}`)
+    }
+    for (const peer of Object.values(g.peers)) {
+      peer.snapshot = null
+      send(peer, { type: 'rejoin' })
+    }
+    for (
+      let i = 0;
+      i < 80 && !Object.values(g.peers).every((peer) => peer.snapshot?.round === 1);
+      i++
+    )
+      await sleep(100)
+    const snapshots = Object.values(g.peers).map((peer) => peer.snapshot)
+    const snap = g.peers.host!.snapshot
+    if (!snap?.prompt) throw new Error('fresh game has no prompt')
+    const czarName = Object.entries(g.idByName).find(([, id]) => id === snap.czarId)![0]
+    const czar = g.peers[czarName]!
+    const previousReveals = czar.events.filter((event) => event.type === 'reveal_start').length
+    for (const [name, id] of Object.entries(g.idByName)) {
+      if (id !== snap.czarId)
+        send(g.peers[name]!, {
+          type: 'play',
+          cardIds: g.peers[name]!.snapshot!.hand.slice(0, snap.prompt.pick).map(
+            (card: { id: string }) => card.id,
+          ),
+        })
+    }
+    await waitForNth(czar, 'reveal_start', previousReveals + 1, 14_000)
+    // Observe the server's completed reveal rather than predicting its duration.
+    for (let attempt = 0; attempt < 40 && czar.snapshot?.phase !== 'judging'; attempt++) {
+      send(czar, { type: 'rejoin' })
+      await sleep(250)
+    }
+    if (czar.snapshot?.phase !== 'judging') throw new Error('fresh round never reached judging')
+    const previousWins = czar.events.filter((event) => event.type === 'round_won').length
+    send(czar, { type: 'pick', submissionId: '0' })
+    const won = await waitForNth(czar, 'round_won', previousWins + 1, 8_000)
+    return {
+      statuses: replies.map((reply) => reply.status).sort(),
+      errors: replies.filter((reply) => reply.status !== 204).map((reply) => reply.json),
+      resets: resets.map((event) => (event as any).mode),
+      winner,
+      snapshots,
+      playable: !!won,
+    }
+  } finally {
+    for (const peer of Object.values(g.peers)) peer.ws.close()
+  }
+}
