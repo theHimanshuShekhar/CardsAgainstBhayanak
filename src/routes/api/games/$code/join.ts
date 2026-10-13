@@ -76,9 +76,12 @@ export const Route = createFileRoute('/api/games/$code/join')({
             status,
             posthogAnonId: parsed.data.anonId,
           })
+          // Historical handles remain reserved by the current schema. Return
+          // a recoverable rejection until handle reuse is implemented (#45).
+          .onConflictDoNothing({ target: [gamePlayers.sessionId, gamePlayers.username] })
           .returning()
 
-        if (!player) return errorResponse(500, 'internal_error', 'Failed to create player')
+        if (!player) return errorResponse(409, 'duplicate_username', 'Handle taken in this room')
 
         const gamePlayer = {
           id: player.id,
