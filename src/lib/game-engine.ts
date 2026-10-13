@@ -1572,10 +1572,10 @@ export async function castVote(
   const result = await state.commitVote(code, roundId, epoch, voterId, canonicalId, votedKey)
   if (!result) throw new GameCommandError('invalid_state', 'This vote is no longer available')
   onOutcome?.(true)
-  const { tally, leaders, revote } = result
+  const { tally, leaders, revote, voteCandidateIds } = result
   await state.publishEvent(code, { type: 'vote_tally', votes: tally })
   if (revote) {
-    await state.publishEvent(code, { type: 'vote_tally', votes: {} })
+    await state.publishEvent(code, { type: 'vote_tally', votes: {}, voteCandidateIds })
     return
   }
   if (!leaders) return

@@ -92,6 +92,7 @@ function SessionScreen() {
   // God Is Dead: per-round vote state. The engine enforces one vote per
   // round; controls disable while pending and the accepted vote is marked
   // only by a matching receipt. Live tallies alone cannot confirm our vote.
+  const [voteCandidateIds, setVoteCandidateIds] = useState<string[] | undefined>()
   const [mySubmissionIds, setMySubmissionIds] = useState<string[]>([])
   const [myVotedSubmissionId, setMyVotedSubmissionId] = useState<string | null>(null)
   const [voteTally, setVoteTally] = useState<Record<string, number>>({})
@@ -223,6 +224,7 @@ function SessionScreen() {
         setMySubmissionsSent(s.mySubmissionCount)
         setMyVotedSubmissionId(s.myVotedSubmissionId)
         setMySubmissionIds(s.mySubmissionIds)
+        setVoteCandidateIds(s.voteCandidateIds)
         setVoteTally(s.voteTally ?? {})
         setSelected((cards) => cards.filter((id) => s.hand?.some((card) => card.id === id)))
         if (s.hand) setHand(s.hand)
@@ -271,6 +273,7 @@ function SessionScreen() {
         setMySubmissionsSent(0)
         setMySubmissionIds([])
         setMyVotedSubmissionId(null)
+        setVoteCandidateIds(undefined)
         setVoteTally({})
         // Survival/SB: per-round state must reset alongside submissions
         // so a stale eliminate-turn / ranking doesn't survive into the
@@ -306,6 +309,7 @@ function SessionScreen() {
       // God Is Dead: live tally for every voter, including a reset to
       // {} on tie revote. Renders as a chip beneath each submission.
       if (event.type === 'vote_tally') {
+        if (event.voteCandidateIds) setVoteCandidateIds(event.voteCandidateIds)
         setVoteTally(event.votes)
         // Tie revote → engine clears the tally and reopens voting.
         if (Object.keys(event.votes).length === 0) {
@@ -677,6 +681,7 @@ function SessionScreen() {
                     mySubmissionIds={mySubmissionIds}
                     myVotedSubmissionId={myVotedSubmissionId}
                     voteTally={voteTally}
+                    voteCandidateIds={voteCandidateIds}
                     onVote={handleVote}
                     canEliminate={canEliminate}
                     eliminatedIds={eliminatedIds}
