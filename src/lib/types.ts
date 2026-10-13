@@ -96,6 +96,8 @@ export type SessionState = {
   // the sole authority on phase transitions.
   roundTimerExpiresAt: number | null
   eliminationTurnPlayerId?: string
+  // Public answer IDs eligible in the next ballot; absent on the initial ballot.
+  voteCandidateIds?: string[]
   voteTally?: Record<string, number>
   ranking?: Submission[]
   // Never Have I Ever: only the requesting player's count is needed —
@@ -254,7 +256,7 @@ export type ServerMessage =
     }
   | { type: 'elimination_turn'; playerId: string }
   | { type: 'card_eliminated'; submissionId: string; byPlayerId: string }
-  | { type: 'vote_tally'; votes: Record<string, number> }
+  | { type: 'vote_tally'; votes: Record<string, number>; voteCandidateIds?: string[] }
   | { type: 'round_voided'; round: number; reason: string }
   | { type: 'round_end'; activatedPlayers: string[] }
   | { type: 'game_over'; finalScores: PlayerScore[]; winnerId: string; mode: GameOverMode }

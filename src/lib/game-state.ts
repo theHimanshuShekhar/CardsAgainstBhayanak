@@ -1076,6 +1076,7 @@ export async function clearRoundResolution(code: string): Promise<void> {
     'completionClaim',
     'voteEpoch',
     'voteClosed',
+    'voteCandidateIds',
   )
 }
 
@@ -1214,6 +1215,12 @@ if actor.status ~= 'active' or actor.role ~= 'player' or actor.isRando then retu
 if ARGV[3] == ARGV[5] then return nil end
 local submission = redis.call('HGET', KEYS[3], ARGV[5])
 if not submission or cjson.decode(submission).eliminated then return nil end
+local candidates = redis.call('HGET', KEYS[1], 'voteCandidateIds')
+if candidates then
+  local eligible = false
+  for _, sid in ipairs(cjson.decode(candidates)) do if sid == ARGV[4] then eligible = true end end
+  if not eligible then return nil end
+end
 if redis.call('SADD', KEYS[4], ARGV[3]) == 0 then return nil end
 redis.call('HSET', KEYS[5], ARGV[3], ARGV[4])
 redis.call('HINCRBY', KEYS[6], ARGV[4], 1)
@@ -1243,9 +1250,11 @@ if #leaders > 1 then
   redis.call('EXPIRE', KEYS[7], ARGV[6])
 end
 if #leaders > 1 and attempts <= 2 then
+  table.sort(leaders, function(a, b) return tonumber(a) < tonumber(b) end)
+  redis.call('HSET', KEYS[1], 'voteCandidateIds', cjson.encode(leaders))
   redis.call('HINCRBY', KEYS[1], 'voteEpoch', 1)
   redis.call('DEL', KEYS[4], KEYS[5], KEYS[6])
-  return cjson.encode({tally = tally, revote = true})
+  return cjson.encode({tally = tally, revote = true, voteCandidateIds = leaders})
 end
 redis.call('HSET', KEYS[1], 'voteClosed', '1')
 return cjson.encode({tally = tally, leaders = leaders})
@@ -1258,7 +1267,12 @@ export async function commitVote(
   voterId: string,
   submissionId: string,
   submissionKey: string,
-): Promise<{ tally: Record<string, number>; leaders?: string[]; revote?: boolean } | null> {
+): Promise<{
+  tally: Record<string, number>
+  leaders?: string[]
+  revote?: boolean
+  voteCandidateIds?: string[]
+} | null> {
   const raw = await redis.eval(
     VOTE_LUA,
     8,

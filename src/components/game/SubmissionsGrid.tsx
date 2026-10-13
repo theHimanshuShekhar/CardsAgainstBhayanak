@@ -25,6 +25,7 @@ type Props = {
   mode?: 'normal' | 'godmode' | 'survival' | 'serious_business'
   canVote?: boolean
   mySubmissionIds?: string[]
+  voteCandidateIds?: string[]
   voteTally?: Record<string, number>
   myVotedSubmissionId?: string | null
   onVote?: (submissionId: string) => void
@@ -60,6 +61,7 @@ export function SubmissionsGrid({
   mode = 'normal',
   canVote = false,
   mySubmissionIds = [],
+  voteCandidateIds,
   voteTally = {},
   myVotedSubmissionId = null,
   onVote,
@@ -162,7 +164,13 @@ export function SubmissionsGrid({
                         <button
                           className={`btn btn-ghost btn-sm vote-btn${iVotedThis ? ' is-armed' : ''}`}
                           data-testid="vote-btn"
-                          disabled={pending || !canVote || mySubmissionIds.includes(s.submissionId)}
+                          disabled={
+                            pending ||
+                            !canVote ||
+                            mySubmissionIds.includes(s.submissionId) ||
+                            (voteCandidateIds !== undefined &&
+                              !voteCandidateIds.includes(s.submissionId))
+                          }
                           onClick={() => onVote?.(s.submissionId)}
                         >
                           {mySubmissionIds.includes(s.submissionId)

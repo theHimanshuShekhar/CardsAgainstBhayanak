@@ -201,6 +201,8 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
       ? subOrder.flatMap((key, index) => (key === playerId ? [String(index)] : []))
       : [],
     myVotedSubmissionId: await redis.hget(`${KEYS.round(code)}:voterchoices`, playerId),
+    voteCandidateIds:
+      JSON.parse((await redis.hget(KEYS.round(code), 'voteCandidateIds')) ?? 'null') ?? undefined,
     ...(voteTally ? { voteTally } : {}),
     ...(eliminationTurnPlayerId ? { eliminationTurnPlayerId } : {}),
     ...(ranking ? { ranking } : {}),
