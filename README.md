@@ -15,7 +15,7 @@ docker compose up -d postgres redis
 pnpm install
 
 # Apply schema
-pnpm db:push
+pnpm db:migrate
 
 # Seed cards from REST Against Humanity API
 pnpm seed
@@ -47,18 +47,18 @@ For **local `pnpm dev`** against `docker compose up -d postgres redis`, set
 
 ## Commands
 
-| Command          | Purpose                                   |
-| ---------------- | ----------------------------------------- |
-| `pnpm dev`       | Dev server with HMR                       |
-| `pnpm build`     | Production build                          |
-| `pnpm start`     | Run production build                      |
-| `pnpm typecheck` | TypeScript check                          |
-| `pnpm lint`      | ESLint                                    |
-| `pnpm test`      | Unit tests (Vitest)                       |
-| `pnpm test:e2e`  | E2E tests (Playwright, requires DB+Redis) |
-| `pnpm db:push`   | Apply schema changes                      |
-| `pnpm db:studio` | Drizzle Studio                            |
-| `pnpm seed`      | Seed card packs                           |
+| Command           | Purpose                                   |
+| ----------------- | ----------------------------------------- |
+| `pnpm dev`        | Dev server with HMR                       |
+| `pnpm build`      | Production build                          |
+| `pnpm start`      | Run production build                      |
+| `pnpm typecheck`  | TypeScript check                          |
+| `pnpm lint`       | ESLint                                    |
+| `pnpm test`       | Unit tests (Vitest)                       |
+| `pnpm test:e2e`   | E2E tests (Playwright, requires DB+Redis) |
+| `pnpm db:migrate` | Apply reviewed versioned migrations       |
+| `pnpm db:studio`  | Drizzle Studio                            |
+| `pnpm seed`       | Seed card packs                           |
 
 E2E tests use disposable PostgreSQL and Redis databases: global teardown removes game data and flushes the selected Redis database. The automatic Playwright server uses a 2000ms round-result pause so browser tests can reload while the winning cards remain visible. Production keeps its 4000ms pause.
 
@@ -137,3 +137,24 @@ Docker commands have bounded deadlines (30 seconds for creation, 10 seconds
 for port lookup and cleanup). Cleanup errors name the exact owned containers
 for a later retry; the fixture kills pending CLI processes when its worker exits.
 Disposable PostgreSQL data uses tmpfs to reduce disk contention.
+
+## Reviewed schema deployment
+
+Ordinary app startup checks migration history and schema compatibility, then listens. It never applies DDL. An empty, pending, altered, newer or drifted database fails startup. `db:push` remains available for throwaway local experiments only.
+
+Before deployment, review the SQL and manifest in `drizzle/`, stop app writers (including background jobs), and create a database backup with `pg_dump`. Test restoring that backup into a separate database before proceeding. Build the intended image, then run the explicit step:
+
+```sh
+docker compose build app
+docker compose run --rm --no-deps app pnpm db:migrate
+docker compose run --rm --no-deps app pnpm db:check
+docker compose up -d app
+```
+
+For an existing database created with `db:push`, run `pnpm db:baseline` from the intended image before the migration step. Adoption verifies the entire public schema against the reviewed baseline before recording it; it preserves existing data and refuses drift. Do not bypass a mismatch: investigate the diff against a restored disposable copy and review a reconciliation before trying again. A clean install uses `db:migrate`. Existing versioned installs use `db:migrate` too.
+
+Each deployment applies all pending SQL and journal entries in one transaction under a PostgreSQL advisory lock. Failure rolls back both schema/data changes and journal entries. Migrations must be transaction-compatible SQL (no concurrent index creation or explicit transaction control). Do not assume an old image can run against a new schema: checks require an exact version. For recovery, keep writers stopped, restore the verified pre-deploy dump into a fresh database with `psql -v ON_ERROR_STOP=1`, point the previous image at the restored database, run its `db:check`, and resume it. Keep the failed database for diagnosis.
+
+To add a migration, edit `src/db/schema.ts`, run `pnpm db:generate --name <change>`, and review the generated SQL and Drizzle snapshot. Restore the current version into a disposable database and apply the candidate SQL there. Run `pnpm db:signature` against that database to obtain its resulting catalog signature, and append `{ "file": "<generated>.sql", "sha256": "<sha256sum of SQL>", "schema": "<signature>" }` to `drizzle/manifest.json`. Never edit previously released SQL or manifest entries. Rehearse clean install, upgrade with retained data, and failure/restore, then commit SQL, snapshots and manifest together. The manifest is the runtime authority; Drizzle metadata supports subsequent generation. Signatures cover public table columns/defaults/nullability, constraints, indexes and enum values; migrations own that schema.
+
+The disposable integration drill runs with `CAB_MIGRATION_TEST_URL=postgres://cab_test:cab_test_only@127.0.0.1:55432/cab_audit_issue52_clean pnpm test:migrations`. It requires the dedicated audit PostgreSQL container and destroys only the explicitly named test database's schema.

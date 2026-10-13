@@ -22,6 +22,8 @@ COPY --from=build --chown=cab:cab /app/server.prod.ts ./server.prod.ts
 COPY --from=build --chown=cab:cab /app/tsconfig.json ./tsconfig.json
 COPY --from=build --chown=cab:cab /app/package.json ./package.json
 COPY --from=build --chown=cab:cab /app/node_modules ./node_modules
+COPY --from=build --chown=cab:cab /app/drizzle ./drizzle
+COPY --from=build --chown=cab:cab /app/scripts ./scripts
 COPY --from=build --chown=cab:cab /app/drizzle.config.ts ./drizzle.config.ts
 COPY --from=build --chown=cab:cab /app/scripts/start-prod.sh ./start-prod.sh
 RUN chmod +x ./start-prod.sh

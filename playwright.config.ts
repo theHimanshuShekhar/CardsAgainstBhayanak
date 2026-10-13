@@ -25,7 +25,7 @@ export default defineConfig({
     ? {}
     : {
         webServer: {
-          command: 'pnpm build && pnpm start',
+          command: 'pnpm build && pnpm db:migrate && pnpm start',
           url: 'http://localhost:3000/api/healthz',
           timeout: 180_000,
           reuseExistingServer: !process.env.CI,
