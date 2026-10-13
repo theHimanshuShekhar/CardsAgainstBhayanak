@@ -3,6 +3,7 @@ import { db } from '~/db'
 import { gameSessions } from '~/db/schema'
 import { authenticate } from '~/lib/api-auth'
 import { errorResponse } from '~/lib/api-helpers'
+import { GameCommandError } from '~/lib/game-command-error'
 import { apiLogger } from '~/lib/logger'
 import { eq } from 'drizzle-orm'
 import { z } from 'zod'
@@ -36,13 +37,22 @@ export const Route = createFileRoute('/api/games/$code/reset')({
         if (!session) return errorResponse(404, 'room_not_found', 'Room not found')
         if (session.hostPlayerId !== auth.playerId)
           return errorResponse(403, 'host_only', 'Only the host can reset the game')
-        // Guards a double-reset race: only the first request finds 'ended'.
+        // Fast precheck; the engine atomically claims the live ended state.
         if (session.status !== 'ended')
           return errorResponse(409, 'invalid_state', 'Game is not over')
 
         if (!(await authenticate(request, code)))
           return errorResponse(401, 'not_authorized', 'Missing or invalid token')
-        await engine.resetGame(code, mode, auth.playerId)
+        try {
+          await engine.resetGame(code, mode, auth.playerId)
+        } catch (error) {
+          if (error instanceof GameCommandError) {
+            const status =
+              error.code === 'invalid_state' ? 409 : error.code === 'host_only' ? 403 : 401
+            return errorResponse(status, error.code, error.message)
+          }
+          throw error
+        }
         apiLogger.info({ roomCode: code, mode }, 'game reset')
         return new Response(null, { status: 204 })
       },
