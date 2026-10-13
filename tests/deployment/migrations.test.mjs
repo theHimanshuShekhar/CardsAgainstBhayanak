@@ -10,6 +10,7 @@ import postgres from 'postgres'
 // Opt-in deployment drills; use only this dedicated disposable database.
 const url = process.env.CAB_MIGRATION_TEST_URL
 const testDrill = url ? test : test.skip
+const container = process.env.CAB_MIGRATION_TEST_CONTAINER ?? 'cab-audit-test-postgres-20261003'
 function cli(command, cwd = process.cwd()) {
   return spawnSync(
     'node',
@@ -58,12 +59,24 @@ testDrill(
       succeeds('adopt')
       cpSync('drizzle', join(temporary, 'drizzle'), { recursive: true })
       const manifest = JSON.parse(readFileSync('drizzle/manifest.json', 'utf8'))
-      const upgradeSql = "UPDATE packs SET card_count=7 WHERE id='retained-pack';"
+      const upgradeSql =
+        "ALTER TABLE packs ADD COLUMN migration_note text DEFAULT 'reviewed'; UPDATE packs SET card_count=7 WHERE id='retained-pack';"
+      await sql.unsafe("ALTER TABLE packs ADD COLUMN migration_note text DEFAULT 'reviewed'")
+      const signature = spawnSync(
+        'node',
+        ['--import', import.meta.resolve('tsx'), 'scripts/schema-signature.ts'],
+        {
+          env: { ...process.env, DATABASE_URL: url },
+          encoding: 'utf8',
+        },
+      )
+      assert.equal(signature.status, 0, signature.stderr)
+      await sql.unsafe('ALTER TABLE packs DROP COLUMN migration_note')
       writeFileSync(join(temporary, 'drizzle/0001_upgrade.sql'), upgradeSql)
       manifest.push({
         file: '0001_upgrade.sql',
         sha256: createHash('sha256').update(upgradeSql).digest('hex'),
-        schema: manifest[0].schema,
+        schema: signature.stdout.trim(),
       })
       writeFileSync(join(temporary, 'drizzle/manifest.json'), JSON.stringify(manifest))
       assert.match(cli('check', temporary).stderr, /Pending migrations/)
@@ -74,18 +87,14 @@ testDrill(
         (await sql`SELECT card_count FROM packs WHERE id='retained-pack'`)[0].card_count,
         7,
       )
+      assert.equal(
+        (await sql`SELECT migration_note FROM packs WHERE id='retained-pack'`)[0].migration_note,
+        'reviewed',
+      )
       // Real logical backup, then a reviewed migration whose second statement fails.
       const backup = spawnSync(
         'docker',
-        [
-          'exec',
-          'cab-audit-test-postgres-20261003',
-          'pg_dump',
-          '-U',
-          'cab_test',
-          '-d',
-          new URL(url).pathname.slice(1),
-        ],
+        ['exec', container, 'pg_dump', '-U', 'cab_test', '-d', new URL(url).pathname.slice(1)],
         { encoding: 'utf8' },
       )
       assert.equal(backup.status, 0, backup.stderr)
@@ -112,7 +121,7 @@ testDrill(
         [
           'exec',
           '-i',
-          'cab-audit-test-postgres-20261003',
+          container,
           'psql',
           '-v',
           'ON_ERROR_STOP=1',
