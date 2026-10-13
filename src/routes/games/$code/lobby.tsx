@@ -18,9 +18,13 @@ export const Route = createFileRoute('/games/$code/lobby')({
 function LobbyScreen() {
   const navigate = useNavigate()
   const { code } = Route.useParams()
-  const { session, setSession } = useSession()
+  const { session, setSession, ready } = useSession()
   const { leaveGame, leaving, leaveError } = useLeaveGame()
   const formatted = formatRoomCode(code)
+
+  useEffect(() => {
+    if (ready && !session) void navigate({ to: '/games/join' })
+  }, [ready, session, navigate])
 
   const [players, setPlayers] = useState<GamePlayer[]>([])
   const [config, setConfig] = useState<GameConfig | null>(null)
