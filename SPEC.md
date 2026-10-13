@@ -78,7 +78,7 @@ Step 3 starts immediately on WS close event — no waiting for keepalive timeout
 
 ### Logout / leave
 
-Client clears `cab_session` on **explicit Leave button**, on **"Go home" from the end screen**, or on **`auth_error`**. The session **persists through `game_over` and the end screen** so the "Play again" button can reuse the handle and `anonId`. Server removes player from Redis on `leave` message.
+Client clears `cab_session` on **explicit Leave button**, on **"Go home" from the end screen**, or on **`auth_error`**. The session **persists through `game_over` and the end screen** so the "Play again" button can reuse the handle and `anonId`. Server marks the player `dropped` on explicit leave or grace expiry. Redis's player roster is the authoritative live membership: dropped entries are retained as token-revocation tombstones and excluded from admission capacity, lobby configuration limits, start validation, hand dealing, and play. Player-role members in grace or queued status still occupy seats; only active players are eligible for initial dealing and start validation. PostgreSQL participation rows and scores are retained for history, with terminal departure recorded as `dropped`; their status is not used to determine live membership. Admission concurrency and reuse of historical handles are separate concerns.
 
 ### Security notes
 

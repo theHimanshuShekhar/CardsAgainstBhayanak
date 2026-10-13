@@ -41,17 +41,8 @@ export const Route = createFileRoute('/api/games/$code/join')({
           return errorResponse(410, 'room_not_found', 'Game has ended')
 
         const config = session.config as GameConfig
-        const [activePlayers] = await db
-          .select({ cnt: sql<number>`count(*)` })
-          .from(gamePlayers)
-          .where(
-            and(
-              eq(gamePlayers.sessionId, session.id),
-              eq(gamePlayers.role, 'player'),
-              sql`${gamePlayers.status} != 'dropped'`,
-            ),
-          )
-        const playerCount = Number(activePlayers?.cnt ?? 0)
+        const livePlayers = await state.getLivePlayers(code)
+        const playerCount = livePlayers.filter((player) => player.role === 'player').length
 
         const { role } = parsed.data
         if (role === 'player' && playerCount >= config.maxPlayers)
