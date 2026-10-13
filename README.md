@@ -60,6 +60,16 @@ For **local `pnpm dev`** against `docker compose up -d postgres redis`, set
 | `pnpm db:studio`  | Drizzle Studio                            |
 | `pnpm seed`       | Seed card packs                           |
 
+`pnpm test:integration` runs the real-service game-engine regressions separately
+from unit tests. Set `DATABASE_URL` and `REDIS_URL` to dedicated disposable
+PostgreSQL/Redis databases, apply `pnpm db:migrate`, and seed the card catalog
+with `pnpm seed` before running it. A seeded pre-migration test database must
+first use `pnpm db:baseline`. Missing services or cards fail this command;
+these tests are never silently skipped. The timer regression controls only
+wall-clock time and scheduled round callbacks, preserving monotonic rate-limit
+clocks and real service IO. It observes the engine event stream delivered to
+WebSocket clients and removes its own room fixtures afterward.
+
 E2E tests use disposable PostgreSQL and Redis databases: global teardown removes game data and flushes the selected Redis database. The automatic Playwright server uses a 2000ms round-result pause so browser tests can reload while the winning cards remain visible. Production keeps its 4000ms pause.
 
 When targeting an already running server with `CAB_E2E_BASE`, start that server with `CAB_ROUND_RESULT_PAUSE_MS=2000` (or the production 4000ms pause), and use the same isolated database and Redis settings for the test runner. A 150ms result pause is too short for the winner refresh assertions.
