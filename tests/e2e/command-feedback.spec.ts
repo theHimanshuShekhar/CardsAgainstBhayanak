@@ -13,7 +13,8 @@ import {
 // accepted/rejected frames still run against the real HTTP/WS server.
 type Faults = {
   socket: WebSocket
-  mode: 'pass' | 'hold' | 'reject' | 'throw'
+  mode: 'pass' | 'hold' | 'reject' | 'throw' | 'self'
+  ownId?: string
   held?: string
   delayAck: boolean
   beforeRound: boolean
@@ -39,6 +40,8 @@ async function wire(page: Page, beforeRound = false) {
         faults.synchronized = false
         this.addEventListener('message', (event) => {
           const message = JSON.parse(String(event.data))
+          if (message.type === 'my_submission_ids') faults.ownId = message.submissionIds[0]
+          if (message.type === 'state_snapshot') faults.ownId = message.state.mySubmissionIds?.[0]
           if (faults.beforeRound && message.type === 'state_snapshot') {
             faults.beforeRound = false
             event.stopImmediatePropagation()
@@ -86,6 +89,10 @@ async function wire(page: Page, beforeRound = false) {
             faults.held = String(data)
             return
           }
+          if (faults.mode === 'self') {
+            faults.mode = 'pass'
+            return super.send(JSON.stringify({ ...command, submissionId: faults.ownId }))
+          }
           if (faults.mode === 'reject') {
             return super.send(
               JSON.stringify({
@@ -115,6 +122,7 @@ async function wire(page: Page, beforeRound = false) {
       }, event),
     hold: () => mode('hold'),
     reject: () => mode('reject'),
+    selfVote: () => mode('self'),
     failSend: () => mode('throw'),
     pass: () => mode('pass'),
     release: () =>
@@ -254,14 +262,17 @@ test('vote restores controls on rejection and disconnect, then confirms only the
     }
     const page = voter.page
     await expect(page.getByTestId('vote-btn')).toHaveCount(3)
-    await expect(page.getByTestId('vote-btn').first()).toBeEnabled()
+    await expect(page.locator('[data-testid="vote-btn"]:enabled').first()).toBeEnabled()
     // Multi-blank submissions render one slot per fill. Vote lives on
     // the first slot; the badge groups that slot with any matching fill.
     const own = await submissionVote(page, ownText!)
-    await own.click()
+    await expect(own).toBeDisabled()
+    await expect(own).toHaveText('Your answer')
+    await wires.get(voter)!.selfVote()
+    await page.locator('[data-testid="vote-btn"]:enabled').first().click()
     await expect(page.getByRole('alert')).toHaveText('This vote is no longer available')
-    await expect(page.getByTestId('vote-btn').first()).toBeEnabled()
-    await disconnectBeforeClick(page, '[data-testid="vote-btn"]')
+    await expect(page.locator('[data-testid="vote-btn"]:enabled').first()).toBeEnabled()
+    await disconnectBeforeClick(page, '[data-testid="vote-btn"]:enabled')
     await expect(page.getByRole('alert')).toContainText('Disconnected')
     await expect.poll(() => socketReady(page)).toBe(true)
     await expect(page.getByTestId('vote-btn')).toHaveCount(3)
@@ -283,6 +294,8 @@ test('vote restores controls on rejection and disconnect, then confirms only the
     await expect(page.getByRole('button', { name: 'Voted', exact: true })).toHaveCount(1)
     await page.reload()
     await expect(page.getByRole('button', { name: 'Voted', exact: true })).toHaveCount(1)
+    await expect(own).toBeDisabled()
+    await expect(own).toHaveText('Your answer')
   } finally {
     await Promise.all(players.map((p) => p.context.close()))
   }
@@ -370,11 +383,11 @@ test('a tie revote clears pending and accepted vote receipts before an old ackno
       await expect(target).toBeEnabled()
       await target.click()
     }
-    await expect(voter.page.getByTestId('vote-btn').first()).toBeEnabled()
+    await expect(voter.page.locator('[data-testid="vote-btn"]:enabled').first()).toBeEnabled()
     await wires.get(voter)!.releaseAck()
     await expect(voter.page.getByRole('button', { name: 'Voted', exact: true })).toHaveCount(0)
     await voter.page.reload()
-    await expect(voter.page.getByTestId('vote-btn').first()).toBeEnabled()
+    await expect(voter.page.locator('[data-testid="vote-btn"]:enabled').first()).toBeEnabled()
     await expect(voter.page.getByRole('button', { name: 'Voted', exact: true })).toHaveCount(0)
   } finally {
     await Promise.all(players.map((p) => p.context.close()))

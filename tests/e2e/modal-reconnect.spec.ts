@@ -185,6 +185,7 @@ for (const mode of ['godmode', 'survival', 'serious_business'] as const) {
         const controls = page.getByTestId(
           mode === 'godmode' ? 'vote-btn' : mode === 'survival' ? 'eliminate-btn' : 'rank-btn',
         )
+        const ownSubmissionIds = mode === 'godmode' ? (await actor.snapshot()).mySubmissionIds : []
         const legal = mode !== 'survival' || board.eliminationTurnPlayerId === actor.playerId
         const verify = async () => {
           await expect(controls).toHaveCount(board.submissions.length)
@@ -198,7 +199,10 @@ for (const mode of ['godmode', 'survival', 'serious_business'] as const) {
             await expect(controls.nth(0)).toHaveText('Eliminated')
           }
           for (const [index, control] of (await controls.all()).entries()) {
-            if (legal && !(mode === 'survival' && index === 0)) await expect(control).toBeEnabled()
+            const ownAnswer = ownSubmissionIds.includes(board.submissions[index]!.submissionId)
+            if (ownAnswer) await expect(control).toHaveText('Your answer')
+            if (legal && !ownAnswer && !(mode === 'survival' && index === 0))
+              await expect(control).toBeEnabled()
             else await expect(control).toBeDisabled()
           }
         }
