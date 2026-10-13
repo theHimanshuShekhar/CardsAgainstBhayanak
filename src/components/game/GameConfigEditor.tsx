@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import { CheckCard } from '~/components/ui/CheckCard'
 import { isBasePack } from '~/lib/packs'
 import type { GameConfig, ModalRuleId, OrthogonalRuleId, Pack, RuleId } from '~/lib/types'
@@ -46,9 +47,10 @@ type Props = {
   value: GameConfig
   onChange: (next: GameConfig) => void
   packs: Pack[]
+  packNotice?: ReactNode
 }
 
-export function GameConfigEditor({ value, onChange, packs }: Props) {
+export function GameConfigEditor({ value, onChange, packs, packNotice }: Props) {
   const baseId = packs.find(isBasePack)?.id
   const activeModal = (value.rules.find((r) => MODAL_IDS.includes(r)) as ModalRuleId) ?? null
   const cardCount = packs
@@ -166,6 +168,7 @@ export function GameConfigEditor({ value, onChange, packs }: Props) {
             {cardCount.toLocaleString()} cards
           </div>
         </div>
+        {packNotice}
         <div className="pack-grid">
           {packs.map((p) => {
             const locked = p.id === baseId
