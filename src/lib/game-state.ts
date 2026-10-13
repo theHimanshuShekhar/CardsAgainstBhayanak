@@ -216,6 +216,13 @@ export async function getAllPlayers(code: string): Promise<GamePlayer[]> {
   return Object.values(map).map((s) => JSON.parse(s) as GamePlayer)
 }
 
+// Redis membership is authoritative for admission, lobby validation and play.
+// Dropped entries remain as tombstones for token revocation; PostgreSQL rows
+// retain historical participation. Grace and queued members still occupy seats.
+export async function getLivePlayers(code: string): Promise<GamePlayer[]> {
+  return (await getAllPlayers(code)).filter((player) => player.status !== 'dropped')
+}
+
 export async function setCzarOrder(code: string, order: string[]): Promise<void> {
   await redis.del(KEYS.czarOrder(code))
   if (order.length > 0) await redis.rpush(KEYS.czarOrder(code), ...order)

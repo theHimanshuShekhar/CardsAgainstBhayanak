@@ -1,6 +1,6 @@
 import { db } from '~/db'
 import { blackCards, whiteCards, gameSessions, gamePlayers, gameRounds, packs } from '~/db/schema'
-import { inArray, eq, sql, desc, and } from 'drizzle-orm'
+import { inArray, eq, desc, and } from 'drizzle-orm'
 import { randomInt, shuffle, pick } from './rng'
 import { redis, KEYS, ROOM_TTL_SECONDS } from './redis'
 import * as state from './game-state'
@@ -113,13 +113,9 @@ export async function startGame(code: string, hostPlayerId?: string): Promise<vo
   // Ordered by joined_at: czarOrder is built from this and the spec
   // requires the stable rotation to follow join order (SPEC.md § Czar
   // selection).
-  const activePlayers = await db
-    .select()
-    .from(gamePlayers)
-    .where(
-      sql`${gamePlayers.sessionId} = ${session.id} AND ${gamePlayers.role} = 'player' AND ${gamePlayers.status} = 'active'`,
-    )
-    .orderBy(gamePlayers.joinedAt)
+  const activePlayers = (await state.getLivePlayers(code))
+    .filter((player) => player.role === 'player' && player.status === 'active')
+    .sort((a, b) => a.joinedAt.localeCompare(b.joinedAt))
 
   if (config.rules.includes('rando')) {
     const [rando] = await db
@@ -133,9 +129,8 @@ export async function startGame(code: string, hostPlayerId?: string): Promise<vo
       })
       .returning()
     if (rando) {
-      activePlayers.push(rando)
       // Mirror into Redis — engine reads players from there, not the DB.
-      await state.addPlayer(code, {
+      const randoPlayer: GamePlayer = {
         id: rando.id,
         username: rando.username,
         role: 'player',
@@ -145,7 +140,9 @@ export async function startGame(code: string, hostPlayerId?: string): Promise<vo
         isRando: true,
         discardsUsed: 0,
         joinedAt: rando.joinedAt.toISOString(),
-      })
+      }
+      await state.addPlayer(code, randoPlayer)
+      activePlayers.push(randoPlayer)
     }
   }
 
@@ -1371,6 +1368,8 @@ export async function dropPlayer(
   connection?: string,
 ): Promise<void> {
   if (!(await state.claimPlayerDrop(code, playerId, connection))) return
+  // Preserve participation and scores while recording the terminal departure.
+  await db.update(gamePlayers).set({ status: 'dropped' }).where(eq(gamePlayers.id, playerId))
   await touchSessionActivity(code)
   captureServerEvent(await distinctIdFor(code, playerId), 'cab_player_dropped', {
     roomCode: code,
