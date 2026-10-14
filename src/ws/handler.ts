@@ -48,6 +48,7 @@ const GAME_ACTIONS = new Set<ClientToServerEvent['type']>([
 
 type PeerCtx = {
   code: string
+  connection: string
   lease: ConnectionLease
   frameBucket: { tokens: number; updatedAt: number }
   playerId?: string
@@ -368,6 +369,7 @@ export const wsHooks = {
     }
     peerContext.set(peer, {
       code,
+      connection: randomUUID(),
       lease,
       frameBucket: { tokens: 120, updatedAt: performance.now() },
       lastPing: Date.now(),
@@ -480,6 +482,8 @@ export const wsHooks = {
           peer.close(1008, 'authentication failed')
           return
         }
+        const expired = await state.reconcileDisconnect(ctx.code, auth.playerId)
+        if (expired) await engine.dropPlayer(ctx.code, auth.playerId, 'grace', expired)
         const participation = await getRoomParticipation(ctx.code, auth.playerId)
         if (peerContext.get(peer) !== ctx) return
         if (!participation.ok) {
@@ -504,7 +508,7 @@ export const wsHooks = {
         // can now release it even while SUBSCRIBE is still in flight.
         await ensureSubscriber(ctx.code)
         if (peerContext.get(peer) !== ctx) return
-        ctx.authSetup = state.reconnectPlayer(ctx.code, auth.playerId)
+        ctx.authSetup = state.reconnectPlayer(ctx.code, auth.playerId, ctx.connection)
         const restored = await ctx.authSetup
         if (peerContext.get(peer) !== ctx) return
         if (!restored) {
@@ -530,6 +534,7 @@ export const wsHooks = {
         })
       releaseCommand = admission.release
       ctx.lastPing = Date.now()
+      await state.renewConnection(ctx.code, ctx.playerId, ctx.connection)
 
       // A socket authenticates identity, not permanent participation.
       // HTTP leave, activation and another connection can change it.
@@ -675,6 +680,7 @@ export const wsHooks = {
       [...(roomPeers.get(code) ?? [])].some(
         (other) => peerContext.get(other)?.playerId === playerId,
       )
+    await state.releaseConnection(code, playerId, ctx.connection)
     if (hasOtherSocket()) return
     const deadline = randomUUID()
     if (!(await state.disconnectPlayer(code, playerId, deadline, TIMING.GRACE_WINDOW_MS))) return

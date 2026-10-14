@@ -2025,3 +2025,20 @@ export async function triggerHappyEnding(code: string, playerId: string): Promis
     rule: 'happy_ending',
   })
 }
+
+// Repeated reconciliation also retries transient backing-store failures and
+// covers leases which were valid at boot but expire after the process died.
+export async function restoreDisconnectDeadlines(): Promise<void> {
+  let cursor = '0'
+  do {
+    const result = await redis.scan(cursor, 'MATCH', 'game:*:players', 'COUNT', 100)
+    cursor = result[0]
+    for (const key of result[1]) {
+      const code = key.split(':')[1]!
+      for (const playerId of await redis.hkeys(key)) {
+        const generation = await state.reconcileDisconnect(code, playerId)
+        if (generation) await dropPlayer(code, playerId, 'grace', generation)
+      }
+    }
+  } while (cursor !== '0')
+}

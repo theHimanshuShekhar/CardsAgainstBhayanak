@@ -1,7 +1,7 @@
 import { startSweeper } from './sweeper'
 import { startKeepaliveEnforcer } from '~/ws/handler'
 import { seedPacks } from './seed'
-import { restoreRoundTimers } from './game-engine'
+import { restoreRoundTimers, restoreDisconnectDeadlines } from './game-engine'
 import { seedLogger, engineLogger } from './logger'
 
 let started = false
@@ -31,6 +31,20 @@ function seedWithRetry(): void {
 export function ensureServerBoot(): void {
   if (started) return
   started = true
+  let reconciling = false
+  const reconcile = async () => {
+    if (reconciling) return
+    reconciling = true
+    try {
+      await restoreDisconnectDeadlines()
+    } catch (err) {
+      engineLogger.error({ err }, 'disconnect recovery failed')
+    } finally {
+      reconciling = false
+    }
+  }
+  void reconcile()
+  setInterval(() => void reconcile(), 1000).unref()
   startSweeper()
   startKeepaliveEnforcer()
   seedWithRetry()

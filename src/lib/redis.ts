@@ -45,6 +45,8 @@ export const KEYS = {
   hand: (code: string, playerId: string) => `game:${code}:hand:${playerId}`,
   grace: (code: string, playerId: string) => `game:${code}:grace:${playerId}`,
   graceConnection: (code: string, playerId: string) => `game:${code}:grace:${playerId}:connection`,
+  connections: (code: string, playerId: string) => `game:${code}:connections:${playerId}`,
+  graceDeadline: (code: string, playerId: string) => `game:${code}:grace:${playerId}:deadline`,
   channel: (code: string) => `game:${code}:channel`,
 } as const
 
