@@ -9,6 +9,9 @@ export type GamePlayer = {
   username: string
   role: Role
   status: PlayerStatus
+  // Connectivity is independent of active/queued/spectator participation.
+  // Omitted on older room entries and new HTTP joins means connected.
+  connectionStatus?: 'connected' | 'grace'
   score: number
   isHost: boolean
   isRando: boolean
