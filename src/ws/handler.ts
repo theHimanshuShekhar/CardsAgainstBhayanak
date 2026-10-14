@@ -103,7 +103,7 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
     })
   }
 
-  const activePlayers = players.filter((p) => p.status === 'active')
+  const activePlayers = players.filter((p) => p.status === 'active' && p.role === 'player')
   const expectedSubmitters = activePlayers.filter((p) => p.id !== czarId && !p.isRando)
   const skippedPlayers = await state.getSkippedPlayers(code)
 
@@ -673,9 +673,9 @@ export const wsHooks = {
       return
     }
 
-    // Grace window: drop only if the player never reconnected (auth
-    // flips 'grace' → 'active'). dropPlayer runs the void/migrate/pause
-    // path and is idempotent.
+    // Grace window: reconnect clears the connection's grace keys without
+    // changing participation. dropPlayer checks the connection generation
+    // before running the idempotent void/migrate/pause path.
     setTimeout(() => {
       if (!hasOtherSocket()) {
         void engine.dropPlayer(code, playerId, 'grace', deadline).catch((err) => {

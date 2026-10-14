@@ -327,7 +327,7 @@ export async function startRound(
   if (config.rules.includes('packing_heat') && black.pick === 2) {
     const all = await state.getAllPlayers(code)
     const eligible = all
-      .filter((p) => p.status === 'active' && !p.isRando && p.id !== czarId)
+      .filter((p) => p.status === 'active' && p.role === 'player' && !p.isRando && p.id !== czarId)
       .map((p) => p.id)
     await applyPackingHeat(code, eligible)
   }
@@ -357,7 +357,9 @@ export async function expireRoundTimer(
     state.getAllPlayers(code),
   ])
 
-  const activePlayers = players.filter((p) => p.status === 'active' && !p.isRando)
+  const activePlayers = players.filter(
+    (p) => p.status === 'active' && p.role === 'player' && !p.isRando,
+  )
   const expectedSubmitters = activePlayers.filter((p) => p.id !== czarId)
   const submittedIds = new Set(Object.keys(submissions).map(resolvePlayerId))
 
@@ -595,7 +597,12 @@ export async function submissionProgress(
   ])
   const skippedSet = new Set(skipped)
   const expectedPlayers = players.filter(
-    (p) => p.status === 'active' && p.id !== czarId && !p.isRando && !skippedSet.has(p.id),
+    (p) =>
+      p.status === 'active' &&
+      p.role === 'player' &&
+      p.id !== czarId &&
+      !p.isRando &&
+      !skippedSet.has(p.id),
   )
   const deadline = await state.getRoundTimerExpiresAt(code)
   const timerExpired = deadline !== null && Date.now() >= deadline
@@ -629,7 +636,12 @@ export async function checkRoundReady(code: string): Promise<void> {
 
   const skippedSet = new Set(skipped)
   const expected = players.filter(
-    (p) => p.status === 'active' && p.id !== czarId && !p.isRando && !skippedSet.has(p.id),
+    (p) =>
+      p.status === 'active' &&
+      p.role === 'player' &&
+      p.id !== czarId &&
+      !p.isRando &&
+      !skippedSet.has(p.id),
   )
   const submitted = new Set(Object.keys(submissions).map(resolvePlayerId))
   const deadline = await state.getRoundTimerExpiresAt(code)
@@ -705,7 +717,9 @@ async function transitionAfterReveal(
         : 'judging'
   const firstPlayer =
     phase === 'eliminating'
-      ? players.find((p) => p.status === 'active' && p.id !== czarId && !p.isRando)
+      ? players.find(
+          (p) => p.status === 'active' && p.role === 'player' && p.id !== czarId && !p.isRando,
+        )
       : undefined
   if (!(await state.advanceRevealedRound(code, roundId, phase, firstPlayer?.id))) return
   if (firstPlayer)
@@ -960,7 +974,9 @@ export async function endRound(
   await state.discardCards(code, 'white', allFillIds)
 
   const activePlayers = await state.getAllPlayers(code)
-  const activeCount = activePlayers.filter((p) => p.status === 'active').length
+  const activeCount = activePlayers.filter(
+    (p) => p.status === 'active' && p.role === 'player',
+  ).length
   await state.reshuffleWhiteIfLow(code, activeCount * 3)
 
   // Resolve to unique real playerIds (strip ':gamble' keys)
@@ -1156,19 +1172,16 @@ export async function resetGame(
       await redis.hdel(KEYS.players(code), p.id)
       continue
     }
-    // Carried: zero the score and clear per-game flags. A `grace` player
-    // is treated as present again; clear any pending grace key so a
-    // stale grace-expiry drop can't fire mid-rematch.
-    await state.clearGrace(code, p.id)
+    // Reset game flags only. Participation and the live connection's grace
+    // deadline survive; a rematch cannot revive a disconnected participant.
     await state.updatePlayer(code, p.id, {
       score: 0,
-      status: 'active',
       discardsUsed: 0,
       hasGambled: false,
     })
     await db
       .update(gamePlayers)
-      .set({ score: 0, status: 'active', discardsUsed: 0 })
+      .set({ score: 0, status: p.status, discardsUsed: 0 })
       .where(eq(gamePlayers.id, p.id))
   }
 
