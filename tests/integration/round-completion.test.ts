@@ -39,6 +39,7 @@ const cases = [
   ['normal', 'completionGameOverPublished'],
   ['godmode', 'closed_ballot'],
   ['survival', 'last_elimination'],
+  ['normal', 'reset_during_pause'],
 ] as const
 
 it.each(cases)(
@@ -100,6 +101,56 @@ it.each(cases)(
       await expect
         .poll(() => events.filter((e) => e.type === 'card_revealed').length)
         .toBe(submitters.length)
+      if (fault === 'reset_during_pause') {
+        let release!: () => void
+        let reached!: () => void
+        const blocked = new Promise<void>((resolve) => {
+          release = resolve
+        })
+        const checkpoint = new Promise<void>((resolve) => {
+          reached = resolve
+        })
+        const realEval = redis.eval.bind(redis)
+        const spy = vi
+          .spyOn(redis, 'eval')
+          .mockImplementation(async (...args: Parameters<typeof redis.eval>) => {
+            const result = await realEval(...args)
+            if (String(args[0]).includes("'completionEndPublished', '1'")) {
+              reached()
+              await blocked
+            }
+            return result
+          })
+        restoreFault = () => {
+          release()
+          spy.mockRestore()
+        }
+        const oldCommand = engine.pickWinner(code, czarId!, '0')
+        await checkpoint
+        await engine.endGame(code, 'normal', players[0]!.id)
+        const rematch = engine.resetGame(code, 'rematch')
+        release()
+        await oldCommand
+        await rematch
+        spy.mockRestore()
+        await expect
+          .poll(() => events.filter((e) => e.type === 'round_started' && e.round === 1).length)
+          .toBe(2)
+        const rematchIndex = events.findIndex((e) => e.type === 'game_reset')
+        expect(
+          events
+            .slice(rematchIndex)
+            .filter((e) => e.type === 'game_over' || (e.type === 'round_started' && e.round !== 1)),
+        ).toEqual([])
+        const latest = events.filter((e) => e.type === 'round_started').at(-1)!
+        const playable = players.find((p) => p.id !== latest.czarId)!
+        await engine.submitCards(
+          code,
+          playable.id,
+          (await state.getHand(code, playable.id)).slice(0, latest.prompt!.pick),
+        )
+        return
+      }
       if (fault.endsWith('_sql')) {
         const table = fault === 'end_game_sql' ? 'game_sessions' : 'game_rounds'
         const operation = fault === 'next_round_sql' ? 'INSERT' : 'UPDATE'

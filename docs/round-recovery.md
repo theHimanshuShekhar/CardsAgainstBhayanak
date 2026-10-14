@@ -28,8 +28,9 @@ Redis configuration. Pub/sub delivery itself remains transient: reconnecting
 clients restore the authoritative state through their ordinary snapshot.
 
 A closed final ballot or final elimination can be recovered even if the process
-dies before recording the shared intent. Reset clears the previous match's
-continuation metadata.
+dies before recording the shared intent. Reset blocks retry entry, drains the current continuation, and clears the previous
+match's continuation metadata before rebuilding the room. The continuation checks
+its intent again after the result pause, so delayed work cannot advance a rematch.
 
 Run the fault regressions against dedicated migrated and seeded databases:
 

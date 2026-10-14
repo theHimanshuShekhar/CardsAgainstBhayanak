@@ -311,6 +311,7 @@ export async function startRound(
   const roundRow = inserted ?? existing
   if (!roundRow) throw new Error('round missing')
   if (existing && existing.blackCardId !== black.id) throw new Error('round already exists')
+  if (existing) czarId = existing.czarPlayerId
   await redis.eval(
     `
     if redis.call('HGET', KEYS[1], 'roundId') == ARGV[1] then return end
@@ -597,7 +598,7 @@ export async function restoreRoundTimers(): Promise<void> {
       if (!resumeAt) continue // not a finalize-pending transition (no-op)
       const ms = resumeAt - Date.now()
       const onResume = (): void => {
-        finalizeRoundAfterPause(code).catch((err) =>
+        continueRoundCompletion(code).catch((err) =>
           engineLogger.warn({ err, code }, 'post-resolve pause suppressed'),
         )
       }
@@ -1153,8 +1154,10 @@ async function recordSingleWinnerIntent(
 // Concurrent commands/recovery callers in a process share the continuation.
 // A killed process releases ownership automatically; durable checkpoints remain.
 const completionTasks = new Map<string, Promise<void>>()
+const resettingRooms = new Set<string>()
 const completionRetries = new Map<string, ReturnType<typeof setTimeout>>()
 async function continueRoundCompletion(code: string): Promise<void> {
+  if (resettingRooms.has(code)) return
   const existing = completionTasks.get(code)
   if (existing) return existing
   const task = runRoundCompletion(code)
@@ -1183,7 +1186,7 @@ async function continueRoundCompletion(code: string): Promise<void> {
 
 async function runRoundCompletion(code: string): Promise<void> {
   const raw = await redis.hget(KEYS.game(code), 'completionIntent')
-  if (!raw) return
+  if (!raw) return finalizeRoundAfterPause(code)
   const intent = JSON.parse(raw) as CompletionIntent
   if (await redis.hget(KEYS.game(code), 'completionEndPublished')) {
     await finalizeRoundAfterPause(code)
@@ -1447,6 +1450,8 @@ async function finalizeRoundAfterPause(code: string): Promise<void> {
     : await state.getPostResolveResumeAt(code)
   if (!cursor) return
   if (cursor > Date.now()) await sleep(cursor - Date.now())
+  if (resettingRooms.has(code)) return
+  if (raw && (await redis.hget(KEYS.game(code), 'completionIntent')) !== raw) return
   const acknowledge = async () => {
     if (raw)
       await redis.eval(
@@ -1566,6 +1571,24 @@ export async function endGame(code: string, mode: GameOverMode, winnerId?: strin
 // (`lobby`) or starts a fresh game immediately (`rematch`). The session
 // must be `ended` — claim it atomically before clearing state.
 export async function resetGame(
+  code: string,
+  mode: ResetMode,
+  hostPlayerId?: string,
+): Promise<void> {
+  // A reset cannot overtake a continuation that is awaiting SQL or its pause.
+  // Block retry entry first, then drain the existing owner before wiping state.
+  if (resettingRooms.has(code))
+    throw new GameCommandError('invalid_state', 'A reset is already in progress')
+  resettingRooms.add(code)
+  try {
+    await completionTasks.get(code)?.catch(() => {})
+    await performResetGame(code, mode, hostPlayerId)
+  } finally {
+    resettingRooms.delete(code)
+  }
+}
+
+async function performResetGame(
   code: string,
   mode: ResetMode,
   hostPlayerId?: string,
