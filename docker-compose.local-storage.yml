@@ -1,0 +1,9 @@
+# Opt-in after a verified logical restore. Never rename/reuse the old CIFS volume.
+# Requires Docker Compose >= 2.24.4 for !override.
+services:
+  postgres:
+    volumes: !override
+      - postgres_local_data:/var/lib/postgresql/data
+volumes:
+  postgres_local_data:
+    driver: local

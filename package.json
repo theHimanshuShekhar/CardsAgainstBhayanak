@@ -28,7 +28,8 @@
     "db:check": "tsx scripts/migrate.ts check",
     "db:baseline": "tsx scripts/migrate.ts adopt",
     "db:signature": "tsx scripts/schema-signature.ts",
-    "test:migrations": "node --test tests/deployment/migrations.test.mjs"
+    "test:migrations": "node --test tests/deployment/migrations.test.mjs",
+    "test:storage": "node --test tests/deployment/storage.test.mjs"
   },
   "dependencies": {
     "@axiomhq/pino": "^1.6.1",
