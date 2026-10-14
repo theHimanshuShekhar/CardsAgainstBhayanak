@@ -78,7 +78,7 @@ Step 3 starts immediately on WS close event — no waiting for keepalive timeout
 
 ### Logout / leave
 
-Client clears `cab_session` on **explicit Leave button**, on **"Go home" from the end screen**, or on **`auth_error`**. The session **persists through `game_over` and the end screen** so the "Play again" button can reuse the handle and `anonId`. Server marks the player `dropped` on explicit leave or grace expiry. Redis's player roster is the authoritative live membership: dropped entries are retained as token-revocation tombstones and excluded from admission capacity, lobby configuration limits, start validation, hand dealing, and play. Player-role members in grace or queued status still occupy seats; only active players are eligible for initial dealing and start validation. PostgreSQL participation rows and scores are retained for history, with terminal departure recorded as `dropped`; their status is not used to determine live membership. Admission concurrency and reuse of historical handles are separate concerns.
+Client clears `cab_session` on **explicit Leave button**, on **"Go home" from the end screen**, or on **`auth_error`**. The session **persists through `game_over` and the end screen** so the "Play again" button can reuse the handle and `anonId`. Server marks the player `dropped` on explicit leave or grace expiry. Redis's player roster is the authoritative live membership: dropped entries are retained as token-revocation tombstones and excluded from admission capacity, lobby configuration limits, start validation, hand dealing, and play. Player-role members in grace or queued status still occupy seats; only active players are eligible for initial dealing and start validation. PostgreSQL participation rows and scores are retained for history, with terminal departure recorded as `dropped`; their status is not used to determine live membership. Handles are case-sensitive and reserved by live memberships (including grace and queued). After terminal departure, anyone may reuse the handle by joining as a new membership with a fresh player ID, token, score and hand. A handle or anonymous analytics ID never authenticates a prior membership; departed tokens remain revoked, and historical scores, submissions and outcomes remain attached to the original player ID. Concurrent claims serialize on the room row: one succeeds and later claims return `duplicate_username`.
 
 ### Security notes
 
@@ -778,7 +778,7 @@ game_sessions  — id (cuid2), code (CHAR(6), unique — stored without dash, e.
 game_players   — id (cuid2), session_id (fk), username, role, score, status, is_host, is_rando,
                  discards_used INT DEFAULT 0, posthog_anon_id (text, nullable — PostHog distinct_id), joined_at
                  status ENUM: 'active' | 'queued' | 'spectator' | 'grace' | 'dropped'
-                 unique(session_id, username)                          -- handles unique per room
+                 unique(session_id, username) WHERE status != 'dropped' -- handles unique among live memberships
                  partial unique(session_id) WHERE is_rando = true     -- at most one Rando per game
 
 game_rounds    — id, session_id (fk), round_num, black_card_id, czar_player_id (nullable for God Is Dead),

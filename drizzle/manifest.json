@@ -3,5 +3,10 @@
     "file": "0000_baseline.sql",
     "sha256": "68aa3365d574b00e5ea41336ea3a216c9b264ce07a09cee4cb1e2f54ecc34fe5",
     "schema": "37acbfb5c648413d657bcc5487095c02e0cb10c027cd8c4d9bcd166fc474237a"
+  },
+  {
+    "file": "0001_live_handle_reuse.sql",
+    "sha256": "6e3dab9bedd97abb025600e065b7c1fd86fa183a286c863c6f02acddf5eb4f97",
+    "schema": "efadf615bef78287abf98cde933db0cee3cb9ed0646a63db61a3de78e23f3307"
   }
 ]

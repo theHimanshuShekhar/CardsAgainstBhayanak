@@ -201,21 +201,22 @@ test('lobby capacity changes count live seats after departure and retain grace s
   }
 })
 
-test('retrying a departed handle returns a recoverable conflict without consuming its seat', async () => {
+test('a departed handle can be claimed once with a fresh membership identity', async () => {
   const { host, second, third } = await lobby()
   const peer = await connect(host)
   try {
     expect((await post(`/api/games/${host.roomCode}/leave`, {}, third.sessionToken)).status).toBe(
       204,
     )
-    const retry = await post(`/api/games/${host.roomCode}/join`, {
-      username: 'Third',
-      anonId: 'departed-retry',
-      role: 'player',
-    })
-    expect(retry.status).toBe(409)
-    expect(await retry.json()).toMatchObject({ code: 'duplicate_username' })
-    const replacement = await join(host.roomCode, 'DifferentHandle')
+    const replacement = await join(host.roomCode, 'Third')
+    expect(replacement.playerId).not.toBe(third.playerId)
+    const oldPeer = await connect(third, false)
+    try {
+      oldPeer.send({ type: 'auth', sessionToken: third.sessionToken })
+      expect((await oldPeer.wait('auth_error')).code).toBe('player_dropped')
+    } finally {
+      oldPeer.ws.close()
+    }
     expect(
       (
         await post(`/api/games/${host.roomCode}/join`, {
@@ -234,6 +235,44 @@ test('retrying a departed handle returns a recoverable conflict without consumin
       [host.playerId, second.playerId, replacement.playerId].sort(),
     )
     expect(snapshot.expected).toBe(2)
+  } finally {
+    peer.ws.close()
+  }
+})
+
+test('concurrent claims of a departed handle create exactly one live membership', async () => {
+  const { host, third } = await lobby(4)
+  const peer = await connect(host)
+  try {
+    expect((await post(`/api/games/${host.roomCode}/leave`, {}, third.sessionToken)).status).toBe(
+      204,
+    )
+    const attempts = await Promise.all(
+      ['claim-a', 'claim-b'].map((anonId) =>
+        post(`/api/games/${host.roomCode}/join`, { username: 'Third', anonId, role: 'player' }),
+      ),
+    )
+    expect(attempts.map((response) => response.status).sort()).toEqual([200, 409])
+    const rejected = attempts.find((response) => response.status === 409)!
+    expect(await rejected.json()).toMatchObject({ code: 'duplicate_username' })
+    const accepted = await attempts.find((response) => response.status === 200)!.json()
+    expect(accepted.playerId).not.toBe(third.playerId)
+    const claimant = await connect({ ...accepted, roomCode: host.roomCode })
+    try {
+      claimant.send({ type: 'rejoin' })
+      const snapshot = await claimant.wait('lobby_snapshot')
+      expect(
+        snapshot.players.filter(
+          (player) => player.username === 'Third' && player.status !== 'dropped',
+        ),
+      ).toEqual([expect.objectContaining({ id: accepted.playerId, score: 0 })])
+      expect(snapshot.players.find((player) => player.id === third.playerId)).toMatchObject({
+        username: 'Third',
+        status: 'dropped',
+      })
+    } finally {
+      claimant.ws.close()
+    }
   } finally {
     peer.ws.close()
   }
