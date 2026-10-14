@@ -116,9 +116,12 @@ export const Route = createFileRoute('/api/games/$code/join')({
                 status,
                 posthogAnonId: parsed.data.anonId,
               })
-              // Historical handles remain reserved by the current schema. Return
-              // a recoverable rejection until handle reuse is implemented (#45).
-              .onConflictDoNothing({ target: [gamePlayers.sessionId, gamePlayers.username] })
+              // Reuse creates a new identity; departed tokens/outcomes stay bound
+              // to the old row. The index uses the same live-membership policy.
+              .onConflictDoNothing({
+                target: [gamePlayers.sessionId, gamePlayers.username],
+                where: sql`${gamePlayers.status} != 'dropped'`,
+              })
               .returning()
 
             if (!player)

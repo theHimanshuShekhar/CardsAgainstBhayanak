@@ -33,7 +33,9 @@ testDrill(
     const sql = postgres(url, { max: 1, onnotice: () => {} })
     const temporary = mkdtempSync(join(tmpdir(), 'cab-issue52-'))
     try {
-      assert.match(new URL(url).pathname, /^\/cab_audit_issue52/)
+      assert.match(new URL(url).pathname, /^\/cab_audit_issue(?:45|52)(?:_|$)/)
+      const reviewedManifest = JSON.parse(readFileSync('drizzle/manifest.json', 'utf8'))
+      const reviewedCount = reviewedManifest.length
       await sql.unsafe(
         'DROP SCHEMA public CASCADE; CREATE SCHEMA public; DROP SCHEMA IF EXISTS cab_migrations CASCADE',
       )
@@ -41,22 +43,42 @@ testDrill(
       succeeds('apply')
       succeeds('check')
       succeeds('apply') // idempotent deployment
+      // Recreate an actual baseline-only database, preserving a historical
+      // membership through adoption and every reviewed incremental migration.
+      await sql.unsafe(
+        'DROP SCHEMA public CASCADE; CREATE SCHEMA public; DROP SCHEMA cab_migrations CASCADE',
+      )
+      await sql.unsafe(readFileSync(`drizzle/${reviewedManifest[0].file}`, 'utf8'))
       await sql`INSERT INTO packs (id,name,slug) VALUES ('retained-pack','Retained pack','retained-pack')`
-      // Existing pre-migration database: remove only journal, preserving data.
-      await sql.unsafe('DROP SCHEMA cab_migrations CASCADE')
+      await sql`INSERT INTO game_sessions (id,code,config) VALUES ('retained-session','RETAIN','{}')`
+      await sql`INSERT INTO game_players (id,session_id,username,status,score) VALUES ('retained-player','retained-session','Retained','dropped',3)`
+      await sql`INSERT INTO black_cards (id,pack_id,text,pick) VALUES ('retained-prompt','retained-pack','Prompt',1)`
+      await sql`INSERT INTO game_rounds (id,session_id,round_num,black_card_id,winner_player_id) VALUES ('retained-round','retained-session',1,'retained-prompt','retained-player')`
       assert.match(cli('apply').stderr, /Existing unversioned database/)
+      await sql.unsafe('ALTER TABLE packs ADD COLUMN unexpected text')
+      assert.match(cli('adopt').stderr, /differs from baseline/)
+      await sql.unsafe('ALTER TABLE packs DROP COLUMN unexpected')
       succeeds('adopt')
+      succeeds('apply')
       succeeds('check')
+      assert.deepEqual(
+        (await sql`SELECT id,score,status FROM game_players WHERE id='retained-player'`)[0],
+        { id: 'retained-player', score: 3, status: 'dropped' },
+      )
+      await sql`INSERT INTO game_players (id,session_id,username) VALUES ('replacement-player','retained-session','Retained')`
+      assert.equal(
+        (await sql`SELECT winner_player_id FROM game_rounds WHERE id='retained-round'`)[0]
+          .winner_player_id,
+        'retained-player',
+      )
       assert.equal(
         (await sql`SELECT name FROM packs WHERE id='retained-pack'`)[0].name,
         'Retained pack',
       )
       await sql.unsafe('ALTER TABLE packs ADD COLUMN unexpected text')
       assert.match(cli('check').stderr, /schema drift/)
-      await sql.unsafe('DROP SCHEMA cab_migrations CASCADE')
-      assert.match(cli('adopt').stderr, /differs from baseline/)
       await sql.unsafe('ALTER TABLE packs DROP COLUMN unexpected')
-      succeeds('adopt')
+      succeeds('check')
       cpSync('drizzle', join(temporary, 'drizzle'), { recursive: true })
       const manifest = JSON.parse(readFileSync('drizzle/manifest.json', 'utf8'))
       const upgradeSql =
@@ -72,9 +94,9 @@ testDrill(
       )
       assert.equal(signature.status, 0, signature.stderr)
       await sql.unsafe('ALTER TABLE packs DROP COLUMN migration_note')
-      writeFileSync(join(temporary, 'drizzle/0001_upgrade.sql'), upgradeSql)
+      writeFileSync(join(temporary, 'drizzle/9998_upgrade.sql'), upgradeSql)
       manifest.push({
-        file: '0001_upgrade.sql',
+        file: '9998_upgrade.sql',
         sha256: createHash('sha256').update(upgradeSql).digest('hex'),
         schema: signature.stdout.trim(),
       })
@@ -98,20 +120,28 @@ testDrill(
         { encoding: 'utf8' },
       )
       assert.equal(backup.status, 0, backup.stderr)
-      const badSql = 'DELETE FROM packs; ALTER TABLE missing_table ADD COLUMN impossible text;'
-      writeFileSync(join(temporary, 'drizzle/0002_failed.sql'), badSql)
+      const badSql =
+        'UPDATE packs SET card_count=99; ALTER TABLE missing_table ADD COLUMN impossible text;'
+      writeFileSync(join(temporary, 'drizzle/9999_failed.sql'), badSql)
       manifest.push({
-        file: '0002_failed.sql',
+        file: '9999_failed.sql',
         sha256: createHash('sha256').update(badSql).digest('hex'),
         schema: 'unused',
       })
       writeFileSync(join(temporary, 'drizzle/manifest.json'), JSON.stringify(manifest))
       assert.match(cli('apply', temporary).stderr, /missing_table/)
-      writeFileSync(join(temporary, 'drizzle/manifest.json'), JSON.stringify(manifest.slice(0, 2)))
+      writeFileSync(
+        join(temporary, 'drizzle/manifest.json'),
+        JSON.stringify(manifest.slice(0, reviewedCount + 1)),
+      )
       succeeds('check', temporary)
       assert.equal(
         (await sql`SELECT name FROM packs WHERE id='retained-pack'`)[0].name,
         'Retained pack',
+      )
+      assert.equal(
+        (await sql`SELECT card_count FROM packs WHERE id='retained-pack'`)[0].card_count,
+        7,
       )
       await sql.unsafe(
         'DROP SCHEMA public CASCADE; CREATE SCHEMA public; DROP SCHEMA cab_migrations CASCADE',
@@ -133,7 +163,10 @@ testDrill(
         { input: backup.stdout, encoding: 'utf8' },
       )
       assert.equal(restored.status, 0, restored.stderr)
-      writeFileSync(join(temporary, 'drizzle/manifest.json'), JSON.stringify(manifest.slice(0, 2)))
+      writeFileSync(
+        join(temporary, 'drizzle/manifest.json'),
+        JSON.stringify(manifest.slice(0, reviewedCount + 1)),
+      )
       succeeds('check', temporary)
       assert.equal(
         (await sql`SELECT name FROM packs WHERE id='retained-pack'`)[0].name,
