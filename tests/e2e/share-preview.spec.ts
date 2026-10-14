@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test'
 import { createGame } from '../helpers'
+import { playHappyEnding } from '../protocol'
 
 for (const agent of ['Discordbot/2.0', 'Twitterbot/1.0']) {
   test(`${agent} receives private, complete previews before JavaScript`, async ({ request }) => {
@@ -92,4 +93,44 @@ test('the exact Copy link URL has no private host or session data in its crawler
     expect(head).toMatch(/https?:\/\/[^" ]+\/share-v1\.png/)
   }
   await handle.context.close()
+})
+
+test('a completed persisted room keeps lobby, session and end crawler previews private', async ({
+  request,
+}) => {
+  test.setTimeout(90_000)
+  const base = process.env['CAB_E2E_BASE'] ?? 'http://localhost:3000'
+  const ended = await playHappyEnding(base, 'EndPrivate')
+  expect(ended.gameOver).toBe(true)
+  expect(ended.mode).toBe('happy_ending')
+  // This HTTP join reads persisted session state independently of game_over.
+  const probe = await request.post(`/api/games/${ended.roomCode}/join`, {
+    data: { username: 'EndObserver', anonId: 'private-ended-observer', role: 'spectator' },
+  })
+  expect(probe.status()).toBe(410)
+  expect((await probe.json()).error).toBe('Game has ended')
+  for (const agent of ['Discordbot/2.0', 'Twitterbot/1.0']) {
+    for (const route of ['lobby', 'session', 'end']) {
+      const readHead = async (code: string) => {
+        const response = await request.get(`/games/${code}/${route}`, {
+          headers: { 'user-agent': agent, cookie: '' },
+        })
+        expect(response.ok()).toBeTruthy()
+        return (await response.text()).split('</head>')[0] ?? ''
+      }
+      const head = await readHead(ended.roomCode)
+      expect(head).toContain('Join a game on Cards Against Bhayanak')
+      for (const value of ended.privateValues) {
+        const escaped = value
+          .replaceAll('&', '&amp;')
+          .replaceAll('<', '&lt;')
+          .replaceAll('>', '&gt;')
+          .replaceAll('"', '&quot;')
+        expect(head).not.toContain(escaped)
+      }
+      expect(head).not.toMatch(/finalScores|winningSubmission|sessionToken|playerId|anonId/)
+      // Equality with an unknown room also excludes scores and unexpected data.
+      expect(head.replaceAll(ended.roomCode, 'ZZZZZZ')).toBe(await readHead('ZZZZZZ'))
+    }
+  }
 })
