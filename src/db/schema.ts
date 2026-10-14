@@ -134,7 +134,10 @@ export const gamePlayers = pgTable(
     joinedAt: timestamp('joined_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    unique().on(t.sessionId, t.username),
+    // A handle belongs to one live membership; historical identities remain immutable.
+    uniqueIndex('unique_live_handle_per_session')
+      .on(t.sessionId, t.username)
+      .where(sql`${t.status} != 'dropped'`),
     // at most one Rando per game
     uniqueIndex('unique_rando_per_session')
       .on(t.sessionId)
