@@ -717,7 +717,7 @@ export async function clearGrace(code: string, playerId: string): Promise<void> 
 }
 
 // Reconnection must never resurrect a concurrent leave or promote a
-// mid-round joiner. Restore only a disconnected active participant.
+// mid-round joiner. Connectivity never changes participation.
 export async function reconnectPlayer(code: string, playerId: string): Promise<boolean> {
   return Boolean(
     await redis.eval(
@@ -728,9 +728,10 @@ export async function reconnectPlayer(code: string, playerId: string): Promise<b
       local player = cjson.decode(raw)
       if player.status == 'dropped' then return 0 end
       if player.status == 'grace' then
-        player.status = 'active'
-        redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(player))
+        player.status = player.role == 'spectator' and 'spectator' or 'active'
       end
+      player.connectionStatus = 'connected'
+      redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(player))
       redis.call('DEL', KEYS[2], KEYS[3])
       redis.call('EXPIRE', KEYS[1], ARGV[2])
       return 1
@@ -760,8 +761,11 @@ export async function disconnectPlayer(
       if not raw then return 0 end
       local player = cjson.decode(raw)
       if player.status == 'dropped' then return 0 end
-      -- Queued players keep their activation eligibility while disconnected.
-      if player.status ~= 'queued' then player.status = 'grace' end
+      -- Normalize legacy grace entries without changing the participant's role.
+      if player.status == 'grace' then
+        player.status = player.role == 'spectator' and 'spectator' or 'active'
+      end
+      player.connectionStatus = 'grace'
       redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(player))
       redis.call('SET', KEYS[2], ARGV[2], 'PX', ARGV[3])
       -- Preserve the connection generation past grace-key expiry so an old

@@ -365,14 +365,15 @@ type PlayerStatus =
   | 'active' // in the game, taking turns
   | 'queued' // mid-game joiner; activates next round
   | 'spectator' // watching only
-  | 'grace' // disconnected, within GRACE_WINDOW_MS, still recoverable
+  | 'grace' // legacy room value; reconnect normalizes by role
   | 'dropped' // permanently removed (grace expired or explicit leave)
 
 type GamePlayer = {
   id: string
   username: string
   role: Role
-  status: PlayerStatus
+  status: PlayerStatus // participation, independent of connectivity
+  connectionStatus?: 'connected' | 'grace' // omitted means connected
   score: number
   isHost: boolean
   isRando: boolean // synthetic Rando Cardrissian player
@@ -588,7 +589,8 @@ If a player sends `play` twice for the same round (network glitch, double-click)
    - **Valid HMAC but player dropped past grace window** → responds with `auth_error: "player_dropped"`. Client clears `localStorage.cab_session` and redirects to `/` with a toast: "You were disconnected too long."
    - **Invalid HMAC / expired** → responds with `auth_error: "invalid_token"`. Client clears localStorage, redirects to `/`.
 3. Client shows "Reconnecting…" overlay (debounced by `RECONNECT_TOAST` ms to avoid flash on fast reconnects) while awaiting snapshot. On `state_snapshot` arrival, client hydrates SessionState and dismisses the overlay.
-4. Server grace window: `GRACE_WINDOW_MS` before treating disconnect as permanent drop
+4. Server grace window: `GRACE_WINDOW_MS` before treating disconnect as permanent drop. Disconnect changes `connectionStatus` to `grace`; reconnect changes it to `connected`. Participation remains `active`, `queued`, or `spectator`. Submission and voting quorums include only active player-role participants (excluding Rando for human actions).
+5. Lobby reset and rematch preserve participation and connectivity, including pending grace deadlines. Queued players acquire a hand and a Czar-order slot only at round-end activation; spectators never acquire either. Reset clears scores and per-game flags without promoting participants or reconnecting them.
 
 ### Client-side reconnect backoff
 
