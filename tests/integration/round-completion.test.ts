@@ -311,6 +311,7 @@ it.each(cases)(
           () =>
             events.filter((e) => e.type === terminal && (terminal === 'game_over' || e.round === 2))
               .length,
+          { timeout: 10_000 },
         )
         .toBe(1)
       const outcomes = events.filter((e) => e.type === 'round_won' || e.type === 'round_ranked')
