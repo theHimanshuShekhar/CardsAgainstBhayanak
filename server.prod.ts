@@ -11,6 +11,10 @@ import { serve } from 'srvx'
 // chunks have not yet been loaded by the SSR handler.
 import './src/lib/client-identity.server'
 
+import { readSiteOrigin } from './src/lib/site-origin.server'
+
+readSiteOrigin()
+
 import { manageSchema } from './src/db/migrations'
 
 await manageSchema('check')
@@ -23,16 +27,29 @@ const port = Number(process.env['PORT'] ?? 3000)
 // The TSS SSR handler only renders HTML — it never serves the client
 // bundle. Vite emits the hashed JS/CSS under dist/client/assets, so in
 // prod we serve /assets/* ourselves; everything else goes to SSR.
+const PUBLIC_FILES = new Set([
+  '/share-v1.png',
+  '/favicon-v1.png',
+  '/apple-touch-icon-v1.png',
+  '/favicon.svg',
+])
+const CLIENT_DIR = resolve('./dist/client')
 const ASSETS_DIR = resolve('./dist/client/assets')
 const ASSET_TYPES: Record<string, string> = {
   js: 'text/javascript; charset=utf-8',
   css: 'text/css; charset=utf-8',
+  png: 'image/png',
+  svg: 'image/svg+xml',
 }
 
 async function serveAsset(pathname: string): Promise<Response> {
-  const filePath = resolve(join(ASSETS_DIR, pathname.slice('/assets/'.length)))
+  const base = PUBLIC_FILES.has(pathname) ? CLIENT_DIR : ASSETS_DIR
+  const relative = PUBLIC_FILES.has(pathname)
+    ? pathname.slice(1)
+    : pathname.slice('/assets/'.length)
+  const filePath = resolve(join(base, relative))
   // Reject path traversal: the resolved file must stay under ASSETS_DIR.
-  if (filePath !== ASSETS_DIR && !filePath.startsWith(ASSETS_DIR + sep)) {
+  if (filePath !== base && !filePath.startsWith(base + sep)) {
     return new Response('Not found', { status: 404 })
   }
   try {
@@ -42,7 +59,10 @@ async function serveAsset(pathname: string): Promise<Response> {
       headers: {
         'content-type': ASSET_TYPES[ext] ?? 'application/octet-stream',
         // Filenames are content-hashed, so they can cache forever.
-        'cache-control': 'public, max-age=31536000, immutable',
+        'cache-control':
+          pathname === '/favicon.svg'
+            ? 'public, max-age=3600'
+            : 'public, max-age=31536000, immutable',
       },
     })
   } catch {
@@ -56,7 +76,7 @@ serve({
   plugins: [gameWebSocketPlugin],
   fetch: (request: Request) => {
     const { pathname } = new URL(request.url)
-    if (pathname.startsWith('/assets/')) return serveAsset(pathname)
+    if (pathname.startsWith('/assets/') || PUBLIC_FILES.has(pathname)) return serveAsset(pathname)
     return tssServer.fetch(request)
   },
 })

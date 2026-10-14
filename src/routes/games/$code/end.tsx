@@ -98,6 +98,12 @@ function EndScreen() {
         // Still 'ended' — only the roster matters here (host detection).
         setPlayers(event.players)
       }
+      if (event.type === 'host_changed') {
+        setPlayers((prev) => prev.map((p) => ({ ...p, isHost: p.id === event.hostId })))
+      }
+      if (event.type === 'player_left') {
+        setPlayers((prev) => prev.filter((p) => p.id !== event.playerId))
+      }
       if (event.type === 'auth_error') {
         clearLastGameOver()
         setSession(null)

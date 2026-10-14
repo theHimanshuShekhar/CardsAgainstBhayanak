@@ -83,6 +83,8 @@ export type GodmodeResult = {
 }
 
 export type HappyEndingResult = {
+  roomCode: string
+  privateValues: string[]
   round2Prompt: string
   round2Pick: number
   gameOver: boolean
@@ -359,7 +361,7 @@ export async function playRound(
 // Happy Ending (S0-6): host arms the early end during round 1; round 2 is
 // the forced synthetic "Make a Haiku" (pick:3) round, after which the game
 // ends with mode 'happy_ending' regardless of score.
-export async function playHappyEnding(base: string): Promise<HappyEndingResult> {
+export async function playHappyEnding(base: string, handlePrefix = ''): Promise<HappyEndingResult> {
   const packsJson = (await (await fetch(base + '/api/packs')).json()) as {
     packs: { id: string; name: string }[]
   }
@@ -373,7 +375,11 @@ export async function playHappyEnding(base: string): Promise<HappyEndingResult> 
     packs: [base0.id],
     rules: ['happy_ending'],
   }
-  const c = await post(base, '/api/games', { username: 'host', anonId: 'a-host', config: cfg })
+  const c = await post(base, '/api/games', {
+    username: `${handlePrefix}host`,
+    anonId: `${handlePrefix}a-host`,
+    config: cfg,
+  })
   if (c.status !== 201 && c.status !== 200) throw new Error(`create ${c.status}`)
   const code = c.json.roomCode as string
 
@@ -381,8 +387,8 @@ export async function playHappyEnding(base: string): Promise<HappyEndingResult> 
   for (let i = 2; i <= 3; i++) {
     joins.push(
       await post(base, `/api/games/${code}/join`, {
-        username: `p${i}`,
-        anonId: `a-p${i}`,
+        username: `${handlePrefix}p${i}`,
+        anonId: `${handlePrefix}a-p${i}`,
         role: 'player',
       }),
     )
@@ -459,6 +465,15 @@ export async function playHappyEnding(base: string): Promise<HappyEndingResult> 
   for (const p of Object.values(peers)) p.ws.close()
 
   return {
+    roomCode: code,
+    privateValues: [
+      ...[c, ...joins].flatMap((response) => [response.json.sessionToken, response.json.playerId]),
+      ...['host', 'p2', 'p3', 'a-host', 'a-p2', 'a-p3'].map((name) => `${handlePrefix}${name}`),
+      ...Object.values(peers).flatMap((peer) => [
+        peer.snapshot?.prompt?.text,
+        ...(peer.snapshot?.hand ?? []).map((card: any) => card.text),
+      ]),
+    ].filter((value): value is string => typeof value === 'string' && value.length > 0),
     round2Prompt: r2.promptText,
     round2Pick: r2.pick,
     gameOver: !!over,
