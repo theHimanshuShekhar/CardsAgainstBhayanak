@@ -897,31 +897,6 @@ export async function clearPostResolveResumeAt(code: string): Promise<void> {
   await redis.hdel(KEYS.round(code), 'postResolveResumeAt')
 }
 
-// Atomic read-and-clear of the postResolveResumeAt cursor. The naive
-// `getPostResolveResumeAt` + `clearPostResolveResumeAt` pair is not safe
-// as an idempotency guard: two callers (e.g. the in-process endRound
-// continuation racing a boot-restore scheduler, or two boot-restore
-// passes in a process restart loop) can both pass the non-null read
-// before either gets to clear. The result is `startRound(nextRound)`
-// called twice — the second call overwrites the round hash with a
-// fresh black card while the gameRounds DB row still holds the first
-// call's pick, which shows up as a `pick`/hand-count mismatch in the
-// Gambling spec. Doing the read+delete inside a single Lua script
-// guarantees exactly one caller sees the prior value; the other gets
-// nil and bails.
-const TAKE_RESUME_AT_LUA = `
-if not redis.call('HGET', KEYS[2], 'status') then return nil end
-local v = redis.call('HGET', KEYS[1], 'postResolveResumeAt')
-if not v then return nil end
-redis.call('HDEL', KEYS[1], 'postResolveResumeAt')
-return v
-`
-
-export async function takePostResolveResumeAt(code: string): Promise<number | null> {
-  const v = await redis.eval(TAKE_RESUME_AT_LUA, 2, KEYS.round(code), KEYS.game(code))
-  return v ? Number(v) : null
-}
-
 // S2-1: persist the authoritative phase so a disconnect handler can tell
 // whether a round is mid-flight (and which czar owns it) without having
 // to re-derive it the way buildSnapshot does.
@@ -1005,28 +980,6 @@ export async function advanceRevealedRound(
       roundId,
       phase,
       eliminationTurn,
-      ROOM_TTL_SECONDS,
-    )) === 1
-  )
-}
-
-const CLAIM_ROUND_COMPLETION_LUA = `
-if not redis.call('HGET', KEYS[2], 'status') then return 0 end
-if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1] then return 0 end
-if redis.call('HGET', KEYS[1], 'outcomeClaim') ~= ARGV[1] then return 0 end
-local ok = redis.call('HSETNX', KEYS[1], 'completionClaim', ARGV[1])
-if ok == 1 then redis.call('EXPIRE', KEYS[1], ARGV[2]) end
-return ok
-`
-
-export async function claimRoundCompletion(code: string, roundId: string): Promise<boolean> {
-  return (
-    (await redis.eval(
-      CLAIM_ROUND_COMPLETION_LUA,
-      2,
-      KEYS.round(code),
-      KEYS.game(code),
-      roundId,
       ROOM_TTL_SECONDS,
     )) === 1
   )

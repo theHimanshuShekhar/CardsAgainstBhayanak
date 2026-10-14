@@ -191,8 +191,14 @@ export async function startRound(
   // atomically inside startRound, so the next round IS the Haiku round
   // whenever the flag was set before this call.
   let black: typeof blackCards.$inferSelect | undefined
+  const reservedPlan = await redis.hget(KEYS.game(code), 'roundStartCard')
+  if (reservedPlan) {
+    const plan = JSON.parse(reservedPlan) as { round: number; card: string }
+    if (plan.round === round)
+      [black] = await db.select().from(blackCards).where(eq(blackCards.id, plan.card))
+  }
   const armed = await redis.hget(KEYS.game(code), 'happyEndingArmed')
-  if (armed) {
+  if (!black && armed) {
     const [haiku] = await db
       .select()
       .from(blackCards)
@@ -201,22 +207,55 @@ export async function startRound(
       .limit(1)
     if (haiku) {
       black = haiku.black_cards
-      await state.updateLiveRoom(code, { happyEndingFinal: '1' })
-      await redis.hdel(KEYS.game(code), 'happyEndingArmed')
+      await redis
+        .multi()
+        .hset(
+          KEYS.game(code),
+          'happyEndingFinal',
+          '1',
+          'roundStartCard',
+          JSON.stringify({ round, card: black.id }),
+        )
+        .hdel(KEYS.game(code), 'happyEndingArmed')
+        .exec()
     } else {
       engineLogger.error({ code }, 'happy_ending: armed but Haiku card not seeded; falling back')
     }
   }
 
   if (!black) {
-    const blackIds = await state.drawCards(code, 'black', 1)
+    const reserved = await redis.eval(
+      `
+      local plan = redis.call('HGET', KEYS[1], 'roundStartCard')
+      if plan then
+        local p = cjson.decode(plan)
+        if p.round == tonumber(ARGV[1]) then return p.card end
+      end
+      local card = redis.call('LPOP', KEYS[2])
+      if card then redis.call('HSET', KEYS[1], 'roundStartCard', cjson.encode({round=tonumber(ARGV[1]), card=card})) end
+      return card
+    `,
+      2,
+      KEYS.game(code),
+      KEYS.deckBlack(code),
+      round,
+    )
+    const blackIds = reserved ? [String(reserved)] : []
     if (blackIds.length === 0) {
       const outcome = decideDeckExhaustion(
         await state.getAllPlayers(code),
         await state.getCzarOrder(code),
       )
       if (outcome.status === 'paused') await pauseGame(code)
-      else await endGame(code, 'deck_exhausted', outcome.winnerId)
+      else {
+        if (await redis.hget(KEYS.game(code), 'completionIntent'))
+          await redis.hset(
+            KEYS.game(code),
+            'completionGameEnd',
+            JSON.stringify({ mode: 'deck_exhausted', winnerId: outcome.winnerId }),
+          )
+        await endGame(code, 'deck_exhausted', outcome.winnerId)
+      }
       throw new Error('deck_exhausted')
     }
     const [row] = await db
@@ -253,13 +292,7 @@ export async function startRound(
     }
   }
 
-  await state.clearSkippedPlayers(code)
-  // S2-9: drop the prior round's winner/ranking/elimination turn so a
-  // reconnect during this round's picking phase can't surface a stale
-  // outcome in the snapshot.
-  await state.clearRoundResolution(code)
-  await state.setCurrentRound(code, round)
-  const [roundRow] = await db
+  const [inserted] = await db
     .insert(gameRounds)
     .values({
       sessionId: session.id,
@@ -269,13 +302,34 @@ export async function startRound(
     })
     .onConflictDoNothing()
     .returning({ id: gameRounds.id })
-  if (!roundRow) throw new Error('round already exists')
-  await redis.hset(KEYS.round(code), {
-    roundId: roundRow.id,
-    czarId: czarId ?? '',
-    phase: 'picking',
-  })
-  await redis.expire(KEYS.round(code), ROOM_TTL_SECONDS)
+  const [existing] = inserted
+    ? []
+    : await db
+        .select()
+        .from(gameRounds)
+        .where(and(eq(gameRounds.sessionId, session.id), eq(gameRounds.roundNum, round)))
+  const roundRow = inserted ?? existing
+  if (!roundRow) throw new Error('round missing')
+  if (existing && existing.blackCardId !== black.id) throw new Error('round already exists')
+  if (existing) czarId = existing.czarPlayerId
+  await redis.eval(
+    `
+    if redis.call('HGET', KEYS[1], 'roundId') == ARGV[1] then return end
+    redis.call('HDEL', KEYS[1], 'winnerId', 'winningPlayerId', 'winningSubmissionId', 'resolvedSubmissions', 'ranking', 'eliminationTurnPlayerId', 'outcomeClaim', 'completionClaim', 'voteEpoch', 'voteClosed', 'voteCandidateIds', 'postResolveResumeAt', 'roundTimerExpiresAt')
+    redis.call('HSET', KEYS[1], 'roundId', ARGV[1], 'czarId', ARGV[2], 'phase', 'picking')
+    redis.call('HSET', KEYS[2], 'currentRound', ARGV[3])
+    redis.call('DEL', KEYS[3])
+    redis.call('EXPIRE', KEYS[1], ARGV[4])
+  `,
+    3,
+    KEYS.round(code),
+    KEYS.game(code),
+    `${KEYS.round(code)}:skipped`,
+    roundRow.id,
+    czarId ?? '',
+    round,
+    ROOM_TTL_SECONDS,
+  )
   await touchSessionActivity(code)
 
   // Arm the round timer before announcing the round so round_started can
@@ -283,7 +337,7 @@ export async function startRound(
   let roundTimerExpiresAt: number | null = null
   if (config.timer !== 'Off') {
     const ms = TIMER_MS[config.timer]
-    roundTimerExpiresAt = Date.now() + ms
+    roundTimerExpiresAt = (await state.getRoundTimerExpiresAt(code)) ?? Date.now() + ms
     await state.setRoundTimerExpiresAt(code, roundTimerExpiresAt)
     const armedAt = roundTimerExpiresAt
     // Swallow rejections inside the timer callback. The session row can
@@ -304,15 +358,26 @@ export async function startRound(
   }
 
   const startProgress = await submissionProgress(code)
-  await state.publishEvent(code, {
-    type: 'round_started',
-    round,
-    prompt: { id: black.id, text: black.text, pick: black.pick },
-    czarId,
-    submitted: startProgress.submitted,
-    expected: startProgress.expected,
-    roundTimerExpiresAt,
-  })
+  await redis.eval(
+    `
+    if redis.call('HGET', KEYS[1], 'roundStartPublished') == ARGV[1] then return end
+    redis.call('PUBLISH', KEYS[2], ARGV[2])
+    redis.call('HSET', KEYS[1], 'roundStartPublished', ARGV[1])
+  `,
+    2,
+    KEYS.game(code),
+    KEYS.channel(code),
+    roundRow.id,
+    JSON.stringify({
+      type: 'round_started',
+      round,
+      prompt: { id: black.id, text: black.text, pick: black.pick },
+      czarId,
+      submitted: startProgress.submitted,
+      expected: startProgress.expected,
+      roundTimerExpiresAt,
+    }),
+  )
   captureServerEvent(await distinctIdForHost(code), 'cab_round_started', {
     roomCode: code,
     round,
@@ -430,9 +495,14 @@ export async function expireRoundTimer(
 // All three callees are guarded against duplicate calls.
 export async function restoreRoundTimers(): Promise<void> {
   const sessions = await db
-    .select({ id: gameSessions.id, code: gameSessions.code, config: gameSessions.config })
+    .select({
+      id: gameSessions.id,
+      code: gameSessions.code,
+      config: gameSessions.config,
+      status: gameSessions.status,
+    })
     .from(gameSessions)
-    .where(eq(gameSessions.status, 'active'))
+    .where(inArray(gameSessions.status, ['active', 'ended']))
   for (const s of sessions) {
     const { code } = s
     const currentRound = await state.getCurrentRound(code)
@@ -445,7 +515,59 @@ export async function restoreRoundTimers(): Promise<void> {
       !(await state.ensureRoundIdentity(code, currentRound, currentRow.id, currentRow.czarPlayerId))
     )
       continue
+    if (await redis.hget(KEYS.game(code), 'completionIntent')) {
+      await continueRoundCompletion(code).catch((err) =>
+        engineLogger.warn({ err, code }, 'round completion remains pending'),
+      )
+      continue
+    }
+    if (s.status !== 'active') continue
     const phase = await state.getPhase(code)
+
+    if (phase === 'waiting' && (await redis.hget(KEYS.round(code), 'voteClosed'))) {
+      const tally = Object.fromEntries(
+        Object.entries(await redis.hgetall(voteTallyKeyFor(code))).map(([id, n]) => [
+          id,
+          Number(n),
+        ]),
+      )
+      const max = Math.max(...Object.values(tally))
+      const leaders = Object.keys(tally).filter((id) => tally[id] === max)
+      if (leaders.length) {
+        const sid = chooseVoteWinner(leaders)
+        const key = await resolveSubmissionKey(code, sid)
+        if (key) {
+          await recordSingleWinnerIntent(
+            code,
+            currentRow.id,
+            key,
+            await state.getSubmissions(code),
+            sid,
+            null,
+            tally,
+          )
+          await continueRoundCompletion(code)
+        }
+      }
+      continue
+    }
+    if (phase === 'eliminating') {
+      const submissions = await state.getSubmissions(code)
+      const remaining = Object.keys(submissions).filter((key) => !submissions[key]?.eliminated)
+      if (remaining.length === 1) {
+        const key = remaining[0]!
+        await recordSingleWinnerIntent(
+          code,
+          currentRow.id,
+          key,
+          submissions,
+          publicIdForKey(await getSubOrder(code), key),
+          currentRow.czarPlayerId,
+        )
+        await continueRoundCompletion(code)
+      }
+      continue
+    }
 
     // Case 1 — picking-phase round timer (S2-10)
     if (phase === 'picking') {
@@ -476,7 +598,7 @@ export async function restoreRoundTimers(): Promise<void> {
       if (!resumeAt) continue // not a finalize-pending transition (no-op)
       const ms = resumeAt - Date.now()
       const onResume = (): void => {
-        finalizeRoundAfterPause(code).catch((err) =>
+        continueRoundCompletion(code).catch((err) =>
           engineLogger.warn({ err, code }, 'post-resolve pause suppressed'),
         )
       }
@@ -791,14 +913,38 @@ export async function autoSubmitRando(code: string, pick: number): Promise<void>
   const players = await state.getAllPlayers(code)
   const rando = players.find((p) => p.isRando && p.status === 'active')
   if (!rando) return
-  const drawn = await state.drawCards(code, 'white', pick)
+  const raw = await redis.eval(
+    `
+    local current = redis.call('HGET', KEYS[2], ARGV[1])
+    if current then return current end
+    local fills = {}
+    for i=1,tonumber(ARGV[2]) do
+      local card = redis.call('LPOP', KEYS[1])
+      if not card then break end
+      table.insert(fills, {id=card, text=''})
+    end
+    local submission = cjson.encode({submissionId=ARGV[3], playerId=ARGV[1], fills=fills})
+    redis.call('HSET', KEYS[2], ARGV[1], submission)
+    redis.call('EXPIRE', KEYS[2], ARGV[4])
+    return submission
+  `,
+    2,
+    KEYS.deckWhite(code),
+    `${KEYS.round(code)}:submissions`,
+    rando.id,
+    pick,
+    createId(),
+    ROOM_TTL_SECONDS,
+  )
+  const reserved = JSON.parse(String(raw)) as Submission
+  const drawn = Object.values(reserved.fills).map((card) => card.id)
   if (drawn.length === 0) return
   const rows = await db.select().from(whiteCards).where(inArray(whiteCards.id, drawn))
   const fills: Card[] = drawn.map((id) => {
     const c = rows.find((x) => x.id === id)
     return c ? { id: c.id, text: c.text } : { id, text: '' }
   })
-  const submission: Submission = { submissionId: createId(), fills, playerId: rando.id }
+  const submission: Submission = { ...reserved, fills }
   await state.setSubmission(code, rando.id, submission)
   // Rando is excluded from submissionProgress's expected set, but the
   // event still drives the client pip counter — carry the same
@@ -878,53 +1024,22 @@ async function resolvePickedWinner(
     throw new GameCommandError('invalid_state', 'Command failed')
   const winnerPlayerId = resolvePlayerId(winnerKey)
 
-  // Idempotency gate: clients can re-fire the `pick` WS frame (double-click,
-  // network retry) and the WS handler dispatches each frame as a separate
-  // async task. Without a single-writer claim, scoring runs twice and
-  // endRound interleaves through the non-atomic setHand (del + rpush),
-  // producing 20-card hands.
-  const claimed = await state.claimRoundOutcome(code, roundId, phase, winnerPlayerId, submissionId)
-  if (!claimed) {
-    onOutcome?.(false)
-    return
-  }
-
-  if (phase === 'reveal') await finishClaimedReveal(code, roundId, submissions)
-
-  const winner = await state.getPlayer(code, winnerPlayerId)
-  if (!winner) throw new Error('winner not found')
   const decision = decideNormalRound({
     winnerKey,
     submissions,
     players: await state.getAllPlayers(code),
   })
   if (!decision) throw new Error('winner not found')
-  for (const adjustment of decision.scoreAdjustments) {
-    await state.adjustScore(code, adjustment.playerId, adjustment.delta)
-  }
-  onOutcome?.(true)
-
-  const players = await state.getAllPlayers(code)
-  const scores = toPlayerScores(players, czarId)
-
-  await state.publishEvent(code, {
-    type: 'round_won',
-    winningPlayerId: winnerPlayerId,
-    winningSubmissionId: submissionId,
-    winnerId: winnerPlayerId,
-    submissionId,
-    scores,
-  })
-  captureServerEvent(await distinctIdFor(code, czarId), 'cab_winner_picked', {
-    roomCode: code,
-    winnerId: winnerPlayerId,
-    isRando: winner.isRando,
-  })
-  await persistRoundOutcome(code, {
+  const claimed = await claimCompletionIntent(code, roundId, phase, {
     winnerPlayerId,
+    submissionId,
+    submissions,
+    czarId,
+    adjustments: decision.scoreAdjustments,
     winningFills: decision.winningFills,
   })
-  await endRound(code, decision.submitterKeys, roundId)
+  onOutcome?.(claimed)
+  if (claimed) await continueRoundCompletion(code)
 }
 
 // Round outcomes live in Redis during play; the game_rounds row is
@@ -942,6 +1057,7 @@ async function persistRoundOutcome(
     winningFills: Card[]
     ranking?: Submission[]
     voteTally?: Record<string, number>
+    roundNumber?: number
   },
 ): Promise<void> {
   const [session] = await db
@@ -949,7 +1065,7 @@ async function persistRoundOutcome(
     .from(gameSessions)
     .where(eq(gameSessions.code, code))
   if (!session) return
-  const round = await state.getCurrentRound(code)
+  const round = outcome.roundNumber ?? (await state.getCurrentRound(code))
   await db
     .update(gameRounds)
     .set({
@@ -962,43 +1078,373 @@ async function persistRoundOutcome(
   await touchSessionActivity(code)
 }
 
-export async function endRound(
+// The intent survives round-hash replacement. Every irreversible Redis effect
+// commits with its checkpoint; SQL outcome updates are safe to repeat.
+type CompletionIntent = {
+  roundId: string
+  roundNumber: number
+  mode?: 'normal' | 'survival' | 'godmode' | 'serious_business'
+  winnerPlayerId: string
+  submissionId: string
+  submissions: Record<string, Submission>
+  czarId: string | null
+  adjustments: { playerId: string; delta: number }[]
+  winningFills: Card[]
+  ranking?: Submission[]
+  voteTally?: Record<string, number>
+  fallbackEliminations?: { submissionId: string; byPlayerId: string }[]
+}
+
+async function claimCompletionIntent(
   code: string,
-  submitterIds: string[],
   roundId: string,
+  phase: string,
+  outcome: Omit<CompletionIntent, 'roundId' | 'roundNumber'>,
+): Promise<boolean> {
+  const config = JSON.parse((await redis.hget(KEYS.game(code), 'config')) ?? '{}') as GameConfig
+  const mode = config.rules?.includes('survival')
+    ? 'survival'
+    : config.rules?.includes('godmode')
+      ? 'godmode'
+      : config.rules?.includes('serious_business')
+        ? 'serious_business'
+        : 'normal'
+  return (
+    (await redis.eval(
+      `
+    if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1]
+      or redis.call('HGET', KEYS[1], 'phase') ~= ARGV[2]
+      or redis.call('HEXISTS', KEYS[1], 'outcomeClaim') == 1 then return 0 end
+    redis.call('HSET', KEYS[1], 'outcomeClaim', ARGV[1], 'winningPlayerId', ARGV[3], 'winningSubmissionId', ARGV[4], 'phase', 'transition')
+    redis.call('HSET', KEYS[2], 'completionIntent', ARGV[5])
+    redis.call('HDEL', KEYS[2], 'completionScores', 'completionPublished', 'completionCards', 'completionEndPublished', 'completionResumeAt', 'completionGameEnd', 'completionGameOverPublished')
+    redis.call('EXPIRE', KEYS[1], ARGV[6])
+    redis.call('EXPIRE', KEYS[2], ARGV[6])
+    return 1`,
+      2,
+      KEYS.round(code),
+      KEYS.game(code),
+      roundId,
+      phase,
+      outcome.winnerPlayerId,
+      outcome.submissionId,
+      JSON.stringify({ ...outcome, mode, roundId, roundNumber: await state.getCurrentRound(code) }),
+      ROOM_TTL_SECONDS,
+    )) === 1
+  )
+}
+
+async function recordSingleWinnerIntent(
+  code: string,
+  roundId: string,
+  winnerKey: string,
+  submissions: Record<string, Submission>,
+  submissionId: string,
+  czarId: string | null,
+  voteTally?: Record<string, number>,
 ): Promise<void> {
-  if (!(await state.claimRoundCompletion(code, roundId))) return
-  const submissions = await state.getSubmissions(code)
-  const allFillIds: string[] = []
-  for (const s of Object.values(submissions)) for (const f of s.fills) allFillIds.push(f.id)
-  await state.discardCards(code, 'white', allFillIds)
+  const decision = decideNormalRound({
+    winnerKey,
+    submissions,
+    players: await state.getAllPlayers(code),
+  })
+  if (!decision) throw new Error('winner not found')
+  await claimCompletionIntent(code, roundId, voteTally ? 'waiting' : 'eliminating', {
+    winnerPlayerId: decision.winnerPlayerId,
+    submissionId,
+    submissions,
+    czarId,
+    adjustments: decision.scoreAdjustments,
+    winningFills: decision.winningFills,
+    voteTally,
+  })
+}
 
-  const activePlayers = await state.getAllPlayers(code)
-  const activeCount = activePlayers.filter(
-    (p) => p.status === 'active' && p.role === 'player',
-  ).length
-  await state.reshuffleWhiteIfLow(code, activeCount * 3)
+// Concurrent commands/recovery callers in a process share the continuation.
+// A killed process releases ownership automatically; durable checkpoints remain.
+const completionTasks = new Map<string, Promise<void>>()
+const resettingRooms = new Set<string>()
+const completionRetries = new Map<string, ReturnType<typeof setTimeout>>()
+async function continueRoundCompletion(code: string): Promise<void> {
+  if (resettingRooms.has(code)) return
+  const existing = completionTasks.get(code)
+  if (existing) return existing
+  const task = runRoundCompletion(code)
+  completionTasks.set(code, task)
+  try {
+    await task
+    const retry = completionRetries.get(code)
+    if (retry) clearTimeout(retry)
+    completionRetries.delete(code)
+  } catch (err) {
+    if (!completionRetries.has(code)) {
+      const retry = setTimeout(() => {
+        completionRetries.delete(code)
+        void continueRoundCompletion(code).catch((err) =>
+          engineLogger.warn({ err, code }, 'round completion retry pending'),
+        )
+      }, 1000)
+      retry.unref()
+      completionRetries.set(code, retry)
+    }
+    throw err
+  } finally {
+    completionTasks.delete(code)
+  }
+}
 
-  // Resolve to unique real playerIds (strip ':gamble' keys)
-  const realSubmitterIds = [...new Set(submitterIds.map(resolvePlayerId))]
-
-  for (const pid of realSubmitterIds) await state.refillHand(code, pid, 10)
-
-  // Keep only the public result board for reconnects during the result pause.
-  const resultOrder: string[] = JSON.parse((await redis.get(subOrderKey(code))) ?? '[]')
-  await redis.hset(
-    KEYS.round(code),
-    'resolvedSubmissions',
+async function runRoundCompletion(code: string): Promise<void> {
+  const raw = await redis.hget(KEYS.game(code), 'completionIntent')
+  if (!raw) return finalizeRoundAfterPause(code)
+  const intent = JSON.parse(raw) as CompletionIntent
+  if (await redis.hget(KEYS.game(code), 'completionEndPublished')) {
+    await finalizeRoundAfterPause(code)
+    return
+  }
+  await redis.eval(
+    `
+    if redis.call('HGET', KEYS[1], 'completionIntent') ~= ARGV[1]
+      or redis.call('HEXISTS', KEYS[1], 'completionScores') == 1 then return end
+    for _, adjustment in ipairs(cjson.decode(ARGV[2])) do
+      local raw = redis.call('HGET', KEYS[2], adjustment.playerId)
+      if raw then
+        local p = cjson.decode(raw)
+        p.score = math.max(0, (p.score or 0) + adjustment.delta)
+        redis.call('HSET', KEYS[2], adjustment.playerId, cjson.encode(p))
+      end
+    end
+    redis.call('HSET', KEYS[1], 'completionScores', '1')
+  `,
+    2,
+    KEYS.game(code),
+    KEYS.players(code),
+    raw,
+    JSON.stringify(intent.adjustments),
+  )
+  // SQL must complete before the single public outcome is emitted.
+  await finishClaimedReveal(code, intent.roundId, intent.submissions)
+  await persistRoundOutcome(code, intent)
+  if (intent.ranking)
+    await redis.eval(
+      `
+    if redis.call('HGET', KEYS[1], 'roundId') == ARGV[1] then redis.call('HSET', KEYS[1], 'ranking', ARGV[2]) end
+  `,
+      1,
+      KEYS.round(code),
+      intent.roundId,
+      JSON.stringify(intent.ranking),
+    )
+  const event = intent.ranking
+    ? {
+        type: 'round_ranked',
+        winningPlayerId: intent.winnerPlayerId,
+        winningSubmissionId: intent.submissionId,
+        ranking: intent.ranking,
+        scoresDelta: Object.fromEntries(intent.adjustments.map((a) => [a.playerId, a.delta])),
+      }
+    : {
+        type: 'round_won',
+        winningPlayerId: intent.winnerPlayerId,
+        winningSubmissionId: intent.submissionId,
+        winnerId: intent.winnerPlayerId,
+        submissionId: intent.submissionId,
+        scores: toPlayerScores(await state.getAllPlayers(code), intent.czarId),
+      }
+  const published = await redis.eval(
+    `
+    if redis.call('HGET', KEYS[1], 'completionIntent') ~= ARGV[1]
+      or redis.call('HEXISTS', KEYS[1], 'completionPublished') == 1 then return end
+    for _, event in ipairs(cjson.decode(ARGV[3])) do redis.call('PUBLISH', KEYS[2], cjson.encode(event)) end
+    redis.call('PUBLISH', KEYS[2], ARGV[2])
+    redis.call('HSET', KEYS[1], 'completionPublished', '1')
+    return 1
+  `,
+    2,
+    KEYS.game(code),
+    KEYS.channel(code),
+    raw,
+    JSON.stringify(event),
     JSON.stringify(
-      resultOrder.map((key, index) => ({
-        submissionId: String(index),
-        fills: submissions[key]?.fills ?? [],
-        ...(submissions[key]?.eliminated ? { eliminated: true } : {}),
+      (intent.fallbackEliminations ?? []).map((elimination) => ({
+        type: 'card_eliminated',
+        ...elimination,
       })),
     ),
   )
-  await state.clearSubmissions(code)
-  await redis.del(
+  if (published === 1) {
+    const rules =
+      (JSON.parse((await redis.hget(KEYS.game(code), 'config')) ?? '{}') as GameConfig).rules ?? []
+    const mode =
+      intent.mode ??
+      (intent.ranking
+        ? 'serious_business'
+        : intent.voteTally
+          ? 'godmode'
+          : rules.includes('survival')
+            ? 'survival'
+            : 'normal')
+    const name =
+      mode === 'serious_business'
+        ? 'cab_round_ranked'
+        : mode === 'godmode'
+          ? 'cab_round_voted'
+          : mode === 'survival'
+            ? 'cab_round_eliminated'
+            : 'cab_winner_picked'
+    const actor =
+      mode === 'normal' && intent.czarId
+        ? await distinctIdFor(code, intent.czarId)
+        : await distinctIdForHost(code)
+    captureServerEvent(actor, name, {
+      roomCode: code,
+      winnerId: intent.winnerPlayerId,
+      ...(mode === 'normal'
+        ? { isRando: (await state.getPlayer(code, intent.winnerPlayerId))?.isRando ?? false }
+        : {}),
+      ...(mode === 'survival'
+        ? { totalEliminations: Object.keys(intent.submissions).length - 1 }
+        : {}),
+      ...(intent.voteTally ? { voteSpread: intent.voteTally } : {}),
+      ...(intent.ranking
+        ? { top3: intent.ranking.map((submission) => submission.playerId).filter(Boolean) }
+        : {}),
+    })
+  }
+  await endRound(code, Object.keys(intent.submissions), intent.roundId)
+}
+
+async function completeRoundCards(code: string, roundId: string): Promise<void> {
+  const raw = await redis.hget(KEYS.game(code), 'completionIntent')
+  if (!raw) return
+  const intent = JSON.parse(raw) as CompletionIntent
+  if (intent.roundId !== roundId) return
+  const [roundRow] = await db
+    .select({ blackCardId: gameRounds.blackCardId })
+    .from(gameRounds)
+    .where(eq(gameRounds.id, roundId))
+  const order = await getSubOrder(code)
+  const resolved = order.map((key, index) => ({
+    submissionId: String(index),
+    fills: intent.submissions[key]?.fills ?? [],
+    ...(intent.submissions[key]?.eliminated ? { eliminated: true } : {}),
+  }))
+  // Card movement, activation, and the recoverable pause cursor commit together.
+  const randoms = Array.from(
+    {
+      length:
+        (await redis.llen(KEYS.discardWhite(code))) +
+        Object.values(intent.submissions).reduce(
+          (n, submission) => n + submission.fills.length,
+          0,
+        ) +
+        100,
+    },
+    () => randomInt(0, 0x7fffffff),
+  )
+  const activated = await redis.eval(
+    `
+    if redis.call('HGET', KEYS[1], 'completionIntent') ~= ARGV[1]
+      or redis.call('HEXISTS', KEYS[1], 'completionCards') == 1 then return nil end
+    local intent = cjson.decode(ARGV[1])
+    if ARGV[7] ~= '' then redis.call('RPUSH', KEYS[8], ARGV[7]) end
+    for _, submission in pairs(intent.submissions) do
+      for _, card in ipairs(submission.fills) do redis.call('RPUSH', KEYS[5], card.id) end
+    end
+    local players = redis.call('HGETALL', KEYS[3])
+    local active = 0
+    for i=1,#players,2 do
+      local p = cjson.decode(players[i+1])
+      if p.status == 'active' and p.role == 'player' then active = active + 1 end
+    end
+    if redis.call('LLEN', KEYS[4]) < active * 3 then
+      local ids = redis.call('LRANGE', KEYS[5], 0, -1)
+      local randoms = cjson.decode(ARGV[4])
+      for i=#ids,2,-1 do
+        local j = (randoms[((i-2) % #randoms)+1] % i) + 1
+        ids[i],ids[j] = ids[j],ids[i]
+      end
+      for _, id in ipairs(ids) do redis.call('RPUSH', KEYS[4], id) end
+      redis.call('DEL', KEYS[5])
+    end
+    local refill = {}
+    for key,_ in pairs(intent.submissions) do refill[string.gsub(key, ':gamble$', '')] = true end
+    local activated = {}
+    for i=1,#players,2 do
+      local p = cjson.decode(players[i+1])
+      if p.hasGambled then p.hasGambled = false end
+      if p.status == 'queued' then
+        p.status = 'active'
+        redis.call('RPUSH', KEYS[6], p.id)
+        table.insert(activated, p.id)
+        refill[p.id] = true
+      end
+      redis.call('HSET', KEYS[3], players[i], cjson.encode(p))
+    end
+    for pid,_ in pairs(refill) do
+      local hand = ARGV[3] .. pid
+      for i=redis.call('LLEN', hand)+1,10 do
+        local id = redis.call('LPOP', KEYS[4])
+        if not id then break end
+        redis.call('RPUSH', hand, id)
+      end
+      redis.call('EXPIRE', hand, ARGV[5])
+    end
+    redis.call('HSET', KEYS[2], 'resolvedSubmissions', ARGV[2], 'submissions', '{}', 'phase', 'transition', 'postResolveResumeAt', ARGV[6])
+    redis.call('HSET', KEYS[1], 'completionCards', cjson.encode(activated), 'completionResumeAt', ARGV[6])
+    for i=1,#KEYS do redis.call('EXPIRE', KEYS[i], ARGV[5]) end
+    redis.call('DEL', KEYS[7])
+    return cjson.encode(activated)
+  `,
+    8,
+    KEYS.game(code),
+    KEYS.round(code),
+    KEYS.players(code),
+    KEYS.deckWhite(code),
+    KEYS.discardWhite(code),
+    KEYS.czarOrder(code),
+    `${KEYS.round(code)}:submissions`,
+    KEYS.discardBlack(code),
+    raw,
+    JSON.stringify(resolved),
+    `game:${code}:hand:`,
+    JSON.stringify(randoms),
+    ROOM_TTL_SECONDS,
+    Date.now() + roundResultPauseMs(),
+    roundRow?.blackCardId ?? '',
+  )
+  const activation = Object.values(
+    JSON.parse(String(activated ?? (await redis.hget(KEYS.game(code), 'completionCards')) ?? '[]')),
+  ) as string[]
+  const recipients = [
+    ...new Set([...Object.keys(intent.submissions).map(resolvePlayerId), ...activation]),
+  ]
+  const handEvents = []
+  for (const pid of recipients) {
+    const ids = await state.getHand(code, pid)
+    const cards = ids.length
+      ? await db.select().from(whiteCards).where(inArray(whiteCards.id, ids))
+      : []
+    handEvents.push({
+      type: 'hand_update',
+      playerId: pid,
+      hand: ids
+        .map((id) => cards.find((c) => c.id === id)!)
+        .filter(Boolean)
+        .map((c) => ({ id: c.id, text: c.text })),
+    })
+  }
+  await redis.eval(
+    `
+    if redis.call('HGET', KEYS[1], 'completionIntent') ~= ARGV[1]
+      or redis.call('HEXISTS', KEYS[1], 'completionEndPublished') == 1 then return end
+    for _, event in ipairs(cjson.decode(ARGV[2])) do redis.call('PUBLISH', KEYS[2], cjson.encode(event)) end
+    redis.call('PUBLISH', KEYS[2], ARGV[3])
+    for i=3,#KEYS do redis.call('DEL', KEYS[i]) end
+    redis.call('HSET', KEYS[1], 'completionEndPublished', '1')
+  `,
+    9,
+    KEYS.game(code),
+    KEYS.channel(code),
     subOrderKey(code),
     resolvingKey(code),
     revealedKey(code),
@@ -1006,89 +1452,107 @@ export async function endRound(
     tieKeyFor(code),
     votersKeyFor(code),
     voterChoicesKeyFor(code),
+    raw,
+    JSON.stringify(handEvents),
+    JSON.stringify({ type: 'round_end', activatedPlayers: activation }),
   )
+}
 
-  const players = await state.getAllPlayers(code)
-  // Clear gamble flag for all players who gambled this round
-  for (const p of players) {
-    if (p.hasGambled) await state.updatePlayer(code, p.id, { hasGambled: false })
-  }
-  const activated: string[] = []
-  for (const p of players) {
-    if (p.status === 'queued') {
-      await state.updatePlayer(code, p.id, { status: 'active' })
-      await state.appendCzarOrder(code, p.id)
-      activated.push(p.id)
-      await state.refillHand(code, p.id, 10)
-    }
-  }
-
-  await state.setPhase(code, 'transition')
-  for (const pid of [...realSubmitterIds, ...activated]) await publishHandUpdate(code, pid)
-
-  await state.publishEvent(code, { type: 'round_end', activatedPlayers: activated })
-
-  // Hold on the resolved round (winner highlighted via round_won, hands
-  // refilled privately via hand_update) before *anything* that wipes the board —
-  // whether that's the next round_started or game_over on the deciding
-  // round. Hoisted above the game-over branches so the FINAL round gets
-  // the same paced reveal as every other round (it used to skip straight
-  // to the end screen). Server-driven so it can't be raced by an
-  // immediate round_started / game_over.
-  //
-  // S2-NEW: the pause used to be a bare `await sleep(...)`, which a
-  // process restart in this 4s window dropped on the floor — the round
-  // stayed in 'transition' forever. Persist a resume-at cursor before
-  // sleeping; the boot path schedules finalizeRoundAfterPause for any
-  // session that still has one when this process takes over.
-  const resumeAt = Date.now() + roundResultPauseMs()
-  await state.setPostResolveResumeAt(code, resumeAt)
-  await sleep(roundResultPauseMs())
+export async function endRound(
+  code: string,
+  _submitterIds: string[],
+  roundId: string,
+): Promise<void> {
+  await completeRoundCards(code, roundId)
+  const resumeAt = await state.getPostResolveResumeAt(code)
+  if (resumeAt === null) return
+  await sleep(Math.max(0, resumeAt - Date.now()))
   await finalizeRoundAfterPause(code)
 }
 
-// S2-NEW: the post-pause tail of endRound, extracted so the boot path
-// can run it for a session whose endRound was killed mid-sleep. The
-// resume-cursor take at the top doubles as an idempotency guard —
-// two concurrent callers (the original endRound continuation racing the
-// boot-scheduled timer) see one mismatch and the second bails. Use the
-// atomic GETDEL-equivalent (takePostResolveResumeAt) so the read+clear
-// can't be straddled by a parallel caller — see game-state.ts for why
-// the non-atomic version raced under fast E2E pause settings.
+// Read the pause cursor without consuming it. Startup and runtime retries use
+// the same continuation; acknowledgment follows durable end-game/round startup.
 async function finalizeRoundAfterPause(code: string): Promise<void> {
-  const cursor = await state.takePostResolveResumeAt(code)
-  if (cursor === null) return // already finalized by an earlier caller
+  const raw = await redis.hget(KEYS.game(code), 'completionIntent')
+  const intent = raw ? (JSON.parse(raw) as CompletionIntent) : null
+  const cursor = intent
+    ? Number(await redis.hget(KEYS.game(code), 'completionResumeAt'))
+    : await state.getPostResolveResumeAt(code)
+  if (!cursor) return
+  if (cursor > Date.now()) await sleep(cursor - Date.now())
+  if (resettingRooms.has(code)) return
+  if (raw && (await redis.hget(KEYS.game(code), 'completionIntent')) !== raw) return
+  const acknowledge = async () => {
+    if (raw)
+      await redis.eval(
+        `
+      if redis.call('HGET', KEYS[1], 'completionIntent') ~= ARGV[1] then return end
+      redis.call('HDEL', KEYS[1], 'completionIntent', 'completionScores', 'completionPublished', 'completionCards', 'completionEndPublished', 'completionResumeAt', 'completionGameEnd', 'completionGameOverPublished')
+      if redis.call('HGET', KEYS[2], 'roundId') == ARGV[2] then redis.call('HDEL', KEYS[2], 'postResolveResumeAt') end
+    `,
+        2,
+        KEYS.game(code),
+        KEYS.round(code),
+        raw,
+        intent!.roundId,
+      )
+    if (!raw)
+      await redis.eval(
+        `
+      if redis.call('HGET', KEYS[1], 'postResolveResumeAt') == ARGV[1] then redis.call('HDEL', KEYS[1], 'postResolveResumeAt') end
+    `,
+        1,
+        KEYS.round(code),
+        cursor,
+      )
+  }
 
   const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
   if (!session) return
   // The session may have been ended/reset/abandoned out from under us
   // (e.g. host clicked rematch after the round resolved but before the
   // pause finished). Bail rather than start a phantom next round.
+  const pendingEnd = await redis.hget(KEYS.game(code), 'completionGameEnd')
+  if (pendingEnd) {
+    const target = JSON.parse(pendingEnd) as { mode: GameOverMode; winnerId?: string }
+    await endGame(code, target.mode, target.winnerId)
+    await acknowledge()
+    return
+  }
   if (session.status !== 'active') return
   const config = session.config as GameConfig
+  const conclude = async (mode: GameOverMode, winnerId?: string) => {
+    await redis.hset(KEYS.game(code), 'completionGameEnd', JSON.stringify({ mode, winnerId }))
+    await endGame(code, mode, winnerId)
+    await acknowledge()
+  }
   const refreshed = await state.getAllPlayers(code)
 
   // Happy Ending: this was the forced "Make a Haiku" final round —
   // end now regardless of score; the Haiku round winner wins the game.
   if (await redis.hget(KEYS.game(code), 'happyEndingFinal')) {
-    await redis.hdel(KEYS.game(code), 'happyEndingFinal', 'happyEndingArmed')
     const { winningPlayerId } = await state.getRoundOutcome(code)
-    await endGame(code, 'happy_ending', winningPlayerId ?? undefined)
+    await conclude('happy_ending', winningPlayerId ?? undefined)
+    await redis.hdel(KEYS.game(code), 'happyEndingFinal', 'happyEndingArmed')
     return
   }
 
   const winnerPlayer = refreshed.find((p) => p.score >= config.roundsToWin)
   if (winnerPlayer) {
-    await endGame(code, winnerPlayer.isRando ? 'rando_won' : 'normal', winnerPlayer.id)
+    await conclude(winnerPlayer.isRando ? 'rando_won' : 'normal', winnerPlayer.id)
     return
   }
 
-  const nextRound = (await state.getCurrentRound(code)) + 1
-  await startRound(code, nextRound)
+  const nextRound = intent ? intent.roundNumber + 1 : (await state.getCurrentRound(code)) + 1
+  try {
+    await startRound(code, nextRound)
+  } catch (err) {
+    if (!(err instanceof Error) || err.message !== 'deck_exhausted') throw err
+  }
+  await acknowledge()
 }
 
 export async function endGame(code: string, mode: GameOverMode, winnerId?: string): Promise<void> {
-  await state.updateLiveRoom(code, { status: 'ended' })
   const players = await state.getAllPlayers(code)
   const finalScores = toPlayerScores(players, null)
 
@@ -1098,7 +1562,24 @@ export async function endGame(code: string, mode: GameOverMode, winnerId?: strin
     .where(eq(gameSessions.code, code))
     .returning({ createdAt: gameSessions.createdAt })
 
-  await state.publishEvent(code, { type: 'game_over', finalScores, winnerId: winnerId ?? '', mode })
+  await state.updateLiveRoom(code, { status: 'ended' })
+  const completion = await redis.hget(KEYS.game(code), 'completionIntent')
+  const event = JSON.stringify({ type: 'game_over', finalScores, winnerId: winnerId ?? '', mode })
+  if (completion)
+    await redis.eval(
+      `
+    if redis.call('HGET', KEYS[1], 'completionIntent') ~= ARGV[1]
+      or redis.call('HEXISTS', KEYS[1], 'completionGameOverPublished') == 1 then return end
+    redis.call('PUBLISH', KEYS[2], ARGV[2])
+    redis.call('HSET', KEYS[1], 'completionGameOverPublished', '1')
+  `,
+      2,
+      KEYS.game(code),
+      KEYS.channel(code),
+      completion,
+      event,
+    )
+  else await redis.publish(KEYS.channel(code), event)
 
   // game_over carries no totalRounds/durationMs; the server is the only
   // place with authoritative values, so cab_game_ended is emitted here.
@@ -1120,6 +1601,24 @@ export async function endGame(code: string, mode: GameOverMode, winnerId?: strin
 // (`lobby`) or starts a fresh game immediately (`rematch`). The session
 // must be `ended` — claim it atomically before clearing state.
 export async function resetGame(
+  code: string,
+  mode: ResetMode,
+  hostPlayerId?: string,
+): Promise<void> {
+  // A reset cannot overtake a continuation that is awaiting SQL or its pause.
+  // Block retry entry first, then drain the existing owner before wiping state.
+  if (resettingRooms.has(code))
+    throw new GameCommandError('invalid_state', 'A reset is already in progress')
+  resettingRooms.add(code)
+  try {
+    await completionTasks.get(code)?.catch(() => {})
+    await performResetGame(code, mode, hostPlayerId)
+  } finally {
+    resettingRooms.delete(code)
+  }
+}
+
+async function performResetGame(
   code: string,
   mode: ResetMode,
   hostPlayerId?: string,
@@ -1164,6 +1663,19 @@ export async function resetGame(
     .delete(gamePlayers)
     .where(and(eq(gamePlayers.sessionId, session.id), eq(gamePlayers.isRando, true)))
 
+  await redis.hdel(
+    KEYS.game(code),
+    'completionIntent',
+    'completionScores',
+    'completionPublished',
+    'completionCards',
+    'completionEndPublished',
+    'completionResumeAt',
+    'completionGameEnd',
+    'completionGameOverPublished',
+    'roundStartCard',
+    'roundStartPublished',
+  )
   for (const p of before) {
     // Not carried: Rando (re-created by startGame) and terminally
     // dropped players (no live socket / cleared session — they re-join
@@ -1509,23 +2021,32 @@ async function resolveDroppedCzar(
   if (!order.length) return
   if (config.rules.includes('survival')) {
     if (phase !== 'reveal' && phase !== 'eliminating') return
-    const remaining = await state.autoEliminateRemaining(
-      code,
-      roundId,
-      phase,
-      shuffle(order),
-      order,
-    )
-    if (!remaining.length) return
     const submissions = await state.getSubmissions(code)
-    if (phase === 'reveal') await finishClaimedReveal(code, roundId, submissions)
+    const remaining = shuffle(order.filter((key) => !submissions[key]?.eliminated))
+    if (!remaining.length) return
+    const winnerKey = remaining.at(-1)!
     for (const key of remaining.slice(0, -1))
-      await state.publishEvent(code, {
-        type: 'card_eliminated',
-        submissionId: publicIdForKey(order, key),
-        byPlayerId: czarId,
+      submissions[key] = { ...submissions[key]!, eliminated: true }
+    const decision = decideNormalRound({
+      winnerKey,
+      submissions,
+      players: await state.getAllPlayers(code),
+    })
+    if (!decision) return
+    if (
+      await claimCompletionIntent(code, roundId, phase, {
+        winnerPlayerId: decision.winnerPlayerId,
+        submissionId: publicIdForKey(order, winnerKey),
+        submissions,
+        czarId,
+        adjustments: decision.scoreAdjustments,
+        winningFills: decision.winningFills,
+        fallbackEliminations: remaining
+          .slice(0, -1)
+          .map((key) => ({ submissionId: publicIdForKey(order, key), byPlayerId: czarId })),
       })
-    await finishSurvivalOutcome(code, roundId, remaining.at(-1)!, submissions, order)
+    )
+      await continueRoundCompletion(code)
   } else if (config.rules.includes('serious_business')) {
     if (phase !== 'reveal' && phase !== 'ranking') return
     await resolveRanking(
@@ -1545,26 +2066,6 @@ async function resolveDroppedCzar(
 // Gamble submissions are stored under `${playerId}:gamble` in the submissions hash.
 function resolvePlayerId(key: string): string {
   return key.endsWith(':gamble') ? key.slice(0, -7) : key
-}
-
-// Settles the gambling point-transfer for a resolved round. The wagered
-// point is *not* debited at `gamble()` time — it is debited here, so a
-// round that voids (never calls this) correctly leaves wagers intact.
-// Keyed off the authoritative `hasGambled` player flag rather than
-// submission keys, so it is correct even if a gambler submitted 0 or 1
-// times instead of 2 (S3-2). Every player who wagered and did *not* win
-// forfeits their point to the round winner; a winning gambler keeps
-// their point (no debit). Returns the points the winner gains from
-// forfeited wagers (the +1 win bonus is added by the caller).
-async function settleGambles(code: string, winnerPlayerId: string): Promise<number> {
-  const players = await state.getAllPlayers(code)
-  let transfer = 0
-  for (const p of players) {
-    if (!p.hasGambled || p.id === winnerPlayerId) continue
-    await state.adjustScore(code, p.id, -1)
-    transfer += 1
-  }
-  return transfer
 }
 
 // Recovery and runtime commands share missing-only identity hydration so a
@@ -1637,37 +2138,16 @@ export async function castVote(
 
   const winner = await state.getPlayer(code, winnerPlayerId)
   if (!winner) return
-  if (
-    !(await state.claimRoundOutcome(code, roundId, 'waiting', winnerPlayerId, winnerSubmissionId))
+  await recordSingleWinnerIntent(
+    code,
+    roundId,
+    winnerKey,
+    submissions,
+    winnerSubmissionId,
+    null,
+    tally,
   )
-    return
-  const transfer = await settleGambles(code, winnerPlayerId)
-  await state.adjustScore(code, winnerPlayerId, 1 + transfer)
-
-  const allPlayers = await state.getAllPlayers(code)
-  const scores = toPlayerScores(allPlayers, null)
-
-  // Winner and terminal phase were persisted by the common outcome claim.
-  await state.publishEvent(code, {
-    type: 'round_won',
-    winningPlayerId: winnerPlayerId,
-    winningSubmissionId: winnerSubmissionId,
-    winnerId: winnerPlayerId,
-    submissionId: winnerSubmissionId,
-    scores,
-  })
-  captureServerEvent(await distinctIdForHost(code), 'cab_round_voted', {
-    roomCode: code,
-    winnerId: winnerPlayerId,
-    voteSpread: tally,
-  })
-  await redis.del(voteTallyKeyFor(code))
-  await persistRoundOutcome(code, {
-    winnerPlayerId,
-    winningFills: submissions[winnerKey]?.fills ?? [],
-    voteTally: tally,
-  })
-  await endRound(code, Object.keys(submissions), roundId)
+  await continueRoundCompletion(code)
 }
 
 export async function eliminateSubmission(
@@ -1715,21 +2195,12 @@ export async function eliminateSubmission(
   )
   if (winnerKey === null)
     throw new GameCommandError('invalid_state', 'This elimination is no longer available')
+  submissions[pid] = { ...submissions[pid]!, eliminated: true }
   await state.publishEvent(code, { type: 'card_eliminated', submissionId, byPlayerId })
   if (winnerKey) {
     const winnerPlayerId = resolvePlayerId(winnerKey)
     const winner = await state.getPlayer(code, winnerPlayerId)
     if (!winner) return
-    if (
-      !(await state.claimRoundOutcome(
-        code,
-        roundId,
-        'eliminating',
-        winnerPlayerId,
-        publicIdForKey(order, winnerKey),
-      ))
-    )
-      return
     await finishSurvivalOutcome(code, roundId, winnerKey, submissions, order)
   } else if (nextPlayer) {
     await state.publishEvent(code, { type: 'elimination_turn', playerId: nextPlayer.id })
@@ -1743,31 +2214,15 @@ async function finishSurvivalOutcome(
   submissions: Record<string, Submission>,
   order: string[],
 ): Promise<void> {
-  const winnerPlayerId = resolvePlayerId(winnerKey)
-  const transfer = await settleGambles(code, winnerPlayerId)
-  await state.adjustScore(code, winnerPlayerId, 1 + transfer)
-
-  const allPlayers = await state.getAllPlayers(code)
-  const scores = toPlayerScores(allPlayers, null)
-  // Winner and terminal phase were persisted by the common outcome claim.
-  await state.publishEvent(code, {
-    type: 'round_won',
-    winningPlayerId: winnerPlayerId,
-    winningSubmissionId: publicIdForKey(order, winnerKey),
-    winnerId: winnerPlayerId,
-    submissionId: publicIdForKey(order, winnerKey),
-    scores,
-  })
-  captureServerEvent(await distinctIdForHost(code), 'cab_round_eliminated', {
-    roomCode: code,
-    winnerId: winnerPlayerId,
-    totalEliminations: Object.keys(submissions).length - 1,
-  })
-  await persistRoundOutcome(code, {
-    winnerPlayerId,
-    winningFills: submissions[winnerKey]?.fills ?? [],
-  })
-  await endRound(code, Object.keys(submissions), roundId)
+  await recordSingleWinnerIntent(
+    code,
+    roundId,
+    winnerKey,
+    submissions,
+    publicIdForKey(order, winnerKey),
+    null,
+  )
+  await continueRoundCompletion(code)
 }
 
 export async function applyRanking(code: string, czarId: string, ranking: string[]): Promise<void> {
@@ -1792,11 +2247,6 @@ async function resolveRanking(
     new Set(keys).size !== keys.length
   )
     throw new GameCommandError('invalid_state', 'Ranking must use distinct current submissions')
-  if (
-    !(await state.claimRoundOutcome(code, roundId, phase, resolvePlayerId(keys[0]!), ranking[0]!))
-  )
-    return
-  if (phase === 'reveal') await finishClaimedReveal(code, roundId, submissions)
   const points = [3, 2, 1] as const
   const scoresDelta: Record<string, number> = {}
   const rankedSubmissions: Submission[] = []
@@ -1813,7 +2263,7 @@ async function resolveRanking(
     const pts = points[i] ?? 1
     scoresDelta[pid] = pts
     const player = await state.getPlayer(code, pid)
-    if (player) await state.adjustScore(code, pid, pts)
+    if (!player) throw new Error('ranked player not found')
     if (rankedSubmissions.length === 0) {
       topWinnerId = pid
       topFills = submission.fills
@@ -1821,24 +2271,18 @@ async function resolveRanking(
     rankedSubmissions.push({ ...submission, submissionId: sid, rank: (i + 1) as 1 | 2 | 3 })
   }
 
-  await state.setRoundRanking(code, rankedSubmissions)
-  await state.publishEvent(code, {
-    type: 'round_ranked',
-    winningPlayerId: topWinnerId!,
-    winningSubmissionId: ranking[0]!,
-    ranking: rankedSubmissions,
-    scoresDelta,
-  })
-  captureServerEvent(await distinctIdForHost(code), 'cab_round_ranked', {
-    roomCode: code,
-    top3: rankedSubmissions.map((s) => s.playerId).filter(Boolean),
-  })
-  await persistRoundOutcome(code, {
-    winnerPlayerId: topWinnerId,
-    winningFills: topFills,
-    ranking: rankedSubmissions,
-  })
-  await endRound(code, Object.keys(submissions), roundId)
+  if (
+    await claimCompletionIntent(code, roundId, phase, {
+      winnerPlayerId: topWinnerId!,
+      submissionId: ranking[0]!,
+      submissions,
+      czarId: null,
+      adjustments: Object.entries(scoresDelta).map(([playerId, delta]) => ({ playerId, delta })),
+      winningFills: topFills,
+      ranking: rankedSubmissions,
+    })
+  )
+    await continueRoundCompletion(code)
 }
 
 // Push the player's current hand to its owner as a private `hand_update`.
@@ -1972,7 +2416,23 @@ export async function confessDiscard(
 
 export async function applyPackingHeat(code: string, playerIds: string[]): Promise<void> {
   for (const pid of playerIds) {
-    await state.drawToHand(code, pid, 1)
+    await redis.eval(
+      `
+      local round = redis.call('HGET', KEYS[1], 'roundId')
+      if not round or redis.call('HGET', KEYS[2], 'packingHeat:' .. ARGV[1]) == round then return end
+      local card = redis.call('LPOP', KEYS[3])
+      if card then redis.call('RPUSH', KEYS[4], card) end
+      redis.call('HSET', KEYS[2], 'packingHeat:' .. ARGV[1], round)
+      redis.call('EXPIRE', KEYS[4], ARGV[2])
+    `,
+      4,
+      KEYS.round(code),
+      KEYS.game(code),
+      KEYS.deckWhite(code),
+      KEYS.hand(code, pid),
+      pid,
+      ROOM_TTL_SECONDS,
+    )
     await publishHandUpdate(code, pid)
   }
 }
