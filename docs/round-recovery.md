@@ -11,7 +11,8 @@ The continuation uses these checkpoints:
 - Public result publication and `completionPublished` commit together, after SQL.
 - Submitted-card discards, refills, queued-player activation, gamble cleanup and
   the pause deadline commit with `completionCards` in one Redis script.
-- Private hand updates and public `round_end` publish atomically with a marker.
+- Private hand updates, public `round_end`, and removal of the old submission,
+  reveal and voting cursors commit atomically with `completionEndPublished`.
 - Successor startup reserves its black card before SQL, accepts its previously
   inserted round row, and checkpoints initialization and announcement. Rando's
   draw and Packing Heat's extra cards are idempotent during startup replay.
@@ -43,3 +44,6 @@ The suite injects actual PostgreSQL trigger failures and lost Redis acknowledgme
 at checkpoint boundaries. Assertions use the engine's public event stream and
 subsequent accepted play: one result, one round end, one successor/game-over,
 retained cards in order, unique ten-card refills and exactly one queued activation.
+The end-publication failure regression resolves the successor round fully; a real
+WebSocket rejoin preserves the live Survival elimination flags. A local HTTP
+telemetry collector verifies event names, actor identity and required properties.

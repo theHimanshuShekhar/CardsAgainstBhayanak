@@ -1,7 +1,26 @@
 import { afterAll, expect, it, vi } from 'vitest'
 import postgres from 'postgres'
-import type { Card, PlayerScore, RuleId } from '../../src/lib/types'
+import { createServer } from 'node:http'
+import { gunzipSync } from 'node:zlib'
+import type { Card, PlayerScore, RuleId, SessionState } from '../../src/lib/types'
 
+type Telemetry = { event: string; distinct_id: string; properties: Record<string, unknown> }
+const telemetry: Telemetry[] = []
+const expectedTelemetry: Telemetry[] = []
+const telemetryServer = createServer(async (request, response) => {
+  const chunks: Buffer[] = []
+  for await (const chunk of request) chunks.push(Buffer.from(chunk))
+  const body = Buffer.concat(chunks)
+  const payload = JSON.parse(
+    (request.headers['content-encoding'] === 'gzip' ? gunzipSync(body) : body).toString(),
+  ) as { batch?: Telemetry[] }
+  telemetry.push(...(payload.batch ?? []))
+  response.writeHead(200, { 'content-type': 'application/json' }).end('{}')
+})
+await new Promise<void>((resolve) => telemetryServer.listen(0, '127.0.0.1', resolve))
+const telemetryAddress = telemetryServer.address() as import('node:net').AddressInfo
+process.env['POSTHOG_API_KEY'] = 'issue38-local-telemetry-fixture'
+process.env['POSTHOG_HOST'] = `http://127.0.0.1:${telemetryAddress.port}`
 const sql = postgres(process.env['DATABASE_URL']!, { onnotice: () => {} })
 const { db } = await import('../../src/db')
 const { gameSessions, gamePlayers, gameRounds, packs } = await import('../../src/db/schema')
@@ -10,6 +29,10 @@ const state = await import('../../src/lib/game-state')
 const engine = await import('../../src/lib/game-engine')
 const { redis, KEYS } = await import('../../src/lib/redis')
 afterAll(async () => {
+  await (await import('../../src/lib/posthog-server')).shutdownPostHog()
+  await new Promise<void>((resolve, reject) =>
+    telemetryServer.close((error) => (error ? reject(error) : resolve())),
+  )
   await redis.quit()
   await sql.end()
 })
@@ -23,6 +46,8 @@ type Event = {
   activatedPlayers?: string[]
   czarId?: string
   submissionIndex?: number
+  submissionId?: string
+  winnerId?: string
   fills?: Card[]
   prompt?: { pick: number }
 }
@@ -37,6 +62,8 @@ const cases = [
   ['normal', 'roundStartPublished'],
   ['normal', 'end_game_sql'],
   ['normal', 'completionGameOverPublished'],
+  ['normal', 'completionEndPublished'],
+  ['survival', 'completionEndPublished'],
   ['godmode', 'closed_ballot'],
   ['survival', 'last_elimination'],
   ['normal', 'reset_during_pause'],
@@ -61,6 +88,11 @@ it.each(cases)(
     }
     const [session] = await db.insert(gameSessions).values({ code, config }).returning()
     let restoreFault = () => {}
+    let snapshotSocket: WebSocket | undefined
+    let snapshotServer: import('srvx').Server | undefined
+    const originalPause = process.env['CAB_ROUND_RESULT_PAUSE_MS']
+    if (mode === 'survival' && fault === 'completionEndPublished')
+      process.env['CAB_ROUND_RESULT_PAUSE_MS'] = '3000'
     try {
       const players = await db
         .insert(gamePlayers)
@@ -179,7 +211,13 @@ it.each(cases)(
                   Boolean(JSON.parse(result).leaders)
                 : fault === 'last_elimination'
                   ? String(args[0]).includes('#remaining == 1') && Boolean(result)
-                  : String(args[0]).includes(`'${fault}'`)
+                  : String(args[0]).includes(
+                      fault === 'completionCards'
+                        ? "'completionCards', cjson.encode(activated)"
+                        : fault === 'roundStartPublished'
+                          ? "'roundStartPublished', ARGV[1]"
+                          : `'${fault}', '1'`,
+                    )
             if (!injected && matches) {
               injected = true
               throw new Error('injected lost Redis acknowledgement')
@@ -213,11 +251,60 @@ it.each(cases)(
       }
       await expect(resolve()).rejects.toThrow()
       restoreFault()
+      if (mode === 'survival' && fault === 'completionEndPublished') {
+        const { serve } = await import('srvx')
+        const { gameWebSocketPlugin } = await import('../../src/ws/server')
+        const { signSessionToken } = await import('../../src/lib/session-token')
+        process.env['SESSION_SECRET'] ??= 'issue38-integration-only-session-secret'
+        snapshotServer = serve({
+          port: 0,
+          hostname: '127.0.0.1',
+          silent: true,
+          plugins: [gameWebSocketPlugin],
+          fetch: () => new Response('Not found', { status: 404 }),
+        })
+        await snapshotServer.ready()
+        const socketEvents: Array<{ type: string; state?: SessionState }> = []
+        snapshotSocket = new WebSocket(
+          `${snapshotServer.url!.replace(/^http/, 'ws')}/api/games/${code}/ws`,
+        )
+        snapshotSocket.onmessage = (event) => socketEvents.push(JSON.parse(String(event.data)))
+        await new Promise<void>((resolve) => {
+          snapshotSocket!.onopen = () => resolve()
+        })
+        snapshotSocket.send(
+          JSON.stringify({
+            type: 'auth',
+            sessionToken: await signSessionToken({ playerId: queued!.id, roomCode: code }),
+          }),
+        )
+        await expect.poll(() => socketEvents.some((event) => event.type === 'auth_ok')).toBe(true)
+        snapshotSocket.send(JSON.stringify({ type: 'rejoin' }))
+        await expect
+          .poll(() => socketEvents.some((event) => event.type === 'state_snapshot'))
+          .toBe(true)
+        const snapshot = socketEvents.find((event) => event.type === 'state_snapshot')!.state!
+        expect(snapshot.phase).toBe('transition')
+        expect(
+          events
+            .filter((event) => event.type === 'card_eliminated')
+            .map((event) => event.submissionId)
+            .sort(),
+        ).toEqual(['0', '1'])
+        expect(
+          snapshot.submissions
+            .filter((submission) => submission.eliminated)
+            .map((submission) => submission.submissionId)
+            .sort(),
+        ).toEqual(['0', '1'])
+      }
       for (const table of ['game_rounds', 'game_sessions'])
         await sql.unsafe(`DROP TRIGGER IF EXISTS fail_completion ON ${table}`)
       await sql.unsafe('DROP FUNCTION IF EXISTS fail_completion()')
-      await engine.restoreRoundTimers()
-      await engine.restoreRoundTimers()
+      if (fault !== 'runtime_outcome_sql') {
+        await engine.restoreRoundTimers()
+        await engine.restoreRoundTimers()
+      }
       const terminal = finishesGame ? 'game_over' : 'round_started'
       await expect
         .poll(
@@ -228,6 +315,18 @@ it.each(cases)(
         .toBe(1)
       const outcomes = events.filter((e) => e.type === 'round_won' || e.type === 'round_ranked')
       expect(outcomes).toHaveLength(1)
+      if (fault === 'outcome_sql')
+        expectedTelemetry.push({
+          event: 'cab_winner_picked',
+          distinct_id: czarId!,
+          properties: { roomCode: code, winnerId: outcomes[0]!.winnerId!, isRando: false },
+        })
+      if (mode === 'survival' && fault === 'last_elimination')
+        expectedTelemetry.push({
+          event: 'cab_round_eliminated',
+          distinct_id: players[0]!.id,
+          properties: { roomCode: code, winnerId: outcomes[0]!.winnerId!, totalEliminations: 2 },
+        })
       if (mode !== 'serious_business')
         expect(outcomes[0]!.scores!.map((p) => p.score).sort()).toEqual([0, 0, 0, 0, 1])
       const ends = events.filter((e) => e.type === 'round_end')
@@ -244,6 +343,23 @@ it.each(cases)(
         expect(ids.slice(0, retained.length)).toEqual(retained)
       }
       expect(new Set(delivered).size).toBe(delivered.length)
+      if (mode === 'normal' && fault === 'completionEndPublished') {
+        const next = events.filter((e) => e.type === 'round_started').at(-1)!
+        for (const player of [...players, queued!].filter((p) => p.id !== next.czarId)) {
+          await engine.submitCards(
+            code,
+            player.id,
+            (await state.getHand(code, player.id)).slice(0, next.prompt!.pick),
+          )
+        }
+        await expect.poll(() => events.filter((e) => e.type === 'card_revealed').length).toBe(7)
+        await engine.pickWinner(code, next.czarId!, '0')
+        await expect
+          .poll(() => events.filter((e) => e.type === 'round_started' && e.round === 3).length)
+          .toBe(1)
+        expect(events.filter((e) => e.type === 'round_won')).toHaveLength(2)
+        return
+      }
       // A recovered successor accepts the queued player's real hand as a play.
       if (!finishesGame) {
         const next = events.filter((e) => e.type === 'round_started').at(-1)!
@@ -255,7 +371,15 @@ it.each(cases)(
         )
       }
     } finally {
+      process.env['CAB_ROUND_RESULT_PAUSE_MS'] = originalPause
       restoreFault()
+      if (snapshotSocket) {
+        snapshotSocket.close()
+        await new Promise<void>((resolve) => {
+          snapshotSocket!.onclose = () => resolve()
+        })
+      }
+      await snapshotServer?.close(true)
       for (const table of ['game_rounds', 'game_sessions'])
         await sql.unsafe(`DROP TRIGGER IF EXISTS fail_completion ON ${table}`)
       await sql.unsafe('DROP FUNCTION IF EXISTS fail_completion()')
@@ -269,3 +393,15 @@ it.each(cases)(
   },
   20000,
 )
+
+it('preserves normal and Survival analytics event names, actor identity and required fields', async () => {
+  await (await import('../../src/lib/posthog-server')).shutdownPostHog()
+  expect(expectedTelemetry).toHaveLength(2)
+  for (const expected of expectedTelemetry)
+    expect(telemetry).toContainEqual(
+      expect.objectContaining({
+        ...expected,
+        properties: expect.objectContaining(expected.properties),
+      }),
+    )
+})

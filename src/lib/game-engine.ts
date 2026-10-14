@@ -1083,6 +1083,7 @@ async function persistRoundOutcome(
 type CompletionIntent = {
   roundId: string
   roundNumber: number
+  mode?: 'normal' | 'survival' | 'godmode' | 'serious_business'
   winnerPlayerId: string
   submissionId: string
   submissions: Record<string, Submission>
@@ -1100,6 +1101,14 @@ async function claimCompletionIntent(
   phase: string,
   outcome: Omit<CompletionIntent, 'roundId' | 'roundNumber'>,
 ): Promise<boolean> {
+  const config = JSON.parse((await redis.hget(KEYS.game(code), 'config')) ?? '{}') as GameConfig
+  const mode = config.rules?.includes('survival')
+    ? 'survival'
+    : config.rules?.includes('godmode')
+      ? 'godmode'
+      : config.rules?.includes('serious_business')
+        ? 'serious_business'
+        : 'normal'
   return (
     (await redis.eval(
       `
@@ -1119,7 +1128,7 @@ async function claimCompletionIntent(
       phase,
       outcome.winnerPlayerId,
       outcome.submissionId,
-      JSON.stringify({ ...outcome, roundId, roundNumber: await state.getCurrentRound(code) }),
+      JSON.stringify({ ...outcome, mode, roundId, roundNumber: await state.getCurrentRound(code) }),
       ROOM_TTL_SECONDS,
     )) === 1
   )
@@ -1263,16 +1272,38 @@ async function runRoundCompletion(code: string): Promise<void> {
     ),
   )
   if (published === 1) {
-    const name = intent.ranking
-      ? 'cab_round_ranked'
-      : intent.voteTally
-        ? 'cab_round_voted'
-        : intent.czarId
-          ? 'cab_winner_picked'
-          : 'cab_round_eliminated'
-    captureServerEvent(await distinctIdForHost(code), name, {
+    const rules =
+      (JSON.parse((await redis.hget(KEYS.game(code), 'config')) ?? '{}') as GameConfig).rules ?? []
+    const mode =
+      intent.mode ??
+      (intent.ranking
+        ? 'serious_business'
+        : intent.voteTally
+          ? 'godmode'
+          : rules.includes('survival')
+            ? 'survival'
+            : 'normal')
+    const name =
+      mode === 'serious_business'
+        ? 'cab_round_ranked'
+        : mode === 'godmode'
+          ? 'cab_round_voted'
+          : mode === 'survival'
+            ? 'cab_round_eliminated'
+            : 'cab_winner_picked'
+    const actor =
+      mode === 'normal' && intent.czarId
+        ? await distinctIdFor(code, intent.czarId)
+        : await distinctIdForHost(code)
+    captureServerEvent(actor, name, {
       roomCode: code,
       winnerId: intent.winnerPlayerId,
+      ...(mode === 'normal'
+        ? { isRando: (await state.getPlayer(code, intent.winnerPlayerId))?.isRando ?? false }
+        : {}),
+      ...(mode === 'survival'
+        ? { totalEliminations: Object.keys(intent.submissions).length - 1 }
+        : {}),
       ...(intent.voteTally ? { voteSpread: intent.voteTally } : {}),
       ...(intent.ranking
         ? { top3: intent.ranking.map((submission) => submission.playerId).filter(Boolean) }
@@ -1408,16 +1439,12 @@ async function completeRoundCards(code: string, roundId: string): Promise<void> 
       or redis.call('HEXISTS', KEYS[1], 'completionEndPublished') == 1 then return end
     for _, event in ipairs(cjson.decode(ARGV[2])) do redis.call('PUBLISH', KEYS[2], cjson.encode(event)) end
     redis.call('PUBLISH', KEYS[2], ARGV[3])
+    for i=3,#KEYS do redis.call('DEL', KEYS[i]) end
     redis.call('HSET', KEYS[1], 'completionEndPublished', '1')
   `,
-    2,
+    9,
     KEYS.game(code),
     KEYS.channel(code),
-    raw,
-    JSON.stringify(handEvents),
-    JSON.stringify({ type: 'round_end', activatedPlayers: activation }),
-  )
-  await redis.del(
     subOrderKey(code),
     resolvingKey(code),
     revealedKey(code),
@@ -1425,6 +1452,9 @@ async function completeRoundCards(code: string, roundId: string): Promise<void> 
     tieKeyFor(code),
     votersKeyFor(code),
     voterChoicesKeyFor(code),
+    raw,
+    JSON.stringify(handEvents),
+    JSON.stringify({ type: 'round_end', activatedPlayers: activation }),
   )
 }
 
@@ -2117,6 +2147,7 @@ export async function eliminateSubmission(
   )
   if (winnerKey === null)
     throw new GameCommandError('invalid_state', 'This elimination is no longer available')
+  submissions[pid] = { ...submissions[pid]!, eliminated: true }
   await state.publishEvent(code, { type: 'card_eliminated', submissionId, byPlayerId })
   if (winnerKey) {
     const winnerPlayerId = resolvePlayerId(winnerKey)
