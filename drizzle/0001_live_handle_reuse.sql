@@ -1,0 +1,2 @@
+ALTER TABLE "game_players" DROP CONSTRAINT "game_players_session_id_username_unique";--> statement-breakpoint
+CREATE UNIQUE INDEX "unique_live_handle_per_session" ON "game_players" USING btree ("session_id","username") WHERE "game_players"."status" != 'dropped';
