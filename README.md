@@ -172,3 +172,5 @@ The disposable integration drill runs with `CAB_MIGRATION_TEST_URL=postgres://ca
 ## Database storage and disaster recovery
 
 The checked-in PostgreSQL volume uses deployment-specific SMB/CIFS storage; its durability is unverified. See [storage assessment, supported local-volume configuration, reversible cutover and recovery drill](docs/operations/database-recovery.md) before changing volumes. Run `pnpm test:storage` for the isolated Docker crash/backup/restore drill.
+
+Rich previews and public HTTPS origin configuration: [share preview deployment guide](docs/operations/share-previews.md).
