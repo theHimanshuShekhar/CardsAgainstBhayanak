@@ -360,3 +360,58 @@ test('pending succession preserves a committed successor after an uncertain ackn
     successor.ws.close()
   }
 })
+
+test('configuration membership recheck does not recover succession while holding the room lock', async () => {
+  const { default: postgres } = await import('postgres')
+  const { default: Redis } = await import('ioredis')
+  const database = postgres(process.env['DATABASE_URL']!)
+  const redis = new Redis(process.env['REDIS_URL']!)
+  const { host, config } = await lobby()
+  let editing: Promise<Response> | undefined
+  let completed = false
+  const controller = new AbortController()
+  try {
+    await database.begin(async (tx) => {
+      await tx`SELECT id FROM game_sessions WHERE code = ${host.roomCode} FOR UPDATE`
+      editing = fetch(`${BASE}/api/games/${host.roomCode}/config`, {
+        method: 'PATCH',
+        signal: controller.signal,
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${host.sessionToken}`,
+        },
+        body: JSON.stringify({ config }),
+      }).finally(() => {
+        completed = true
+      })
+      // Wait for initial auth to finish and the real config request to queue
+      // for our scheduling lock. Then simulate an unfinished succession.
+      await expect
+        .poll(async () => {
+          const [row] = await database`SELECT count(*)::int AS blocked FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'
+            AND query LIKE '%game_sessions%' AND pid <> pg_backend_pid()`
+          return row!.blocked
+        })
+        .toBeGreaterThan(0)
+      await redis.hset(`game:${host.roomCode}`, 'hostSuccessionPending', '1')
+    })
+    const deadline = setTimeout(() => controller.abort(), 3000)
+    try {
+      expect((await editing!).status).toBe(204)
+    } finally {
+      clearTimeout(deadline)
+    }
+  } finally {
+    if (!completed || controller.signal.aborted) {
+      controller.abort()
+      // Failure cleanup only: this dedicated database belongs to this test
+      // process. Release any nested app transaction so teardown cannot hang.
+      await database`SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+        WHERE datname = current_database() AND pid <> pg_backend_pid()`
+      await editing?.catch(() => {})
+    }
+    await redis.quit()
+    await database.end()
+  }
+})

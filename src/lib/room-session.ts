@@ -8,35 +8,40 @@ export type RoomParticipation =
 
 // SQL rows preserve history beyond the live room's lifetime. Read room
 // existence and membership together so surviving player keys cannot grant access.
+export async function checkRoomMembership(
+  code: string,
+  playerId: string,
+): Promise<RoomParticipation> {
+  const raw = await redis.eval(
+    `
+    if not redis.call('HGET', KEYS[1], 'status') then return nil end
+    return redis.call('HGET', KEYS[2], ARGV[1])
+    `,
+    2,
+    KEYS.game(code),
+    KEYS.players(code),
+    playerId,
+  )
+  if (typeof raw !== 'string') return { ok: false, code: 'invalid_token' }
+  const player = JSON.parse(raw) as GamePlayer
+  if (player.status === 'dropped') return { ok: false, code: 'player_dropped' }
+  return { ok: true, player }
+}
+
+// Recovery may acquire the SQL room lock. Call before entering a locked
+// transaction; use checkRoomMembership for pure in-lock revalidation.
 export async function getRoomParticipation(
   code: string,
   playerId: string,
 ): Promise<RoomParticipation> {
-  const readPlayer = () =>
-    redis.eval(
-      `
-    if not redis.call('HGET', KEYS[1], 'status') then return nil end
-    return redis.call('HGET', KEYS[2], ARGV[1])
-    `,
-      2,
-      KEYS.game(code),
-      KEYS.players(code),
-      playerId,
-    )
-  const raw = await readPlayer()
-  if (typeof raw !== 'string') return { ok: false, code: 'invalid_token' }
-  const player = JSON.parse(raw) as GamePlayer
-  if (player.status === 'dropped') return { ok: false, code: 'player_dropped' }
+  const participation = await checkRoomMembership(code, playerId)
+  if (!participation.ok) return participation
   if (await redis.hget(KEYS.game(code), 'hostSuccessionPending')) {
     const { migrateHost } = await import('./game-engine')
     await migrateHost(code)
-    const reconciled = await readPlayer()
-    if (typeof reconciled !== 'string') return { ok: false, code: 'invalid_token' }
-    const current = JSON.parse(reconciled) as GamePlayer
-    if (current.status === 'dropped') return { ok: false, code: 'player_dropped' }
-    return { ok: true, player: current }
+    return checkRoomMembership(code, playerId)
   }
-  return { ok: true, player }
+  return participation
 }
 
 export async function authenticateRoomSession(token: string, code: string) {
