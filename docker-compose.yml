@@ -70,6 +70,7 @@ services:
       # :? — a forgeable HMAC secret is worse than a failed deploy. Never
       # let prod fall back to a known default.
       SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set, 32+ chars (see .env.example)}
+      PUBLIC_SITE_URL: ${PUBLIC_SITE_URL:?PUBLIC_SITE_URL must be the public HTTPS origin}
       PORT: ${PORT:-3000}
       # Trust only explicitly identified cloudflared transport peers.
       CAB_TRUSTED_PROXY_IPS: ${CAB_TRUSTED_PROXY_IPS:-}
@@ -108,6 +109,6 @@ volumes:
     driver: local
     driver_opts:
       type: cifs
-      o: "username=${CIFS_USERNAME},password=${CIFS_PASSWORD},uid=70,gid=70,file_mode=0700,dir_mode=0700,iocharset=utf8"
-      device: "//10.1.1.195/weyland/Services/cardsagainstbhayanak/postgres"
+      o: 'username=${CIFS_USERNAME},password=${CIFS_PASSWORD},uid=70,gid=70,file_mode=0700,dir_mode=0700,iocharset=utf8'
+      device: '//10.1.1.195/weyland/Services/cardsagainstbhayanak/postgres'
   redis_data:
