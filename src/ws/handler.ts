@@ -13,7 +13,7 @@ import {
 } from '~/lib/posthog-server'
 import { authenticateSocket } from './auth'
 import { ClientMessageSchema } from './client-message'
-import { redis, getSubscriber, KEYS } from '~/lib/redis'
+import { redis, getSubscriber, releaseSubscriber, KEYS } from '~/lib/redis'
 import * as engine from '~/lib/game-engine'
 import { GameCommandError } from '~/lib/game-command-error'
 import { getRoomParticipation } from '~/lib/room-session'
@@ -232,6 +232,16 @@ const peerContext = new WeakMap<Peer, PeerCtx>()
 const openPeers = new Set<Peer>()
 const roomPeers = new Map<string, Set<Peer>>()
 
+function removeRoomPeer(code: string, peer: Peer): void {
+  const peers = roomPeers.get(code)
+  if (!peers) return
+  peers.delete(peer)
+  if (peers.size === 0) {
+    roomPeers.delete(code)
+    releaseSubscriber(KEYS.channel(code))
+  }
+}
+
 export function startKeepaliveEnforcer(): void {
   setInterval(() => {
     const now = Date.now()
@@ -276,7 +286,7 @@ function revokePlayerSockets(
   for (const peer of roomPeers.get(code) ?? []) {
     if (peerContext.get(peer)?.playerId !== playerId) continue
     peerContext.get(peer)?.lease.release()
-    roomPeers.get(code)?.delete(peer)
+    removeRoomPeer(code, peer)
     openPeers.delete(peer)
     peerContext.delete(peer)
     const message = errorCode === 'player_dropped' ? 'player dropped' : 'invalid token'
@@ -464,15 +474,12 @@ export const wsHooks = {
             message: auth.code === 'player_dropped' ? 'player dropped' : 'invalid token',
           })
           ctx.lease.release()
-          roomPeers.get(ctx.code)?.delete(peer)
+          removeRoomPeer(ctx.code, peer)
           openPeers.delete(peer)
           peerContext.delete(peer)
           peer.close(1008, 'authentication failed')
           return
         }
-        await ensureSubscriber(ctx.code)
-        // Authentication can finish after a pending socket disconnected.
-        if (peerContext.get(peer) !== ctx) return
         const participation = await getRoomParticipation(ctx.code, auth.playerId)
         if (peerContext.get(peer) !== ctx) return
         if (!participation.ok) {
@@ -493,6 +500,10 @@ export const wsHooks = {
         // revokes setup too. Pending setup receives no room broadcasts.
         if (!roomPeers.has(ctx.code)) roomPeers.set(ctx.code, new Set())
         roomPeers.get(ctx.code)!.add(peer)
+        // Own the subscriber during setup too: close, drop or failed setup
+        // can now release it even while SUBSCRIBE is still in flight.
+        await ensureSubscriber(ctx.code)
+        if (peerContext.get(peer) !== ctx) return
         ctx.authSetup = state.reconnectPlayer(ctx.code, auth.playerId)
         const restored = await ctx.authSetup
         if (peerContext.get(peer) !== ctx) return
@@ -626,7 +637,7 @@ export const wsHooks = {
       if (ctx.authenticating) {
         // Setup may have bound the identity before a grace write failed.
         // Keep commands blocked until close restores grace for that identity.
-        roomPeers.get(ctx.code)?.delete(peer)
+        removeRoomPeer(ctx.code, peer)
         openPeers.delete(peer)
         peer.close(1011, 'authentication setup failed')
       }
@@ -648,7 +659,7 @@ export const wsHooks = {
     const ctx = peerContext.get(peer)
     if (!ctx) return
     ctx.lease.release()
-    roomPeers.get(ctx.code)?.delete(peer)
+    removeRoomPeer(ctx.code, peer)
     peerContext.delete(peer)
 
     if (!ctx.playerId) return
