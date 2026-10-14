@@ -998,6 +998,11 @@ services:
 
 Cloudflare Tunnel runs **outside** the Compose stack — user manages it independently on the host. The app container publishes port 3000 on host loopback; `cloudflared` on the host accesses the app at `http://localhost:3000`. A separately managed tunnel container may instead reach the app on a restricted Docker network. Explicitly configure `CAB_TRUSTED_PROXY_IPS` for the immediate tunnel peer as observed by the app socket (host Docker NAT may present the bridge gateway).
 
+### Database storage operations
+
+PostgreSQL requires durable fsync, reliable locking and exclusive PGDATA ownership. The deployment-specific CIFS volume remains unverified; the opt-in `docker-compose.local-storage.yml` selects a distinct local volume on persistent host block storage. See `docs/operations/database-recovery.md` for the assessment limitations, reversible migration, independent backups, restoration checks and DB-only recovery limits. `pnpm test:storage` exercises disposable local-volume crash recovery and logical restore via the reviewed migration CLI.
+
+
 ### Dockerfile (multi-stage)
 
 - `build` stage: `node:22-alpine` + pnpm, runs `pnpm install --frozen-lockfile` + `pnpm build`
