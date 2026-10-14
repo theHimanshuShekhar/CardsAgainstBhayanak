@@ -617,6 +617,8 @@ Host succession applies in lobby, active, paused and ended rooms after explicit 
 
 If no eligible human remains, clear ownership and all host flags (`host_changed.hostId = null`). Active games pause as usual. The next human player to join claims vacant ownership; spectator joins leave it vacant.
 
+SQL ownership commits before live host flags and `hostId` are published atomically. A room-scoped pending succession intent survives failed or uncertain commits and live-store outages. Succession retries once immediately; the next authenticated HTTP/WebSocket action or join reconciles any remaining intent from committed SQL ownership before proceeding.
+
 ---
 
 ## Game Rules Engine — ✅ DONE

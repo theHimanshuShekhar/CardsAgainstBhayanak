@@ -1290,62 +1290,83 @@ export async function voidRound(code: string, reason: string): Promise<void> {
 // players and reconnect grace. Spectators and Rando never become host. A room
 // without an eligible human has no host until a human joins again.
 export async function migrateHost(code: string): Promise<string | null> {
-  const result = await db.transaction(async (tx) => {
-    // Serialize succession with other migrations and lobby admissions. Every
-    // departure reconciles after its live drop, so a successor dropping during
-    // an earlier migration gets another turn after this lock is released.
-    const [session] = await tx
-      .select()
-      .from(gameSessions)
-      .where(eq(gameSessions.code, code))
-      .for('update')
-    if (!session) return { hostId: null, changed: false }
-
-    const players = await state.getAllPlayers(code)
-    const eligible = players
-      .filter(
-        (p) =>
-          (p.status === 'active' || p.status === 'queued') && p.role === 'player' && !p.isRando,
-      )
-      .sort((a, b) => a.joinedAt.localeCompare(b.joinedAt) || a.id.localeCompare(b.id))
-    // A non-host departure or a concurrent vacant-room join must preserve the
-    // current eligible owner rather than choosing a different player.
-    if (eligible.some((p) => p.id === session.hostPlayerId))
-      return { hostId: session.hostPlayerId, changed: false }
-    const hostId = eligible[0]?.id ?? null
-
-    await tx
-      .update(gameSessions)
-      .set({ hostPlayerId: hostId })
-      .where(eq(gameSessions.id, session.id))
-    await tx.update(gamePlayers).set({ isHost: false }).where(eq(gamePlayers.sessionId, session.id))
-    if (hostId) await tx.update(gamePlayers).set({ isHost: true }).where(eq(gamePlayers.id, hostId))
-    for (const p of players) {
-      if (p.isHost !== (p.id === hostId))
-        await state.updatePlayer(code, p.id, { isHost: p.id === hostId })
+  // SQL is the committed ownership source. The room-scoped intent survives
+  // failed/uncertain COMMITs and Redis outages until a later authenticated
+  // action reconciles it. Retry once here; never guess whether COMMIT won.
+  let lastError: unknown
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await db.transaction(async (tx) => {
+        const [session] = await tx
+          .select()
+          .from(gameSessions)
+          .where(eq(gameSessions.code, code))
+          .for('update')
+        if (!session) return
+        const eligible = (await state.getAllPlayers(code))
+          .filter(
+            (p) =>
+              (p.status === 'active' || p.status === 'queued') && p.role === 'player' && !p.isRando,
+          )
+          .sort((a, b) => a.joinedAt.localeCompare(b.joinedAt) || a.id.localeCompare(b.id))
+        const hostId =
+          eligible.find((p) => p.id === session.hostPlayerId)?.id ?? eligible[0]?.id ?? null
+        await state.updateLiveRoom(code, { hostSuccessionPending: '1' })
+        if (hostId === session.hostPlayerId) return
+        await tx
+          .update(gameSessions)
+          .set({ hostPlayerId: hostId })
+          .where(eq(gameSessions.id, session.id))
+        await tx
+          .update(gamePlayers)
+          .set({ isHost: false })
+          .where(eq(gamePlayers.sessionId, session.id))
+        if (hostId)
+          await tx.update(gamePlayers).set({ isHost: true }).where(eq(gamePlayers.id, hostId))
+      })
+      // Reacquire the row lock *after* SQL COMMIT. This transaction never
+      // changes ownership in SQL, so a failed read-only COMMIT cannot undo
+      // the committed source used by this atomic live publication.
+      return await db.transaction(async (tx) => {
+        const [session] = await tx
+          .select()
+          .from(gameSessions)
+          .where(eq(gameSessions.code, code))
+          .for('update')
+        if (!session) return null
+        await redis.eval(
+          `
+          if not redis.call('HGET', KEYS[1], 'status') then return 0 end
+          local changed = redis.call('HGET', KEYS[1], 'hostId') ~= ARGV[1]
+          local players = redis.call('HGETALL', KEYS[2])
+          for i = 1, #players, 2 do
+            local player = cjson.decode(players[i + 1])
+            local isHost = players[i] == ARGV[1]
+            if player.isHost ~= isHost then
+              changed = true
+              player.isHost = isHost
+              redis.call('HSET', KEYS[2], players[i], cjson.encode(player))
+            end
+          end
+          redis.call('HSET', KEYS[1], 'hostId', ARGV[1])
+          redis.call('HDEL', KEYS[1], 'hostSuccessionPending')
+          if changed then redis.call('PUBLISH', ARGV[2], ARGV[3]) end
+          return 1
+          `,
+          2,
+          KEYS.game(code),
+          KEYS.players(code),
+          session.hostPlayerId ?? '',
+          KEYS.channel(code),
+          JSON.stringify({ type: 'host_changed', hostId: session.hostPlayerId }),
+        )
+        return session.hostPlayerId
+      })
+    } catch (error) {
+      lastError = error
     }
-    await state.updateLiveRoom(code, { hostId: hostId ?? '' })
-    return { hostId, changed: true }
-  })
-
-  if (result.changed) {
-    // Another departure may have completed after the SQL lock released.
-    // Publish only while this result is still live, atomically with the check,
-    // so a delayed older migration cannot overwrite the successor's UI.
-    await redis.eval(
-      `if redis.call('HGET', KEYS[1], 'hostId') == ARGV[1] then
-         return redis.call('PUBLISH', ARGV[2], ARGV[3])
-       end
-       return 0`,
-      1,
-      KEYS.game(code),
-      result.hostId ?? '',
-      KEYS.channel(code),
-      JSON.stringify({ type: 'host_changed', hostId: result.hostId }),
-    )
-    engineLogger.info({ code, newHostId: result.hostId }, 'host migrated')
   }
-  return result.hostId
+  throw lastError
 }
 
 // S2-1: when every human player has dropped, there is no one left to

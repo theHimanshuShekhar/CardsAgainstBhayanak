@@ -199,7 +199,11 @@ export const Route = createFileRoute('/api/games/$code/join')({
         await engine.touchSessionActivity(code)
         await state.publishEvent(code, { type: 'player_joined', player: gamePlayer })
         // Vacant rooms have no host; the next participating human takes over.
-        if (role === 'player' && !(await state.getHostId(code))) await engine.migrateHost(code)
+        if (
+          (await redis.hget(KEYS.game(code), 'hostSuccessionPending')) ||
+          (role === 'player' && !(await state.getHostId(code)))
+        )
+          await engine.migrateHost(code)
 
         // S2-8: this join may make a paused room playable again. resume
         // flips it back to 'active' and re-arms a round, so report the

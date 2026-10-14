@@ -275,3 +275,88 @@ test('overlapping host and successor departures leave the remaining human in cha
     }
   }
 })
+
+test('successor actions recover a succession whose SQL commit failed', async () => {
+  const { default: postgres } = await import('postgres')
+  const database = postgres(process.env['DATABASE_URL']!)
+  const { host, second, config } = await lobby()
+  await database.unsafe(`CREATE FUNCTION reject_host_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN IF OLD.host_player_id IS DISTINCT FROM NEW.host_player_id THEN
+      RAISE EXCEPTION 'injected host commit failure'; END IF; RETURN NEW; END $$`)
+  await database.unsafe(`CREATE CONSTRAINT TRIGGER reject_host_commit AFTER UPDATE ON game_sessions
+    DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_host_commit()`)
+  try {
+    expect((await post(`/api/games/${host.roomCode}/leave`, {}, host.sessionToken)).status).toBe(
+      500,
+    )
+  } finally {
+    await database.unsafe('DROP TRIGGER reject_host_commit ON game_sessions')
+    await database.unsafe('DROP FUNCTION reject_host_commit()')
+    await database.end()
+  }
+  const configured = await fetch(`${BASE}/api/games/${host.roomCode}/config`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${second.sessionToken}` },
+    body: JSON.stringify({ config }),
+  })
+  expect(configured.status).toBe(204)
+  const successor = await connect(second)
+  try {
+    const marker = successor.events.length
+    successor.send({ type: 'rejoin' })
+    const snapshot = await successor.wait('lobby_snapshot', marker)
+    expect(snapshot.players.filter((player) => player.isHost).map((player) => player.id)).toEqual([
+      second.playerId,
+    ])
+    expect((await post(`/api/games/${host.roomCode}/start`, {}, host.sessionToken)).status).toBe(
+      401,
+    )
+  } finally {
+    successor.ws.close()
+  }
+})
+
+test('pending succession preserves a committed successor after an uncertain acknowledgement', async () => {
+  const { host, second, config } = await lobby()
+  expect((await post(`/api/games/${host.roomCode}/leave`, {}, host.sessionToken)).status).toBe(204)
+  const { default: Redis } = await import('ioredis')
+  const redis = new Redis(process.env['REDIS_URL']!)
+  try {
+    // Restart fixture: SQL committed its successor, but live publication was
+    // unavailable and the room still carries the durable pending intent.
+    const room = `game:${host.roomCode}`
+    const players = `${room}:players`
+    const oldHost = JSON.parse((await redis.hget(players, host.playerId))!)
+    const newHost = JSON.parse((await redis.hget(players, second.playerId))!)
+    await redis
+      .multi()
+      .hset(room, 'hostId', host.playerId, 'hostSuccessionPending', '1')
+      .hset(
+        players,
+        host.playerId,
+        JSON.stringify({ ...oldHost, isHost: true }),
+        second.playerId,
+        JSON.stringify({ ...newHost, isHost: false }),
+      )
+      .exec()
+  } finally {
+    await redis.quit()
+  }
+  const configured = await fetch(`${BASE}/api/games/${host.roomCode}/config`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${second.sessionToken}` },
+    body: JSON.stringify({ config }),
+  })
+  expect(configured.status).toBe(204)
+  const successor = await connect(second)
+  try {
+    const marker = successor.events.length
+    successor.send({ type: 'rejoin' })
+    const snapshot = await successor.wait('lobby_snapshot', marker)
+    expect(snapshot.players.filter((player) => player.isHost).map((player) => player.id)).toEqual([
+      second.playerId,
+    ])
+  } finally {
+    successor.ws.close()
+  }
+})
