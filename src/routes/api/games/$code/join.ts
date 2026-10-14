@@ -35,67 +35,81 @@ export const Route = createFileRoute('/api/games/$code/join')({
         if (!parsed.success)
           return errorResponse(400, 'internal_error', 'Invalid body', parsed.error.flatten())
 
-        const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
-        if (!session) return errorResponse(404, 'room_not_found', 'Room not found')
-        if (session.status === 'ended' || session.status === 'abandoned')
-          return errorResponse(410, 'room_not_found', 'Game has ended')
+        // The session row serializes admission and lobby configuration across
+        // server processes. Read authoritative Redis membership only after locking,
+        // and publish membership before releasing the lock to the next contender.
+        const admission = await db.transaction(async (tx) => {
+          const [session] = await tx
+            .select()
+            .from(gameSessions)
+            .where(eq(gameSessions.code, code))
+            .for('update')
+          if (!session) return errorResponse(404, 'room_not_found', 'Room not found')
+          if (!(await redis.exists(KEYS.game(code))))
+            return errorResponse(404, 'room_not_found', 'Room not found')
+          if (session.status === 'ended' || session.status === 'abandoned')
+            return errorResponse(410, 'room_not_found', 'Game has ended')
 
-        const config = session.config as GameConfig
-        const livePlayers = await state.getLivePlayers(code)
-        const playerCount = livePlayers.filter((player) => player.role === 'player').length
+          const config = session.config as GameConfig
+          const livePlayers = await state.getLivePlayers(code)
+          const playerCount = livePlayers.filter((player) => player.role === 'player').length
 
-        const { role } = parsed.data
-        if (role === 'player' && playerCount >= config.maxPlayers)
-          return errorResponse(423, 'room_full', 'Player slots full — join as spectator')
+          const { role } = parsed.data
+          if (role === 'player' && playerCount >= config.maxPlayers)
+            return errorResponse(423, 'room_full', 'Player slots full — join as spectator')
 
-        const [dup] = await db
-          .select()
-          .from(gamePlayers)
-          .where(
-            and(
-              eq(gamePlayers.sessionId, session.id),
-              eq(gamePlayers.username, parsed.data.username),
-              sql`${gamePlayers.status} != 'dropped'`,
-            ),
-          )
-        if (dup) return errorResponse(409, 'duplicate_username', 'Handle taken in this room')
+          const [dup] = await tx
+            .select()
+            .from(gamePlayers)
+            .where(
+              and(
+                eq(gamePlayers.sessionId, session.id),
+                eq(gamePlayers.username, parsed.data.username),
+                sql`${gamePlayers.status} != 'dropped'`,
+              ),
+            )
+          if (dup) return errorResponse(409, 'duplicate_username', 'Handle taken in this room')
 
-        // S2-8: a 'paused' session is deserted — a joiner must come in
-        // 'active' (not 'queued' behind nobody) so resumeIfReady can
-        // restart the round. Only a live 'active' game queues mid-game
-        // joiners for round_end activation.
-        const status =
-          role === 'spectator' ? 'spectator' : session.status === 'active' ? 'queued' : 'active'
+          // S2-8: a 'paused' session is deserted — a joiner must come in
+          // 'active' (not 'queued' behind nobody) so resumeIfReady can
+          // restart the round. Only a live 'active' game queues mid-game
+          // joiners for round_end activation.
+          const status =
+            role === 'spectator' ? 'spectator' : session.status === 'active' ? 'queued' : 'active'
 
-        const [player] = await db
-          .insert(gamePlayers)
-          .values({
-            sessionId: session.id,
-            username: parsed.data.username,
+          const [player] = await tx
+            .insert(gamePlayers)
+            .values({
+              sessionId: session.id,
+              username: parsed.data.username,
+              role,
+              status,
+              posthogAnonId: parsed.data.anonId,
+            })
+            // Historical handles remain reserved by the current schema. Return
+            // a recoverable rejection until handle reuse is implemented (#45).
+            .onConflictDoNothing({ target: [gamePlayers.sessionId, gamePlayers.username] })
+            .returning()
+
+          if (!player) return errorResponse(409, 'duplicate_username', 'Handle taken in this room')
+
+          const gamePlayer = {
+            id: player.id,
+            username: player.username,
             role,
             status,
+            score: 0,
+            isHost: false,
+            isRando: false,
+            discardsUsed: 0,
             posthogAnonId: parsed.data.anonId,
-          })
-          // Historical handles remain reserved by the current schema. Return
-          // a recoverable rejection until handle reuse is implemented (#45).
-          .onConflictDoNothing({ target: [gamePlayers.sessionId, gamePlayers.username] })
-          .returning()
-
-        if (!player) return errorResponse(409, 'duplicate_username', 'Handle taken in this room')
-
-        const gamePlayer = {
-          id: player.id,
-          username: player.username,
-          role,
-          status,
-          score: 0,
-          isHost: false,
-          isRando: false,
-          discardsUsed: 0,
-          posthogAnonId: parsed.data.anonId,
-          joinedAt: player.joinedAt.toISOString(),
-        } as const
-        await state.addPlayer(code, gamePlayer)
+            joinedAt: player.joinedAt.toISOString(),
+          } as const
+          await state.addPlayer(code, gamePlayer)
+          return { session, player, role, status, gamePlayer }
+        })
+        if (admission instanceof Response) return admission
+        const { session, player, role, status, gamePlayer } = admission
         await engine.touchSessionActivity(code)
         await state.publishEvent(code, { type: 'player_joined', player: gamePlayer })
 
