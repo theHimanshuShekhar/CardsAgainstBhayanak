@@ -74,7 +74,7 @@ export type SessionState = {
   round: number
   prompt: BlackCard
   czarId: string | null
-  // host_changed migrates this mid-game (longest-present active player),
+  // host_changed migrates this when the host departs (longest-present human),
   // so the snapshot is the floor — the client keeps it in sync via the
   // broadcast event.
   hostId: string | null
@@ -220,7 +220,7 @@ export type ServerMessage =
   | { type: 'lobby_snapshot'; players: GamePlayer[]; config: GameConfig; gameStatus: SessionStatus }
   | { type: 'player_joined'; player: GamePlayer }
   | { type: 'player_left'; playerId: string }
-  | { type: 'host_changed'; hostId: string }
+  | { type: 'host_changed'; hostId: string | null }
   | { type: 'game_started'; firstRound: number }
   | {
       type: 'round_started'

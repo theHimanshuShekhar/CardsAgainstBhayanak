@@ -77,6 +77,9 @@ function LobbyScreen() {
       if (event.type === 'game_started') {
         void navigate({ to: '/games/$code/session', params: { code } })
       }
+      if (event.type === 'host_changed') {
+        setPlayers((prev) => prev.map((p) => ({ ...p, isHost: p.id === event.hostId })))
+      }
       if (event.type === 'auth_error') {
         setSession(null)
         void navigate({ to: '/' })

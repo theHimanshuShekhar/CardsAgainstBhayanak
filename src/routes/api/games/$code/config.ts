@@ -2,6 +2,7 @@ import { createFileRoute } from '@tanstack/react-router'
 import { db } from '~/db'
 import { gameSessions } from '~/db/schema'
 import { authenticate } from '~/lib/api-auth'
+import { checkRoomMembership } from '~/lib/room-session'
 import { GameConfigSchema, conflictingModalRules, errorResponse } from '~/lib/api-helpers'
 import { apiLogger } from '~/lib/logger'
 import { eq } from 'drizzle-orm'
@@ -73,7 +74,9 @@ export const Route = createFileRoute('/api/games/$code/config')({
               { rosterSize, requested: config.maxPlayers },
             )
 
-          if (!(await authenticate(request, code)))
+          // Initial authentication already verified the token and performed
+          // pending recovery. Inside the row lock only recheck membership.
+          if (!(await checkRoomMembership(code, auth.playerId)).ok)
             return errorResponse(401, 'not_authorized', 'Missing or invalid token')
           await state.updateLiveRoom(code, {}, auth.playerId)
           await tx

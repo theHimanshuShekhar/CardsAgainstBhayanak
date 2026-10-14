@@ -613,6 +613,12 @@ When the WebSocket drops unexpectedly, client retries with exponential backoff: 
 
 Client sends `ping` every 15s; server responds `pong`. After 45s of silence, server treats client as disconnected (starts grace window).
 
+Host succession applies in lobby, active, paused and ended rooms after explicit leave or grace expiry. The longest-present non-dropped human player inherits ownership, including queued players and players still within reconnect grace; spectators and Rando are ineligible. Equal join timestamps use player ID as a stable tie-breaker. Persisted session ownership, persisted/live host flags and live `hostId` change together before `host_changed` is broadcast. Lobby and end screens update their host controls immediately; reconnect snapshots preserve the new ownership. Departed hosts cannot start, configure, reset or end the game.
+
+If no eligible human remains, clear ownership and all host flags (`host_changed.hostId = null`). Active games pause as usual. The next human player to join claims vacant ownership; spectator joins leave it vacant.
+
+SQL ownership commits before live host flags and `hostId` are published atomically. A room-scoped pending succession intent survives failed or uncertain commits and live-store outages. Succession retries once immediately; the next authenticated HTTP/WebSocket action or join reconciles any remaining intent from committed SQL ownership before proceeding.
+
 ---
 
 ## Game Rules Engine — ✅ DONE

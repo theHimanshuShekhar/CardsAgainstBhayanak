@@ -1286,42 +1286,93 @@ export async function voidRound(code: string, reason: string): Promise<void> {
   await startRound(code, round + 1)
 }
 
-// S2-1: the host dropped. Hand the host role to the longest-present
-// active human so host-only actions (Happy Ending, etc.) keep working.
-// Returns the new host id, or null if nobody is left to take it.
+// Ownership follows the longest-present participating human, including queued
+// players and reconnect grace. Spectators and Rando never become host. A room
+// without an eligible human has no host until a human joins again.
 export async function migrateHost(code: string): Promise<string | null> {
-  const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
-  if (!session) return null
-
-  const players = await state.getAllPlayers(code)
-  const next = players
-    .filter((p) => p.status === 'active' && p.role === 'player' && !p.isRando)
-    .sort((a, b) => a.joinedAt.localeCompare(b.joinedAt))[0]
-  if (!next) return null
-
-  for (const p of players) {
-    if (p.isHost && p.id !== next.id) await state.updatePlayer(code, p.id, { isHost: false })
+  // SQL is the committed ownership source. The room-scoped intent survives
+  // failed/uncertain COMMITs and Redis outages until a later authenticated
+  // action reconciles it. Retry once here; never guess whether COMMIT won.
+  let lastError: unknown
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await db.transaction(async (tx) => {
+        const [session] = await tx
+          .select()
+          .from(gameSessions)
+          .where(eq(gameSessions.code, code))
+          .for('update')
+        if (!session) return
+        const eligible = (await state.getAllPlayers(code))
+          .filter(
+            (p) =>
+              (p.status === 'active' || p.status === 'queued') && p.role === 'player' && !p.isRando,
+          )
+          .sort((a, b) => a.joinedAt.localeCompare(b.joinedAt) || a.id.localeCompare(b.id))
+        const hostId =
+          eligible.find((p) => p.id === session.hostPlayerId)?.id ?? eligible[0]?.id ?? null
+        await state.updateLiveRoom(code, { hostSuccessionPending: '1' })
+        if (hostId === session.hostPlayerId) return
+        await tx
+          .update(gameSessions)
+          .set({ hostPlayerId: hostId })
+          .where(eq(gameSessions.id, session.id))
+        await tx
+          .update(gamePlayers)
+          .set({ isHost: false })
+          .where(eq(gamePlayers.sessionId, session.id))
+        if (hostId)
+          await tx.update(gamePlayers).set({ isHost: true }).where(eq(gamePlayers.id, hostId))
+      })
+      // Reacquire the row lock *after* SQL COMMIT. This transaction never
+      // changes ownership in SQL, so a failed read-only COMMIT cannot undo
+      // the committed source used by this atomic live publication.
+      return await db.transaction(async (tx) => {
+        const [session] = await tx
+          .select()
+          .from(gameSessions)
+          .where(eq(gameSessions.code, code))
+          .for('update')
+        if (!session) return null
+        await redis.eval(
+          `
+          if not redis.call('HGET', KEYS[1], 'status') then return 0 end
+          local changed = redis.call('HGET', KEYS[1], 'hostId') ~= ARGV[1]
+          local players = redis.call('HGETALL', KEYS[2])
+          for i = 1, #players, 2 do
+            local player = cjson.decode(players[i + 1])
+            local isHost = players[i] == ARGV[1]
+            if player.isHost ~= isHost then
+              changed = true
+              player.isHost = isHost
+              redis.call('HSET', KEYS[2], players[i], cjson.encode(player))
+            end
+          end
+          redis.call('HSET', KEYS[1], 'hostId', ARGV[1])
+          redis.call('HDEL', KEYS[1], 'hostSuccessionPending')
+          if changed then redis.call('PUBLISH', ARGV[2], ARGV[3]) end
+          return 1
+          `,
+          2,
+          KEYS.game(code),
+          KEYS.players(code),
+          session.hostPlayerId ?? '',
+          KEYS.channel(code),
+          JSON.stringify({ type: 'host_changed', hostId: session.hostPlayerId }),
+        )
+        return session.hostPlayerId
+      })
+    } catch (error) {
+      lastError = error
+    }
   }
-  await state.updatePlayer(code, next.id, { isHost: true })
-  await state.updateLiveRoom(code, { hostId: next.id })
-
-  await db
-    .update(gameSessions)
-    .set({ hostPlayerId: next.id })
-    .where(eq(gameSessions.id, session.id))
-  await db.update(gamePlayers).set({ isHost: false }).where(eq(gamePlayers.sessionId, session.id))
-  await db.update(gamePlayers).set({ isHost: true }).where(eq(gamePlayers.id, next.id))
-
-  await state.publishEvent(code, { type: 'host_changed', hostId: next.id })
-  engineLogger.info({ code, newHostId: next.id }, 'host migrated')
-  return next.id
+  throw lastError
 }
 
 // S2-1: when every human player has dropped, there is no one left to
 // resolve or advance the round. Park the session in 'paused' so the
 // 6h stale-game sweeper can later abandon it. The 'paused' status also
-// makes voidRound/migrateHost no-ops (their `status !== 'active'`
-// guard), suppressing pointless work on a deserted room.
+// prevents round resolution work on a deserted room.
 export async function pauseGame(code: string): Promise<void> {
   const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
   if (!session || session.status !== 'active') return
@@ -1391,11 +1442,14 @@ export async function dropPlayer(
   })
 
   const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
-  if (session?.status !== 'active') return
+  if (!session) return
+  // Lobby and ended rooms still need a host to start or reset. Clear stale
+  // ownership even when the last human leaves an active room.
+  await migrateHost(code)
+  if (session.status !== 'active') return
 
   // No human left to resolve/advance the round → pause (the 6h sweeper
-  // abandons it later). Skip migrate/void: no-ops on a deserted room
-  // that would just churn the event loop.
+  // abandons it later). Ownership was already migrated or cleared above.
   const players = await state.getAllPlayers(code)
   const activeHumans = players.filter(
     (p) => p.status === 'active' && p.role === 'player' && !p.isRando,
@@ -1403,12 +1457,6 @@ export async function dropPlayer(
   if (activeHumans.length === 0) {
     await pauseGame(code)
     return
-  }
-
-  // Host left → hand the role to the longest-present active player so
-  // host-only actions (Happy Ending, etc.) keep working.
-  if (session.hostPlayerId === playerId) {
-    await migrateHost(code)
   }
 
   // Picking/waiting restarts fairly; a revealed round keeps its answers
