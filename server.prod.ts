@@ -15,14 +15,13 @@ import { readSiteOrigin } from './src/lib/site-origin.server'
 
 readSiteOrigin()
 
-import { manageSchema } from './src/db/migrations'
+import { waitForSchema } from './src/lib/schema-startup'
 
-await manageSchema('check')
+const port = Number(process.env['PORT'] ?? 3000)
+await waitForSchema(port)
 // Load modules that start seeding/jobs only after compatibility succeeds.
 const { gameWebSocketPlugin } = await import('./src/ws/server')
 const { default: tssServer } = await import('./dist/server/server.js')
-
-const port = Number(process.env['PORT'] ?? 3000)
 
 // The TSS SSR handler only renders HTML — it never serves the client
 // bundle. Vite emits the hashed JS/CSS under dist/client/assets, so in

@@ -73,7 +73,9 @@ it('restored and ordinary timeouts cannot skip or void a rematch with the same r
     callbacks.length = 0
     await engine.startRound(code, 1)
     await engine.restoreRoundTimers()
-    expect(callbacks).toHaveLength(2)
+    // Restoring shares the ordinary callback rather than scheduling another.
+    expect(callbacks).toHaveLength(1)
+    const staleTimer = callbacks[0]!
     await engine.endGame(code, 'normal', players[0]!.id)
     clock.mockReturnValue(1_800_000_001_000)
     await engine.resetGame(code, 'rematch')
@@ -85,14 +87,12 @@ it('restored and ordinary timeouts cannot skip or void a rematch with the same r
     clock.mockReturnValue(1_800_000_030_000)
     // Await complete callbacks, including real service IO, before proving
     // neither ordinary nor restored stale work changed the new match.
-    await callbacks[0]!()
-    await callbacks[1]!()
+    await staleTimer()
     await drainEvents()
     expect(events).toEqual([])
     // Prove an authoritative restored timeout still skips/voids normally.
     clock.mockReturnValue(deadline!)
-    timeout.mockRestore()
-    await engine.restoreRoundTimers()
+    await callbacks[1]!()
     await vi.waitFor(() =>
       expect(events).toEqual(
         expect.arrayContaining([

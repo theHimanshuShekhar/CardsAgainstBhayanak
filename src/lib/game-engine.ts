@@ -29,6 +29,68 @@ import { createId } from '@paralleldrive/cuid2'
 import { GameCommandError } from './game-command-error'
 import { decideDeckExhaustion } from './deck-exhaustion'
 import { decideNormalRound } from './normal-round'
+import { recoveryRetryMs, type RecoveryProgress } from './recovery-status'
+
+type RoundTimer = {
+  identity: string
+  timer?: ReturnType<typeof setTimeout>
+  running?: Promise<void>
+  attempts: number
+  error?: unknown
+}
+// Source WS and bundled SSR engines share ownership of process-local timers.
+const timerRuntime = globalThis as typeof globalThis & {
+  __cabRoundTimers?: Map<string, RoundTimer>
+}
+const roundTimers = (timerRuntime.__cabRoundTimers ??= new Map<string, RoundTimer>())
+
+async function armRoundTimer(
+  code: string,
+  round: number,
+  czarId: string | null,
+  deadline: number,
+  roundId: string,
+): Promise<void> {
+  const identity = `${roundId}:${deadline}`
+  const existing = roundTimers.get(code)
+  if (existing?.identity === identity) {
+    if (existing.running) return existing.running
+    if (existing.error) throw existing.error
+    return
+  }
+  if (existing?.timer) clearTimeout(existing.timer)
+  const owner: RoundTimer = { identity, attempts: 0 }
+  roundTimers.set(code, owner)
+  const run = (): Promise<void> => {
+    if (roundTimers.get(code) !== owner) return Promise.resolve()
+    if (owner.running) return owner.running
+    owner.error = undefined
+    owner.running = expireRoundTimer(code, round, czarId, deadline)
+      .then(() => {
+        if (roundTimers.get(code) === owner) roundTimers.delete(code)
+      })
+      .catch((err) => {
+        if (roundTimers.get(code) === owner) {
+          owner.error = err
+          owner.timer = setTimeout(onTimeout, recoveryRetryMs(++owner.attempts))
+          owner.timer.unref()
+        }
+        throw err
+      })
+      .finally(() => {
+        owner.running = undefined
+      })
+    return owner.running
+  }
+  const onTimeout = () =>
+    run().catch((err) => engineLogger.warn({ err, code, round }, 'round timer retry pending'))
+  const delay = deadline - Date.now()
+  if (delay <= 0) await run()
+  else {
+    owner.timer = setTimeout(onTimeout, delay)
+    owner.timer.unref()
+  }
+}
 
 export function chooseFirstCzar(activePlayerCount: number): number {
   return randomInt(0, activePlayerCount)
@@ -442,20 +504,7 @@ export async function startRound(
     const ms = TIMER_MS[config.timer]
     roundTimerExpiresAt = (await state.getRoundTimerExpiresAt(code)) ?? Date.now() + ms
     await state.setRoundTimerExpiresAt(code, roundTimerExpiresAt)
-    const armedAt = roundTimerExpiresAt
-    // Swallow rejections inside the timer callback. The session row can
-    // vanish between this insert and a later FK insert when the test
-    // suite's globalTeardown TRUNCATEs while orphaned timers are still
-    // queued; an unhandled rejection from setTimeout crashes the process.
-    // Treating these as no-ops is correct: a missing session means the
-    // game is gone, so there's nothing for the timer to drive forward.
-    setTimeout(
-      () =>
-        expireRoundTimer(code, round, czarId, armedAt).catch((err) =>
-          engineLogger.warn({ err, code, round }, 'round timer expiry suppressed'),
-        ),
-      ms,
-    )
+    await armRoundTimer(code, round, czarId, roundTimerExpiresAt, roundRow.id)
   } else {
     await redis.hdel(KEYS.round(code), 'roundTimerExpiresAt')
   }
@@ -601,7 +650,9 @@ export async function expireRoundTimer(
 //      rejoin's state_snapshot) and run transitionAfterReveal so the
 //      round can hand off to the Czar / vote / elimination phase (S2-NEW).
 // All three callees are guarded against duplicate calls.
-export async function restoreRoundTimers(): Promise<void> {
+export async function restoreRoundTimers(
+  onProgress?: (progress: RecoveryProgress) => void,
+): Promise<void> {
   const sessions = await db
     .select({
       id: gameSessions.id,
@@ -612,141 +663,145 @@ export async function restoreRoundTimers(): Promise<void> {
     })
     .from(gameSessions)
     .where(inArray(gameSessions.status, ['active', 'ended']))
+    .orderBy(gameSessions.code)
+  const failures: unknown[] = []
+  let recovered = 0
+  const report = () =>
+    onProgress?.({ total: sessions.length, recovered, pending: sessions.length - recovered })
+  report()
   for (const s of sessions) {
-    const { code } = s
-    const currentRound = await state.getCurrentRound(code)
-    const [currentRow] = await db
-      .select()
-      .from(gameRounds)
-      .where(
-        and(
-          and(eq(gameRounds.sessionId, s.id), eq(gameRounds.matchId, s.currentMatchId!)),
-          eq(gameRounds.roundNum, currentRound),
-        ),
+    let failed = false
+    try {
+      const { code } = s
+      const currentRound = await state.getCurrentRound(code)
+      const [currentRow] = await db
+        .select()
+        .from(gameRounds)
+        .where(
+          and(
+            and(eq(gameRounds.sessionId, s.id), eq(gameRounds.matchId, s.currentMatchId!)),
+            eq(gameRounds.roundNum, currentRound),
+          ),
+        )
+      if (
+        !currentRow ||
+        !(await state.ensureRoundIdentity(
+          code,
+          currentRound,
+          currentRow.id,
+          currentRow.czarPlayerId,
+        ))
       )
-    if (
-      !currentRow ||
-      !(await state.ensureRoundIdentity(code, currentRound, currentRow.id, currentRow.czarPlayerId))
-    )
-      continue
-    if (await redis.hget(KEYS.game(code), 'completionIntent')) {
-      await continueRoundCompletion(code).catch((err) =>
-        engineLogger.warn({ err, code }, 'round completion remains pending'),
-      )
-      continue
-    }
-    if (s.status !== 'active') continue
-    const phase = await state.getPhase(code)
+        continue
+      if (await redis.hget(KEYS.game(code), 'completionIntent')) {
+        await continueRoundCompletion(code)
+        continue
+      }
+      if (s.status !== 'active') continue
+      const phase = await state.getPhase(code)
 
-    if (phase === 'waiting' && (await redis.hget(KEYS.round(code), 'voteClosed'))) {
-      const tally = Object.fromEntries(
-        Object.entries(await redis.hgetall(voteTallyKeyFor(code))).map(([id, n]) => [
-          id,
-          Number(n),
-        ]),
-      )
-      const max = Math.max(...Object.values(tally))
-      const leaders = Object.keys(tally).filter((id) => tally[id] === max)
-      if (leaders.length) {
-        const sid = chooseVoteWinner(leaders)
-        const key = await resolveSubmissionKey(code, sid)
-        if (key) {
+      if (phase === 'waiting' && (await redis.hget(KEYS.round(code), 'voteClosed'))) {
+        const tally = Object.fromEntries(
+          Object.entries(await redis.hgetall(voteTallyKeyFor(code))).map(([id, n]) => [
+            id,
+            Number(n),
+          ]),
+        )
+        const max = Math.max(...Object.values(tally))
+        const leaders = Object.keys(tally).filter((id) => tally[id] === max)
+        if (leaders.length) {
+          const sid = chooseVoteWinner(leaders)
+          const key = await resolveSubmissionKey(code, sid)
+          if (key) {
+            await recordSingleWinnerIntent(
+              code,
+              currentRow.id,
+              key,
+              await state.getSubmissions(code),
+              sid,
+              null,
+              tally,
+            )
+            await continueRoundCompletion(code)
+          }
+        }
+        continue
+      }
+      if (phase === 'eliminating') {
+        const submissions = await state.getSubmissions(code)
+        const remaining = Object.keys(submissions).filter((key) => !submissions[key]?.eliminated)
+        if (remaining.length === 1) {
+          const key = remaining[0]!
           await recordSingleWinnerIntent(
             code,
             currentRow.id,
             key,
-            await state.getSubmissions(code),
-            sid,
-            null,
-            tally,
+            submissions,
+            publicIdForKey(await getSubOrder(code), key),
+            currentRow.czarPlayerId,
           )
           await continueRoundCompletion(code)
         }
+        continue
       }
-      continue
-    }
-    if (phase === 'eliminating') {
-      const submissions = await state.getSubmissions(code)
-      const remaining = Object.keys(submissions).filter((key) => !submissions[key]?.eliminated)
-      if (remaining.length === 1) {
-        const key = remaining[0]!
-        await recordSingleWinnerIntent(
-          code,
-          currentRow.id,
-          key,
-          submissions,
-          publicIdForKey(await getSubOrder(code), key),
-          currentRow.czarPlayerId,
-        )
-        await continueRoundCompletion(code)
+
+      // Case 1 — picking-phase round timer (S2-10)
+      if (phase === 'picking') {
+        const expiresAt = await state.getRoundTimerExpiresAt(code)
+        if (!expiresAt) continue
+        const round = await state.getCurrentRound(code)
+        const [roundRow] = await db
+          .select({ czarPlayerId: gameRounds.czarPlayerId })
+          .from(gameRounds)
+          .where(and(eq(gameRounds.sessionId, s.id), eq(gameRounds.matchId, s.currentMatchId!)))
+          .orderBy(desc(gameRounds.roundNum))
+          .limit(1)
+        const czarId = roundRow?.czarPlayerId ?? null
+        const ms = expiresAt - Date.now()
+        await armRoundTimer(code, round, czarId, expiresAt, currentRow.id)
+        engineLogger.info({ code, round, ms: Math.max(0, ms) }, 'round timer restored')
+        continue
       }
-      continue
-    }
 
-    // Case 1 — picking-phase round timer (S2-10)
-    if (phase === 'picking') {
-      const expiresAt = await state.getRoundTimerExpiresAt(code)
-      if (!expiresAt) continue
-      const round = await state.getCurrentRound(code)
-      const [roundRow] = await db
-        .select({ czarPlayerId: gameRounds.czarPlayerId })
-        .from(gameRounds)
-        .where(and(eq(gameRounds.sessionId, s.id), eq(gameRounds.matchId, s.currentMatchId!)))
-        .orderBy(desc(gameRounds.roundNum))
-        .limit(1)
-      const czarId = roundRow?.czarPlayerId ?? null
-      const ms = expiresAt - Date.now()
-      const onExpire = (): Promise<void> =>
-        expireRoundTimer(code, round, czarId, expiresAt).catch((err) =>
-          engineLogger.warn({ err, code, round }, 'round timer expiry suppressed'),
-        )
-      if (ms <= 0) onExpire()
-      else setTimeout(onExpire, ms)
-      engineLogger.info({ code, round, ms: Math.max(0, ms) }, 'round timer restored')
-      continue
-    }
-
-    // Case 2 — post-resolve pause (S2-NEW)
-    if (phase === 'transition') {
-      const resumeAt = await state.getPostResolveResumeAt(code)
-      if (!resumeAt) continue // not a finalize-pending transition (no-op)
-      const ms = resumeAt - Date.now()
-      const onResume = (): void => {
-        continueRoundCompletion(code).catch((err) =>
-          engineLogger.warn({ err, code }, 'post-resolve pause suppressed'),
-        )
+      // The shared continuation owns the durable pause and retry. Await it so
+      // readiness cannot report work complete before its effects finish.
+      if (phase === 'transition') {
+        if (await state.getPostResolveResumeAt(code)) await continueRoundCompletion(code)
+        continue
       }
-      if (ms <= 0) onResume()
-      else setTimeout(onResume, ms)
-      engineLogger.info({ code, ms: Math.max(0, ms) }, 'post-resolve pause restored')
-      continue
-    }
 
-    // Case 3 — reveal-loop interrupted mid-stagger (S2-NEW). The post-loop
-    // transition (set next phase + publish elimination_turn / vote_tally)
-    // never ran, so the Czar has no signal to act. Fast-forward: skip the
-    // remaining REVEAL_STAGGER beats and run transitionAfterReveal now.
-    // Clients reconnecting via rejoin pick up the missed card_revealed
-    // events from the snapshot's submissions array.
-    if (phase === 'reveal') {
-      const [roundRow] = await db
-        .select({ czarPlayerId: gameRounds.czarPlayerId })
-        .from(gameRounds)
-        .where(and(eq(gameRounds.sessionId, s.id), eq(gameRounds.matchId, s.currentMatchId!)))
-        .orderBy(desc(gameRounds.roundNum))
-        .limit(1)
-      const czarId = roundRow?.czarPlayerId ?? null
-      const players = await state.getAllPlayers(code)
-      const config = s.config as GameConfig
-      const roundId = await currentRoundIdentity(code)
-      if (!roundId) continue
-      void transitionAfterReveal(code, config, czarId, players, roundId).catch((err) =>
-        engineLogger.error({ err, code }, 'reveal fast-forward failed'),
-      )
-      engineLogger.info({ code }, 'reveal phase fast-forwarded')
-      continue
+      // Case 3 — reveal-loop interrupted mid-stagger (S2-NEW). The post-loop
+      // transition (set next phase + publish elimination_turn / vote_tally)
+      // never ran, so the Czar has no signal to act. Fast-forward: skip the
+      // remaining REVEAL_STAGGER beats and run transitionAfterReveal now.
+      // Clients reconnecting via rejoin pick up the missed card_revealed
+      // events from the snapshot's submissions array.
+      if (phase === 'reveal') {
+        const [roundRow] = await db
+          .select({ czarPlayerId: gameRounds.czarPlayerId })
+          .from(gameRounds)
+          .where(and(eq(gameRounds.sessionId, s.id), eq(gameRounds.matchId, s.currentMatchId!)))
+          .orderBy(desc(gameRounds.roundNum))
+          .limit(1)
+        const czarId = roundRow?.czarPlayerId ?? null
+        const players = await state.getAllPlayers(code)
+        const config = s.config as GameConfig
+        const roundId = await currentRoundIdentity(code)
+        if (!roundId) continue
+        await transitionAfterReveal(code, config, czarId, players, roundId)
+        engineLogger.info({ code }, 'reveal phase fast-forwarded')
+        continue
+      }
+    } catch (err) {
+      failed = true
+      failures.push(err)
+      engineLogger.warn({ err, code: s.code }, 'room recovery remains pending')
+    } finally {
+      if (!failed) recovered++
+      report()
     }
   }
+  if (failures.length) throw new AggregateError(failures, 'Room recovery incomplete')
 }
 
 // ── Reveal / judging orchestration ────────────────────────────────
@@ -1313,9 +1368,20 @@ async function recordSingleWinnerIntent(
 
 // Concurrent commands/recovery callers in a process share the continuation.
 // A killed process releases ownership automatically; durable checkpoints remain.
-const completionTasks = new Map<string, Promise<void>>()
-const resettingRooms = new Set<string>()
-const completionRetries = new Map<string, ReturnType<typeof setTimeout>>()
+const completionRuntime = globalThis as typeof globalThis & {
+  __cabCompletionTasks?: Map<string, Promise<void>>
+  __cabResettingRooms?: Set<string>
+  __cabCompletionRetries?: Map<string, ReturnType<typeof setTimeout>>
+}
+const completionTasks = (completionRuntime.__cabCompletionTasks ??= new Map<
+  string,
+  Promise<void>
+>())
+const resettingRooms = (completionRuntime.__cabResettingRooms ??= new Set<string>())
+const completionRetries = (completionRuntime.__cabCompletionRetries ??= new Map<
+  string,
+  ReturnType<typeof setTimeout>
+>())
 async function continueRoundCompletion(code: string): Promise<void> {
   if (resettingRooms.has(code)) return
   const existing = completionTasks.get(code)
@@ -2849,18 +2915,25 @@ export async function triggerHappyEnding(code: string, playerId: string): Promis
 // Repeated reconciliation also retries transient backing-store failures and
 // covers leases which were valid at boot but expire after the process died.
 export async function restoreDisconnectDeadlines(): Promise<void> {
+  const failures: unknown[] = []
   let cursor = '0'
   do {
     const result = await redis.scan(cursor, 'MATCH', 'game:*:players', 'COUNT', 100)
     cursor = result[0]
     for (const key of result[1]) {
       const code = key.split(':')[1]!
-      for (const playerId of await redis.hkeys(KEYS.drops(code)))
-        await continuePlayerDrop(code, playerId)
-      for (const playerId of await redis.hkeys(key)) {
-        const generation = await state.reconcileDisconnect(code, playerId)
-        if (generation) await dropPlayer(code, playerId, 'grace', generation)
+      try {
+        for (const playerId of await redis.hkeys(KEYS.drops(code)))
+          await continuePlayerDrop(code, playerId)
+        for (const playerId of await redis.hkeys(key)) {
+          const generation = await state.reconcileDisconnect(code, playerId)
+          if (generation) await dropPlayer(code, playerId, 'grace', generation)
+        }
+      } catch (err) {
+        failures.push(err)
+        engineLogger.warn({ err, code }, 'disconnect recovery remains pending')
       }
     }
   } while (cursor !== '0')
+  if (failures.length) throw new AggregateError(failures, 'Disconnect recovery incomplete')
 }

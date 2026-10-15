@@ -3,6 +3,7 @@ import { startKeepaliveEnforcer } from '~/ws/handler'
 import { seedPacks } from './seed'
 import { restoreRoundTimers, restoreDisconnectDeadlines } from './game-engine'
 import { seedLogger, engineLogger } from './logger'
+import { recoveryRetryMs, recoveryStatus } from './recovery-status'
 
 let started = false
 
@@ -32,26 +33,51 @@ export function ensureServerBoot(): void {
   if (started) return
   started = true
   let reconciling = false
-  const reconcile = async () => {
-    if (reconciling) return
+  let reconciliation: Promise<void> | undefined
+  const reconcile = () => {
+    if (reconciling) return reconciliation!
     reconciling = true
-    try {
-      await restoreDisconnectDeadlines()
-    } catch (err) {
-      engineLogger.error({ err }, 'disconnect recovery failed')
-    } finally {
+    reconciliation = restoreDisconnectDeadlines().finally(() => {
       reconciling = false
-    }
+    })
+    return reconciliation
   }
-  void reconcile()
-  setInterval(() => void reconcile(), 1000).unref()
+  setInterval(() => {
+    void reconcile().catch((err) => engineLogger.error({ err }, 'disconnect recovery failed'))
+  }, 1000).unref()
   startSweeper()
   startKeepaliveEnforcer()
   seedWithRetry()
-  // S2-10: re-arm round timers lost when this process replaced the
-  // previous one mid-round. Fire-and-forget; a transient DB error here
-  // must not block boot.
-  void restoreRoundTimers().catch((err) =>
-    engineLogger.error({ err }, 'round timer restore failed'),
-  )
+  recoveryStatus.stage = 'rooms'
+  recoveryStatus.attempts = 0
+  const recover = async (): Promise<void> => {
+    recoveryStatus.attempts++
+    recoveryStatus.nextRetryAt = null
+    try {
+      const results = await Promise.allSettled([
+        reconcile().then(
+          () => {
+            recoveryStatus.connectionsReady = true
+          },
+          (err) => {
+            recoveryStatus.connectionsReady = false
+            throw err
+          },
+        ),
+        restoreRoundTimers((progress) => {
+          recoveryStatus.rooms = progress
+        }),
+      ])
+      const failures = results.filter((result) => result.status === 'rejected')
+      if (failures.length) throw new AggregateError(failures.map((result) => result.reason))
+      recoveryStatus.ready = true
+      recoveryStatus.stage = 'ready'
+    } catch (err) {
+      const delay = recoveryRetryMs(recoveryStatus.attempts)
+      recoveryStatus.nextRetryAt = Date.now() + delay
+      engineLogger.error({ err, delay }, 'room recovery incomplete; retrying')
+      setTimeout(() => void recover(), delay).unref()
+    }
+  }
+  void recover()
 }
