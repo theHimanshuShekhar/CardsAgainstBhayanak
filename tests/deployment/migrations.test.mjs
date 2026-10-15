@@ -33,7 +33,7 @@ testDrill(
     const sql = postgres(url, { max: 1, onnotice: () => {} })
     const temporary = mkdtempSync(join(tmpdir(), 'cab-issue52-'))
     try {
-      assert.match(new URL(url).pathname, /^\/cab_audit_issue(?:45|52)(?:_|$)/)
+      assert.match(new URL(url).pathname, /^\/cab_audit_issue(?:45|46|52)(?:_|$)/)
       const reviewedManifest = JSON.parse(readFileSync('drizzle/manifest.json', 'utf8'))
       const reviewedCount = reviewedManifest.length
       await sql.unsafe(
@@ -54,6 +54,8 @@ testDrill(
       await sql`INSERT INTO game_players (id,session_id,username,status,score) VALUES ('retained-player','retained-session','Retained','dropped',3)`
       await sql`INSERT INTO black_cards (id,pack_id,text,pick) VALUES ('retained-prompt','retained-pack','Prompt',1)`
       await sql`INSERT INTO game_rounds (id,session_id,round_num,black_card_id,winner_player_id) VALUES ('retained-round','retained-session',1,'retained-prompt','retained-player')`
+      await sql`INSERT INTO game_players (id,session_id,username,is_rando,score) VALUES ('retained-rando','retained-session','Rando Cardrissian',true,5)`
+      await sql`UPDATE game_sessions SET status='ended',end_mode='rando_won',winner_player_id='retained-rando',ended_at=now() WHERE id='retained-session'`
       assert.match(cli('apply').stderr, /Existing unversioned database/)
       await sql.unsafe('ALTER TABLE packs ADD COLUMN unexpected text')
       assert.match(cli('adopt').stderr, /differs from baseline/)
@@ -64,6 +66,41 @@ testDrill(
       assert.deepEqual(
         (await sql`SELECT id,score,status FROM game_players WHERE id='retained-player'`)[0],
         { id: 'retained-player', score: 3, status: 'dropped' },
+      )
+      assert.deepEqual(
+        (
+          await sql`SELECT id,session_id,status,end_mode,winner_player_id FROM game_matches WHERE id='retained-session'`
+        )[0],
+        {
+          id: 'retained-session',
+          session_id: 'retained-session',
+          status: 'ended',
+          end_mode: 'rando_won',
+          winner_player_id: 'retained-rando',
+        },
+      )
+      const [retained] =
+        await sql`SELECT final_players FROM game_matches WHERE id='retained-session'`
+      assert.equal(retained.final_players.find((player) => player.id === 'retained-rando').score, 5)
+      assert.equal(
+        retained.final_players.find((player) => player.id === 'retained-player').score,
+        3,
+      )
+      assert.equal(
+        (await sql`SELECT match_id FROM game_rounds WHERE id='retained-round'`)[0].match_id,
+        'retained-session',
+      )
+      // A replay gets independently numbered rounds and may retire/recreate Rando
+      // without deleting the historical winner or replacing its membership ID.
+      await sql`UPDATE game_players SET status='dropped' WHERE id='retained-rando'`
+      await sql`INSERT INTO game_players (id,session_id,username,is_rando) VALUES ('new-rando','retained-session','Rando Cardrissian',true)`
+      await sql`INSERT INTO game_matches (id,session_id,config) VALUES ('replay-match','retained-session','{}')`
+      await sql`INSERT INTO game_rounds (id,session_id,match_id,round_num,black_card_id) VALUES ('replay-round','retained-session','replay-match',1,'retained-prompt')`
+      assert.equal(
+        (
+          await sql`SELECT count(*)::int AS count FROM game_rounds WHERE session_id='retained-session'`
+        )[0].count,
+        2,
       )
       await sql`INSERT INTO game_players (id,session_id,username) VALUES ('replacement-player','retained-session','Retained')`
       assert.equal(

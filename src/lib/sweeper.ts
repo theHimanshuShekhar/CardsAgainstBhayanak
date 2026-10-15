@@ -1,6 +1,6 @@
 import cron from 'node-cron'
 import { db } from '~/db'
-import { gameSessions } from '~/db/schema'
+import { gameSessions, gameMatches } from '~/db/schema'
 import { redis, KEYS } from './redis'
 import { sweeperLogger } from './logger'
 import { sql, and, inArray } from 'drizzle-orm'
@@ -20,10 +20,23 @@ export async function sweepOnce(): Promise<number> {
   for (const session of candidates) {
     const count = await redis.hlen(KEYS.players(session.code))
     if (count === 0) {
-      await db
-        .update(gameSessions)
-        .set({ status: 'abandoned', endMode: 'abandoned', endedAt: new Date() })
-        .where(sql`${gameSessions.id} = ${session.id}`)
+      await db.transaction(async (tx) => {
+        const endedAt = new Date()
+        await tx
+          .update(gameSessions)
+          .set({ status: 'abandoned', endMode: 'abandoned', endedAt })
+          .where(sql`${gameSessions.id} = ${session.id}`)
+        if (session.currentMatchId)
+          await tx
+            .update(gameMatches)
+            .set({ status: 'abandoned', endMode: 'abandoned', endedAt })
+            .where(
+              and(
+                sql`${gameMatches.id} = ${session.currentMatchId}`,
+                inArray(gameMatches.status, ['active', 'paused']),
+              ),
+            )
+      })
       cleaned++
     }
   }

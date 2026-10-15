@@ -1,6 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { db } from '~/db'
-import { gameSessions, gamePlayers, gameRounds } from '~/db/schema'
+import { gameMatches, gamePlayers, gameRounds } from '~/db/schema'
 import { sql, eq, count, and, isNotNull } from 'drizzle-orm'
 import type { RuleId } from '~/lib/types'
 
@@ -23,30 +23,30 @@ export const Route = createFileRoute('/api/stats')({
       GET: async () => {
         const [gamesRow] = await db
           .select({ total: count() })
-          .from(gameSessions)
-          .where(eq(gameSessions.status, 'ended'))
+          .from(gameMatches)
+          .where(eq(gameMatches.status, 'ended'))
 
         // "Rounds judged" = rounds that resolved with a winner in games
         // that finished. game_rounds rows are inserted at round *start*
-        // for every session (lobby/abandoned/voided/in-progress too), so
+        // for every match (abandoned/voided/in-progress too), so
         // an unfiltered count(*) over-reports massively. Scope to ended
-        // sessions + a persisted winner, mirroring every other aggregate
+        // matches + a persisted winner, mirroring every other aggregate
         // here.
         const [roundsRow] = await db
           .select({ total: count() })
           .from(gameRounds)
-          .innerJoin(gameSessions, eq(gameSessions.id, gameRounds.sessionId))
-          .where(and(eq(gameSessions.status, 'ended'), isNotNull(gameRounds.winnerPlayerId)))
+          .innerJoin(gameMatches, eq(gameMatches.id, gameRounds.matchId))
+          .where(and(eq(gameMatches.status, 'ended'), isNotNull(gameRounds.winnerPlayerId)))
 
         const [randoRow] = await db
           .select({ total: count() })
-          .from(gameSessions)
-          .where(eq(gameSessions.endMode, 'rando_won'))
+          .from(gameMatches)
+          .where(eq(gameMatches.endMode, 'rando_won'))
 
         const [happyRow] = await db
           .select({ total: count() })
-          .from(gameSessions)
-          .where(eq(gameSessions.endMode, 'happy_ending'))
+          .from(gameMatches)
+          .where(eq(gameMatches.endMode, 'happy_ending'))
 
         const [playersRow] = await db
           .select({ total: count() })
@@ -62,14 +62,14 @@ export const Route = createFileRoute('/api/stats')({
           LIMIT 5
         `)
 
-        // Human players per ended game → distribution + average.
+        // Human players per ended match → distribution + average.
         const playerCountsRaw = await db.execute<{ cnt: string; sessions: string }>(sql`
           SELECT cnt, count(*) AS sessions FROM (
-            SELECT gp.session_id, count(*) AS cnt
-            FROM game_players gp
-            JOIN game_sessions gs ON gs.id = gp.session_id
-            WHERE gs.status = 'ended' AND gp.role = 'player' AND gp.is_rando = false
-            GROUP BY gp.session_id
+            SELECT gm.id, count(*) AS cnt
+            FROM game_matches gm
+            CROSS JOIN LATERAL jsonb_array_elements(coalesce(gm.final_players, '[]'::jsonb)) AS player
+            WHERE gm.status = 'ended' AND player->>'role' = 'player' AND (player->>'isRando')::boolean = false
+            GROUP BY gm.id
           ) t
           GROUP BY cnt
           ORDER BY cnt
@@ -77,14 +77,14 @@ export const Route = createFileRoute('/api/stats')({
 
         const gamesPerDayRaw = await db.execute<{ day: string; cnt: string }>(sql`
           SELECT to_char(date_trunc('day', ended_at), 'YYYY-MM-DD') AS day, count(*) AS cnt
-          FROM game_sessions
+          FROM game_matches
           WHERE status = 'ended' AND ended_at > now() - interval '30 days'
           GROUP BY 1 ORDER BY 1
         `)
 
         const packAdoptionRaw = await db.execute<{ name: string; slug: string; c: string }>(sql`
           SELECT p.name AS name, p.slug AS slug, count(DISTINCT gs.id) AS c
-          FROM game_sessions gs
+          FROM game_matches gs
           CROSS JOIN LATERAL jsonb_array_elements_text(gs.config->'packs') AS pid
           JOIN packs p ON p.id = pid
           WHERE gs.status = 'ended'
@@ -94,7 +94,7 @@ export const Route = createFileRoute('/api/stats')({
 
         const houseRulesRaw = await db.execute<{ rule: string; c: string }>(sql`
           SELECT rule AS rule, count(DISTINCT gs.id) AS c
-          FROM game_sessions gs
+          FROM game_matches gs
           CROSS JOIN LATERAL jsonb_array_elements_text(gs.config->'rules') AS rule
           WHERE gs.status = 'ended'
           GROUP BY rule

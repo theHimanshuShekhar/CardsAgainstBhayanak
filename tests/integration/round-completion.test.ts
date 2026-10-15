@@ -55,6 +55,8 @@ type Event = {
 const cases = [
   ['normal', 'outcome_sql'],
   ['normal', 'runtime_outcome_sql'],
+  ['godmode', 'terminal_lookup_sql'],
+  ['survival', 'terminal_lookup_sql'],
   ['serious_business', 'completionScores'],
   ['godmode', 'completionCards'],
   ['survival', 'completionPublished'],
@@ -72,7 +74,8 @@ const cases = [
 it.each(cases)(
   '%s resumes after %s without duplicate outcomes or lost cards',
   async (mode, fault) => {
-    const code = 'REC038'
+    const code =
+      fault === 'terminal_lookup_sql' ? (mode === 'godmode' ? 'T46GOD' : 'T46SRV') : 'REC038'
     const subscriber = redis.duplicate()
     const events: Event[] = []
     subscriber.on('message', (_channel, raw) => events.push(JSON.parse(raw)))
@@ -183,7 +186,29 @@ it.each(cases)(
         )
         return
       }
-      if (fault.endsWith('_sql')) {
+      if (fault === 'terminal_lookup_sql') {
+        // Make SQL unavailable immediately after the terminal outcome is accepted.
+        // The real failing query must be inside an automatically retried continuation.
+        const realEval = redis.eval.bind(redis)
+        let injected = false
+        const spy = vi
+          .spyOn(redis, 'eval')
+          .mockImplementation(async (...args: Parameters<typeof redis.eval>) => {
+            const result = await realEval(...args)
+            const terminal =
+              mode === 'godmode'
+                ? String(args[0]).includes("'voteClosed', '1'") &&
+                  typeof result === 'string' &&
+                  Boolean(JSON.parse(result).leaders)
+                : String(args[0]).includes('#remaining == 1') && Boolean(result)
+            if (!injected && terminal) {
+              injected = true
+              await sql.unsafe('ALTER TABLE game_rounds RENAME TO unavailable_game_rounds')
+            }
+            return result
+          })
+        restoreFault = () => spy.mockRestore()
+      } else if (fault.endsWith('_sql')) {
         const table = fault === 'end_game_sql' ? 'game_sessions' : 'game_rounds'
         const operation = fault === 'next_round_sql' ? 'INSERT' : 'UPDATE'
         const guard =
@@ -251,6 +276,8 @@ it.each(cases)(
       }
       await expect(resolve()).rejects.toThrow()
       restoreFault()
+      if (fault === 'terminal_lookup_sql')
+        await sql.unsafe('ALTER TABLE unavailable_game_rounds RENAME TO game_rounds')
       if (mode === 'survival' && fault === 'completionEndPublished') {
         const { serve } = await import('srvx')
         const { gameWebSocketPlugin } = await import('../../src/ws/server')
@@ -301,7 +328,7 @@ it.each(cases)(
       for (const table of ['game_rounds', 'game_sessions'])
         await sql.unsafe(`DROP TRIGGER IF EXISTS fail_completion ON ${table}`)
       await sql.unsafe('DROP FUNCTION IF EXISTS fail_completion()')
-      if (fault !== 'runtime_outcome_sql') {
+      if (fault !== 'runtime_outcome_sql' && fault !== 'terminal_lookup_sql') {
         await engine.restoreRoundTimers()
         await engine.restoreRoundTimers()
       }
@@ -381,6 +408,8 @@ it.each(cases)(
         })
       }
       await snapshotServer?.close(true)
+      if ((await sql`SELECT to_regclass('public.unavailable_game_rounds') AS name`)[0]?.name)
+        await sql.unsafe('ALTER TABLE unavailable_game_rounds RENAME TO game_rounds')
       for (const table of ['game_rounds', 'game_sessions'])
         await sql.unsafe(`DROP TRIGGER IF EXISTS fail_completion ON ${table}`)
       await sql.unsafe('DROP FUNCTION IF EXISTS fail_completion()')

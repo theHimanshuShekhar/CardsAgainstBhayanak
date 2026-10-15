@@ -100,6 +100,8 @@ export const gameSessions = pgTable(
     // hostPlayerId = NULL) and only then inserts the host player. The
     // app layer is the integrity guarantor for these two columns; the
     // sweeper / endGame paths preserve it.
+    // Application-maintained pointer avoids the room → match → room FK cycle.
+    currentMatchId: text('current_match_id'),
     hostPlayerId: text('host_player_id'),
     winnerPlayerId: text('winner_player_id'),
     endMode: endModeEnum('end_mode'),
@@ -113,6 +115,24 @@ export const gameSessions = pgTable(
       .where(sql`${t.status} IN ('active', 'paused')`),
   ],
 )
+
+// A room survives replays; a match is one independently counted playthrough.
+// Final players are immutable snapshots, because room memberships carry live scores.
+export const gameMatches = pgTable('game_matches', {
+  id: text('id')
+    .primaryKey()
+    .$defaultFn(() => createId()),
+  sessionId: text('session_id')
+    .notNull()
+    .references(() => gameSessions.id, { onDelete: 'cascade' }),
+  status: sessionStatusEnum('status').notNull().default('active'),
+  config: jsonb('config').notNull(),
+  winnerPlayerId: text('winner_player_id'),
+  endMode: endModeEnum('end_mode'),
+  finalPlayers: jsonb('final_players'),
+  startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
+  endedAt: timestamp('ended_at', { withTimezone: true }),
+})
 
 export const gamePlayers = pgTable(
   'game_players',
@@ -141,7 +161,7 @@ export const gamePlayers = pgTable(
     // at most one Rando per game
     uniqueIndex('unique_rando_per_session')
       .on(t.sessionId)
-      .where(sql`${t.isRando} = true`),
+      .where(sql`${t.isRando} = true AND ${t.status} != 'dropped'`),
   ],
 )
 
@@ -154,6 +174,9 @@ export const gameRounds = pgTable(
     sessionId: text('session_id')
       .notNull()
       .references(() => gameSessions.id),
+    matchId: text('match_id')
+      .notNull()
+      .references(() => gameMatches.id),
     roundNum: integer('round_num').notNull(),
     blackCardId: text('black_card_id')
       .notNull()
@@ -166,7 +189,7 @@ export const gameRounds = pgTable(
     playedAt: timestamp('played_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    unique().on(t.sessionId, t.roundNum),
+    unique().on(t.matchId, t.roundNum),
     index('gin_winning_fills').on(t.winningSubmissionFills),
   ],
 )
@@ -199,6 +222,12 @@ export const gameSessionsRelations = relations(gameSessions, ({ one, many }) => 
   }),
   players: many(gamePlayers),
   rounds: many(gameRounds),
+  matches: many(gameMatches),
+}))
+
+export const gameMatchesRelations = relations(gameMatches, ({ one, many }) => ({
+  room: one(gameSessions, { fields: [gameMatches.sessionId], references: [gameSessions.id] }),
+  rounds: many(gameRounds),
 }))
 
 export const gamePlayersRelations = relations(gamePlayers, ({ one }) => ({
@@ -209,6 +238,7 @@ export const gamePlayersRelations = relations(gamePlayers, ({ one }) => ({
 }))
 
 export const gameRoundsRelations = relations(gameRounds, ({ one }) => ({
+  match: one(gameMatches, { fields: [gameRounds.matchId], references: [gameMatches.id] }),
   session: one(gameSessions, { fields: [gameRounds.sessionId], references: [gameSessions.id] }),
   blackCard: one(blackCards, { fields: [gameRounds.blackCardId], references: [blackCards.id] }),
   czar: one(gamePlayers, {

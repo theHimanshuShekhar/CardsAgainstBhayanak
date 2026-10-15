@@ -1,5 +1,13 @@
 import { db } from '~/db'
-import { blackCards, whiteCards, gameSessions, gamePlayers, gameRounds, packs } from '~/db/schema'
+import {
+  blackCards,
+  whiteCards,
+  gameSessions,
+  gameMatches,
+  gamePlayers,
+  gameRounds,
+  packs,
+} from '~/db/schema'
 import { inArray, eq, desc, and } from 'drizzle-orm'
 import { randomInt, shuffle, pick } from './rng'
 import { redis, KEYS, ROOM_TTL_SECONDS } from './redis'
@@ -108,6 +116,27 @@ export async function startGame(code: string, hostPlayerId?: string): Promise<vo
   const config = session.config as GameConfig
 
   await state.updateLiveRoom(code, {}, hostPlayerId)
+  if (!session.currentMatchId) {
+    const match = await db.transaction(async (tx) => {
+      // Serialize first-start allocation, including repeated start attempts.
+      const [room] = await tx
+        .select()
+        .from(gameSessions)
+        .where(eq(gameSessions.id, session.id))
+        .for('update')
+      if (room!.currentMatchId) return room!.currentMatchId
+      const [created] = await tx
+        .insert(gameMatches)
+        .values({ sessionId: session.id, config })
+        .returning()
+      await tx
+        .update(gameSessions)
+        .set({ currentMatchId: created!.id })
+        .where(eq(gameSessions.id, session.id))
+      return created!.id
+    })
+    session.currentMatchId = match
+  }
   await buildDecks(code, config.packs)
 
   // Ordered by joined_at: czarOrder is built from this and the spec
@@ -296,6 +325,7 @@ export async function startRound(
     .insert(gameRounds)
     .values({
       sessionId: session.id,
+      matchId: session.currentMatchId!,
       roundNum: round,
       blackCardId: black.id,
       czarPlayerId: czarId ?? undefined,
@@ -307,7 +337,15 @@ export async function startRound(
     : await db
         .select()
         .from(gameRounds)
-        .where(and(eq(gameRounds.sessionId, session.id), eq(gameRounds.roundNum, round)))
+        .where(
+          and(
+            and(
+              eq(gameRounds.sessionId, session.id),
+              eq(gameRounds.matchId, session.currentMatchId!),
+            ),
+            eq(gameRounds.roundNum, round),
+          ),
+        )
   const roundRow = inserted ?? existing
   if (!roundRow) throw new Error('round missing')
   if (existing && existing.blackCardId !== black.id) throw new Error('round already exists')
@@ -316,8 +354,8 @@ export async function startRound(
     `
     if redis.call('HGET', KEYS[1], 'roundId') == ARGV[1] then return end
     redis.call('HDEL', KEYS[1], 'winnerId', 'winningPlayerId', 'winningSubmissionId', 'resolvedSubmissions', 'ranking', 'eliminationTurnPlayerId', 'outcomeClaim', 'completionClaim', 'voteEpoch', 'voteClosed', 'voteCandidateIds', 'postResolveResumeAt', 'roundTimerExpiresAt')
-    redis.call('HSET', KEYS[1], 'roundId', ARGV[1], 'czarId', ARGV[2], 'phase', 'picking')
-    redis.call('HSET', KEYS[2], 'currentRound', ARGV[3])
+    redis.call('HSET', KEYS[1], 'roundId', ARGV[1], 'matchId', ARGV[5], 'czarId', ARGV[2], 'phase', 'picking')
+    redis.call('HSET', KEYS[2], 'currentRound', ARGV[3], 'matchId', ARGV[5])
     redis.call('DEL', KEYS[3])
     redis.call('EXPIRE', KEYS[1], ARGV[4])
   `,
@@ -329,6 +367,7 @@ export async function startRound(
     czarId ?? '',
     round,
     ROOM_TTL_SECONDS,
+    session.currentMatchId!,
   )
   await touchSessionActivity(code)
 
@@ -461,7 +500,12 @@ export async function expireRoundTimer(
       ? await db
           .select()
           .from(gameRounds)
-          .where(eq(gameRounds.sessionId, session.id))
+          .where(
+            and(
+              eq(gameRounds.sessionId, session.id),
+              eq(gameRounds.matchId, session.currentMatchId!),
+            ),
+          )
           .orderBy(desc(gameRounds.roundNum))
           .limit(1)
       : []
@@ -497,6 +541,7 @@ export async function restoreRoundTimers(): Promise<void> {
   const sessions = await db
     .select({
       id: gameSessions.id,
+      currentMatchId: gameSessions.currentMatchId,
       code: gameSessions.code,
       config: gameSessions.config,
       status: gameSessions.status,
@@ -509,7 +554,12 @@ export async function restoreRoundTimers(): Promise<void> {
     const [currentRow] = await db
       .select()
       .from(gameRounds)
-      .where(and(eq(gameRounds.sessionId, s.id), eq(gameRounds.roundNum, currentRound)))
+      .where(
+        and(
+          and(eq(gameRounds.sessionId, s.id), eq(gameRounds.matchId, s.currentMatchId!)),
+          eq(gameRounds.roundNum, currentRound),
+        ),
+      )
     if (
       !currentRow ||
       !(await state.ensureRoundIdentity(code, currentRound, currentRow.id, currentRow.czarPlayerId))
@@ -577,7 +627,7 @@ export async function restoreRoundTimers(): Promise<void> {
       const [roundRow] = await db
         .select({ czarPlayerId: gameRounds.czarPlayerId })
         .from(gameRounds)
-        .where(eq(gameRounds.sessionId, s.id))
+        .where(and(eq(gameRounds.sessionId, s.id), eq(gameRounds.matchId, s.currentMatchId!)))
         .orderBy(desc(gameRounds.roundNum))
         .limit(1)
       const czarId = roundRow?.czarPlayerId ?? null
@@ -618,7 +668,7 @@ export async function restoreRoundTimers(): Promise<void> {
       const [roundRow] = await db
         .select({ czarPlayerId: gameRounds.czarPlayerId })
         .from(gameRounds)
-        .where(eq(gameRounds.sessionId, s.id))
+        .where(and(eq(gameRounds.sessionId, s.id), eq(gameRounds.matchId, s.currentMatchId!)))
         .orderBy(desc(gameRounds.roundNum))
         .limit(1)
       const czarId = roundRow?.czarPlayerId ?? null
@@ -708,7 +758,9 @@ export async function submissionProgress(
   const [roundRow] = await db
     .select()
     .from(gameRounds)
-    .where(eq(gameRounds.sessionId, session.id))
+    .where(
+      and(eq(gameRounds.sessionId, session.id), eq(gameRounds.matchId, session.currentMatchId!)),
+    )
     .orderBy(desc(gameRounds.roundNum))
     .limit(1)
   const czarId = roundRow?.czarPlayerId ?? null
@@ -744,7 +796,9 @@ export async function checkRoundReady(code: string): Promise<void> {
   const [roundRow] = await db
     .select()
     .from(gameRounds)
-    .where(eq(gameRounds.sessionId, session.id))
+    .where(
+      and(eq(gameRounds.sessionId, session.id), eq(gameRounds.matchId, session.currentMatchId!)),
+    )
     .orderBy(desc(gameRounds.roundNum))
     .limit(1)
   if (!roundRow) return
@@ -867,7 +921,15 @@ export async function submitCards(
     ? await db
         .select()
         .from(gameRounds)
-        .where(and(eq(gameRounds.sessionId, session.id), eq(gameRounds.roundNum, round)))
+        .where(
+          and(
+            and(
+              eq(gameRounds.sessionId, session.id),
+              eq(gameRounds.matchId, session.currentMatchId!),
+            ),
+            eq(gameRounds.roundNum, round),
+          ),
+        )
     : []
   if (!roundRow || session?.status !== 'active')
     throw new GameCommandError('invalid_state', 'No active round')
@@ -983,7 +1045,12 @@ async function authorizeCzarResolution(
   const [roundRow] = await db
     .select()
     .from(gameRounds)
-    .where(and(eq(gameRounds.sessionId, session.id), eq(gameRounds.roundNum, round)))
+    .where(
+      and(
+        and(eq(gameRounds.sessionId, session.id), eq(gameRounds.matchId, session.currentMatchId!)),
+        eq(gameRounds.roundNum, round),
+      ),
+    )
   if (!roundRow) throw new GameCommandError('invalid_state', 'No current round')
   if (roundRow.czarPlayerId !== playerId)
     throw new GameCommandError('not_authorized', 'Only the current Czar can resolve the round')
@@ -1058,10 +1125,12 @@ async function persistRoundOutcome(
     ranking?: Submission[]
     voteTally?: Record<string, number>
     roundNumber?: number
+    roundId: string
+    matchId?: string
   },
 ): Promise<void> {
   const [session] = await db
-    .select({ id: gameSessions.id })
+    .select({ id: gameSessions.id, currentMatchId: gameSessions.currentMatchId })
     .from(gameSessions)
     .where(eq(gameSessions.code, code))
   if (!session) return
@@ -1074,7 +1143,14 @@ async function persistRoundOutcome(
       ...(outcome.ranking !== undefined ? { ranking: outcome.ranking } : {}),
       ...(outcome.voteTally !== undefined ? { voteTally: outcome.voteTally } : {}),
     })
-    .where(and(eq(gameRounds.sessionId, session.id), eq(gameRounds.roundNum, round)))
+    .where(
+      and(
+        eq(gameRounds.sessionId, session.id),
+        eq(gameRounds.matchId, outcome.matchId ?? session.currentMatchId!),
+        eq(gameRounds.id, outcome.roundId),
+        eq(gameRounds.roundNum, round),
+      ),
+    )
   await touchSessionActivity(code)
 }
 
@@ -1082,6 +1158,8 @@ async function persistRoundOutcome(
 // commits with its checkpoint; SQL outcome updates are safe to repeat.
 type CompletionIntent = {
   roundId: string
+  // Optional only for pending intents written before the match migration.
+  matchId?: string
   roundNumber: number
   mode?: 'normal' | 'survival' | 'godmode' | 'serious_business'
   winnerPlayerId: string
@@ -1099,9 +1177,12 @@ async function claimCompletionIntent(
   code: string,
   roundId: string,
   phase: string,
-  outcome: Omit<CompletionIntent, 'roundId' | 'roundNumber'>,
+  outcome: Omit<CompletionIntent, 'roundId' | 'roundNumber' | 'matchId'>,
 ): Promise<boolean> {
-  const config = JSON.parse((await redis.hget(KEYS.game(code), 'config')) ?? '{}') as GameConfig
+  // Match identity was installed with the round, before votes/eliminations.
+  // No SQL may precede the durable intent after a terminal action is accepted.
+  const [rawConfig, matchId] = await redis.hmget(KEYS.game(code), 'config', 'matchId')
+  const config = JSON.parse(rawConfig ?? '{}') as GameConfig
   const mode = config.rules?.includes('survival')
     ? 'survival'
     : config.rules?.includes('godmode')
@@ -1128,7 +1209,13 @@ async function claimCompletionIntent(
       phase,
       outcome.winnerPlayerId,
       outcome.submissionId,
-      JSON.stringify({ ...outcome, mode, roundId, roundNumber: await state.getCurrentRound(code) }),
+      JSON.stringify({
+        ...outcome,
+        mode,
+        roundId,
+        matchId: matchId ?? undefined,
+        roundNumber: await state.getCurrentRound(code),
+      }),
       ROOM_TTL_SECONDS,
     )) === 1
   )
@@ -1193,10 +1280,32 @@ async function continueRoundCompletion(code: string): Promise<void> {
   }
 }
 
+// Round IDs also fence pre-migration intents: round number 1 in a replay
+// must never be mistaken for round number 1 in the completed match.
+async function completionBelongsToCurrentMatch(
+  code: string,
+  intent: CompletionIntent,
+): Promise<boolean> {
+  const [row] = await db
+    .select({ id: gameRounds.id })
+    .from(gameRounds)
+    .innerJoin(gameSessions, eq(gameSessions.id, gameRounds.sessionId))
+    .where(
+      and(
+        eq(gameSessions.code, code),
+        eq(gameRounds.id, intent.roundId),
+        eq(gameRounds.matchId, gameSessions.currentMatchId),
+        ...(intent.matchId ? [eq(gameRounds.matchId, intent.matchId)] : []),
+      ),
+    )
+  return Boolean(row)
+}
+
 async function runRoundCompletion(code: string): Promise<void> {
   const raw = await redis.hget(KEYS.game(code), 'completionIntent')
   if (!raw) return finalizeRoundAfterPause(code)
   const intent = JSON.parse(raw) as CompletionIntent
+  if (!(await completionBelongsToCurrentMatch(code, intent))) return
   if (await redis.hget(KEYS.game(code), 'completionEndPublished')) {
     await finalizeRoundAfterPause(code)
     return
@@ -1481,6 +1590,7 @@ async function finalizeRoundAfterPause(code: string): Promise<void> {
   if (!cursor) return
   if (cursor > Date.now()) await sleep(cursor - Date.now())
   if (resettingRooms.has(code)) return
+  if (intent && !(await completionBelongsToCurrentMatch(code, intent))) return
   if (raw && (await redis.hget(KEYS.game(code), 'completionIntent')) !== raw) return
   const acknowledge = async () => {
     if (raw)
@@ -1556,11 +1666,39 @@ export async function endGame(code: string, mode: GameOverMode, winnerId?: strin
   const players = await state.getAllPlayers(code)
   const finalScores = toPlayerScores(players, null)
 
-  const [updated] = await db
-    .update(gameSessions)
-    .set({ status: 'ended', endedAt: new Date(), endMode: mode, winnerPlayerId: winnerId ?? null })
-    .where(eq(gameSessions.code, code))
-    .returning({ createdAt: gameSessions.createdAt })
+  const updated = await db.transaction(async (tx) => {
+    const [room] = await tx
+      .select()
+      .from(gameSessions)
+      .where(eq(gameSessions.code, code))
+      .for('update')
+    if (!room) return undefined
+    const endedAt = new Date()
+    await tx
+      .update(gameSessions)
+      .set({ status: 'ended', endedAt, endMode: mode, winnerPlayerId: winnerId ?? null })
+      .where(eq(gameSessions.id, room.id))
+    if (room.currentMatchId)
+      await tx
+        .update(gameMatches)
+        .set({
+          status: 'ended',
+          endedAt,
+          endMode: mode,
+          winnerPlayerId: winnerId ?? null,
+          finalPlayers: players,
+        })
+        .where(
+          and(
+            eq(gameMatches.id, room.currentMatchId),
+            inArray(gameMatches.status, ['active', 'paused']),
+          ),
+        )
+    const [match] = room.currentMatchId
+      ? await tx.select().from(gameMatches).where(eq(gameMatches.id, room.currentMatchId))
+      : []
+    return { createdAt: match?.startedAt ?? room.createdAt }
+  })
 
   await state.updateLiveRoom(code, { status: 'ended' })
   const completion = await redis.hget(KEYS.game(code), 'completionIntent')
@@ -1648,19 +1786,19 @@ async function performResetGame(
     ],
     'ended',
   )
-  await redis.hdel(KEYS.game(code), 'czarStartOffset', 'happyEndingArmed', 'happyEndingFinal')
+  await redis.hdel(
+    KEYS.game(code),
+    'matchId',
+    'czarStartOffset',
+    'happyEndingArmed',
+    'happyEndingFinal',
+  )
 
-  // Drop the prior game's round history. buildSnapshot derives the live
-  // round from max(gameRounds.roundNum), and startRound inserts with
-  // onConflictDoNothing on unique(session_id, round_num) — leaving the old
-  // rows would pin the snapshot to the final round and silently no-op the
-  // new round 1. A reset is a fresh game, so the history goes.
-  await db.delete(gameRounds).where(eq(gameRounds.sessionId, session.id))
-
-  // Drop the prior Rando row(s) — startGame re-creates Rando if the rule
-  // is still configured (partial-unique on is_rando per session).
+  // Keep prior rounds and their referenced synthetic identities. Only live
+  // membership is retired; the next match gets a new Rando identity.
   await db
-    .delete(gamePlayers)
+    .update(gamePlayers)
+    .set({ status: 'dropped' })
     .where(and(eq(gamePlayers.sessionId, session.id), eq(gamePlayers.isRando, true)))
 
   await redis.hdel(
@@ -1701,6 +1839,7 @@ async function performResetGame(
   await db
     .update(gameSessions)
     .set({
+      currentMatchId: null,
       status: mode === 'lobby' ? 'lobby' : 'active',
       endedAt: null,
       endMode: null,
@@ -1767,7 +1906,9 @@ export async function voidRound(code: string, reason: string): Promise<void> {
   const [roundRow] = await db
     .select()
     .from(gameRounds)
-    .where(eq(gameRounds.sessionId, session.id))
+    .where(
+      and(eq(gameRounds.sessionId, session.id), eq(gameRounds.matchId, session.currentMatchId!)),
+    )
     .orderBy(desc(gameRounds.roundNum))
     .limit(1)
   if (!roundRow) return
@@ -1976,7 +2117,9 @@ export async function dropPlayer(
   const [roundRow] = await db
     .select()
     .from(gameRounds)
-    .where(eq(gameRounds.sessionId, session.id))
+    .where(
+      and(eq(gameRounds.sessionId, session.id), eq(gameRounds.matchId, session.currentMatchId!)),
+    )
     .orderBy(desc(gameRounds.roundNum))
     .limit(1)
   if (roundRow?.czarPlayerId !== playerId) return
@@ -2079,7 +2222,12 @@ async function currentRoundIdentity(code: string): Promise<string | null> {
   const [row] = await db
     .select()
     .from(gameRounds)
-    .where(and(eq(gameRounds.sessionId, session.id), eq(gameRounds.roundNum, round)))
+    .where(
+      and(
+        and(eq(gameRounds.sessionId, session.id), eq(gameRounds.matchId, session.currentMatchId!)),
+        eq(gameRounds.roundNum, round),
+      ),
+    )
   if (!row || !(await state.ensureRoundIdentity(code, round, row.id, row.czarPlayerId))) return null
   return row.id
 }
@@ -2176,7 +2324,12 @@ export async function eliminateSubmission(
   const [roundRow] = await db
     .select()
     .from(gameRounds)
-    .where(and(eq(gameRounds.sessionId, session.id), eq(gameRounds.id, roundId)))
+    .where(
+      and(
+        and(eq(gameRounds.sessionId, session.id), eq(gameRounds.matchId, session.currentMatchId!)),
+        eq(gameRounds.id, roundId),
+      ),
+    )
   if (!roundRow) throw new GameCommandError('invalid_state', 'No current round')
   const czarId = roundRow.czarPlayerId
   const activePlayers = (await state.getAllPlayers(code)).filter(
@@ -2298,14 +2451,16 @@ async function resolveRanking(
 // stays correct between rounds — `null` in transition/lobby is fine.
 async function broadcastScores(code: string): Promise<void> {
   const [session] = await db
-    .select({ id: gameSessions.id })
+    .select({ id: gameSessions.id, currentMatchId: gameSessions.currentMatchId })
     .from(gameSessions)
     .where(eq(gameSessions.code, code))
   if (!session) return
   const [latestRound] = await db
     .select({ czarPlayerId: gameRounds.czarPlayerId })
     .from(gameRounds)
-    .where(eq(gameRounds.sessionId, session.id))
+    .where(
+      and(eq(gameRounds.sessionId, session.id), eq(gameRounds.matchId, session.currentMatchId!)),
+    )
     .orderBy(desc(gameRounds.roundNum))
     .limit(1)
   const players = await state.getAllPlayers(code)
@@ -2350,7 +2505,12 @@ export async function gamble(code: string, playerId: string): Promise<void> {
   const [roundRow] = await db
     .select()
     .from(gameRounds)
-    .where(and(eq(gameRounds.sessionId, session.id), eq(gameRounds.roundNum, round)))
+    .where(
+      and(
+        and(eq(gameRounds.sessionId, session.id), eq(gameRounds.matchId, session.currentMatchId!)),
+        eq(gameRounds.roundNum, round),
+      ),
+    )
   if (!roundRow) throw new GameCommandError('invalid_state', 'No active round')
   const [black] = await db.select().from(blackCards).where(eq(blackCards.id, roundRow.blackCardId))
   if (!black) throw new GameCommandError('invalid_state', 'No active prompt')
