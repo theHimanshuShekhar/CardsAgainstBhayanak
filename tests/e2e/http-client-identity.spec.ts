@@ -2,17 +2,35 @@ import { spawn, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
 import { createServer, request as httpRequest } from 'node:http'
 import { test as base, expect } from '@playwright/test'
+import { replayInfrastructure } from '../fixtures/replay-infrastructure'
 
 // Runs the actual production entry point, with production rate enforcement.
-// Uses the suite's disposable DB/Redis; HTTP clients bind distinct loopback
-// addresses to exercise transport identity without mocking application code.
-const test = base.extend<{
-  productionUrl: string
-  proxyUrl: string
-  trustedProxyIps: string
-}>({
+// Owns separate disposable stores so boot recovery cannot compete with the
+// suite's runtime. HTTP clients bind distinct loopback addresses to exercise
+// transport identity without mocking application code.
+const test = base.extend<
+  {
+    productionUrl: string
+    proxyUrl: string
+    trustedProxyIps: string
+  },
+  { productionStorage: Awaited<ReturnType<typeof replayInfrastructure>> }
+>({
+  productionStorage: [
+    // eslint-disable-next-line no-empty-pattern -- Playwright requires destructured fixture arguments.
+    async ({}, runFixture) => {
+      const infrastructure = await replayInfrastructure()
+      try {
+        await runFixture(infrastructure)
+      } finally {
+        await infrastructure.close()
+      }
+    },
+    { scope: 'worker', timeout: 90_000 },
+  ],
   trustedProxyIps: ['::ffff:127.0.0.2', { option: true }],
-  productionUrl: async ({ trustedProxyIps }, runFixture) => {
+  productionUrl: async ({ trustedProxyIps, productionStorage }, runFixture) => {
+    await productionStorage.reset()
     const reservation = createServer()
     reservation.listen(0, '127.0.0.1')
     await once(reservation, 'listening')
@@ -23,7 +41,9 @@ const test = base.extend<{
     const child = spawn(process.execPath, ['--import', 'tsx', 'server.prod.ts'], {
       env: {
         ...process.env,
+        ...productionStorage.env,
         NODE_ENV: 'production',
+        PUBLIC_SITE_URL: 'https://cards.example.test',
         PORT: String(port),
         CAB_TRUSTED_PROXY_IPS: trustedProxyIps,
       },

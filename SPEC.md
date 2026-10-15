@@ -1038,6 +1038,15 @@ Test matrix using multi-context (separate browser contexts per player):
 
 ## Docker Compose / Deployment — ✅ DONE
 
+Supported runtime ownership is one production app process per private PostgreSQL
+database and dedicated Redis database. After schema validation and before loading
+engines or jobs, the production entry takes a dedicated PostgreSQL session
+advisory lock. A competing app exits before listening or executing room effects;
+loss of the ownership session stops the process and requires supervisor restart.
+Overlapping rolling replicas and transaction-pooling ownership connections are
+unsupported. See [runtime ownership](docs/operations/runtime-ownership.md) for
+failure-detection limits and the separate future per-room lease/fencing design.
+
 ### Services
 
 ```yaml
@@ -1097,6 +1106,14 @@ Structured JSON logs via [`pino`](https://github.com/pinojs/pino):
 - **Production:** JSON stdout, shipped to [Axiom](https://axiom.co/) using the official `@axiomhq/pino` transport. Env vars: `AXIOM_TOKEN`, `AXIOM_DATASET`. Free tier (500GB ingest/mo) easily covers expected volume.
 
 Loggers (named) per module: `cab.ws`, `cab.api`, `cab.engine`, `cab.seed`, `cab.sweeper`. Log levels: `trace` (per-message WS spam, dev only), `debug` (state transitions), `info` (game lifecycle: created/started/ended), `warn` (recoverable issues like seed retries), `error` (5xx, unhandled exceptions).
+
+Ownership-loss records use the `cab.runtime` logger at `fatal` level with a
+synchronous Pino JSON destination on stderr in every environment. It attempts
+the loss reason before immediate process termination, with no retry if stderr
+rejects the write or is full. No asynchronous pretty/Axiom worker drain delays
+the fail-stop. Capture these terminal records through the supervisor/container
+stderr log collector; in-process Axiom delivery
+is not guaranteed during immediate exit.
 
 Every log line carries `{ roomCode?, playerId? }` when applicable for filtering.
 
