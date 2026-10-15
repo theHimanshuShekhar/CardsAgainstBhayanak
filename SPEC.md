@@ -1106,10 +1106,11 @@ Structured JSON logs via [`pino`](https://github.com/pinojs/pino):
 Loggers (named) per module: `cab.ws`, `cab.api`, `cab.engine`, `cab.seed`, `cab.sweeper`. Log levels: `trace` (per-message WS spam, dev only), `debug` (state transitions), `info` (game lifecycle: created/started/ended), `warn` (recoverable issues like seed retries), `error` (5xx, unhandled exceptions).
 
 Ownership-loss records use the `cab.runtime` logger at `fatal` level with a
-synchronous Pino JSON destination on stderr in every environment. The record
-includes the loss reason before immediate process termination; no asynchronous
-pretty/Axiom worker drain delays the fail-stop. Capture these terminal records
-through the supervisor/container stderr log collector; in-process Axiom delivery
+synchronous Pino JSON destination on stderr in every environment. It attempts
+the loss reason before immediate process termination, with no retry if stderr
+rejects the write or is full. No asynchronous pretty/Axiom worker drain delays
+the fail-stop. Capture these terminal records through the supervisor/container
+stderr log collector; in-process Axiom delivery
 is not guaranteed during immediate exit.
 
 Every log line carries `{ roomCode?, playerId? }` when applicable for filtering.

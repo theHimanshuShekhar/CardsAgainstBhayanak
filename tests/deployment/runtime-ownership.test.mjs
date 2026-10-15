@@ -296,3 +296,42 @@ test(
     }
   },
 )
+
+test(
+  'ownership loss stops the runtime even when stderr is saturated and unread',
+  { timeout: 15000 },
+  async (t) => {
+    assert.equal(new URL(process.env.DATABASE_URL).pathname, '/cab_audit_issue54')
+    assert.equal(new URL(process.env.REDIS_URL).pathname, '/9')
+    const sql = postgres(process.env.DATABASE_URL)
+    let owner
+    try {
+      await assert.rejects(fetch(base + '/api/healthz'), 'Port 3154 must be unoccupied')
+      const preload = new URL('../fixtures/saturate-stderr.mjs', import.meta.url)
+      owner = start(base, {
+        NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ''} --import=${preload.href}`,
+      })
+      await owner.ready()
+      owner.child.stderr.pause()
+      owner.child.kill('SIGUSR2')
+      await until(() => owner.output.includes('CAB_STDERR_SATURATED:'), 3000)
+      const saturated = Number(owner.output.match(/CAB_STDERR_SATURATED:(\d+)/)[1])
+      assert.ok(saturated > 0, 'The real stderr pipe must be full before ownership loss')
+      const lostAt = Date.now()
+      const terminated =
+        await sql`SELECT pg_terminate_backend(pid) AS terminated FROM pg_stat_activity WHERE datname=current_database() AND application_name='cab-runtime-owner'`
+      assert.equal(terminated.length, 1)
+      assert.equal(terminated[0].terminated, true)
+      await until(() => owner.child.exitCode !== null, 2000)
+      assert.equal(owner.child.exitCode, 1)
+      t.diagnostic(
+        `Unread stderr saturated after ${saturated} bytes; runtime exited in ${Date.now() - lostAt}ms after ownership loss`,
+      )
+      await assert.rejects(fetch(base + '/api/healthz'))
+    } finally {
+      await owner?.stop()
+      owner?.child.stderr.resume()
+      await sql.end({ timeout: 1 })
+    }
+  },
+)

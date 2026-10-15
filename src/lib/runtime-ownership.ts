@@ -1,11 +1,12 @@
 import postgres from 'postgres'
 import pino from 'pino'
 
-// Fail-stop records must reach stderr before exit, without waiting for the
+// Try stderr synchronously, without retrying a full pipe or waiting for the
 // ordinary logger's asynchronous pretty/Axiom worker to start or flush.
-const ownershipLogger = pino({ level: 'fatal' }, pino.destination({ dest: 2, sync: true })).child({
-  mod: 'cab.runtime',
-})
+const ownershipLogger = pino(
+  { level: 'fatal' },
+  pino.destination({ dest: 2, sync: true, retryEAGAIN: () => false }),
+).child({ mod: 'cab.runtime' })
 
 // Session ownership is database-wide and distinct from the migration lock.
 // Keep this connection private: a pooled/reconnecting session is not an owner.
