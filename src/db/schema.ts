@@ -2,6 +2,7 @@ import { relations, sql } from 'drizzle-orm'
 import {
   boolean,
   char,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -11,6 +12,7 @@ import {
   timestamp,
   unique,
   uniqueIndex,
+  type AnyPgColumn,
 } from 'drizzle-orm/pg-core'
 import { createId } from '@paralleldrive/cuid2'
 
@@ -92,15 +94,8 @@ export const gameSessions = pgTable(
     code: char('code', { length: 6 }).notNull().unique(),
     status: sessionStatusEnum('status').notNull().default('lobby'),
     config: jsonb('config').notNull(),
-    // S3-NEW-F: hostPlayerId and winnerPlayerId intentionally lack
-    // `.references(() => gamePlayers.id)` — gamePlayers.sessionId already
-    // FKs to gameSessions.id, so a back-reference here would form a cycle
-    // that breaks Drizzle's table-create order and (more importantly)
-    // the create-game flow which inserts the session row first (with
-    // hostPlayerId = NULL) and only then inserts the host player. The
-    // app layer is the integrity guarantor for these two columns; the
-    // sweeper / endGame paths preserve it.
-    // Application-maintained pointer avoids the room → match → room FK cycle.
+    // Nullable pointers allow session-first creation and outcome reset.
+    // Composite FKs below require each referenced membership to belong here.
     currentMatchId: text('current_match_id'),
     hostPlayerId: text('host_player_id'),
     winnerPlayerId: text('winner_player_id'),
@@ -110,6 +105,21 @@ export const gameSessions = pgTable(
     endedAt: timestamp('ended_at', { withTimezone: true }),
   },
   (t) => [
+    foreignKey({
+      name: 'game_sessions_host_membership_fk',
+      columns: [t.id, t.hostPlayerId],
+      foreignColumns: [gamePlayers.sessionId, gamePlayers.id],
+    }),
+    foreignKey({
+      name: 'game_sessions_winner_membership_fk',
+      columns: [t.id, t.winnerPlayerId],
+      foreignColumns: [gamePlayers.sessionId, gamePlayers.id],
+    }),
+    foreignKey({
+      name: 'game_sessions_current_match_room_fk',
+      columns: [t.id, t.currentMatchId],
+      foreignColumns: [gameMatches.sessionId, gameMatches.id],
+    }),
     index('idx_sessions_last_activity')
       .on(t.lastActivityAt)
       .where(sql`${t.status} IN ('active', 'paused')`),
@@ -118,21 +128,32 @@ export const gameSessions = pgTable(
 
 // A room survives replays; a match is one independently counted playthrough.
 // Final players are immutable snapshots, because room memberships carry live scores.
-export const gameMatches = pgTable('game_matches', {
-  id: text('id')
-    .primaryKey()
-    .$defaultFn(() => createId()),
-  sessionId: text('session_id')
-    .notNull()
-    .references(() => gameSessions.id, { onDelete: 'cascade' }),
-  status: sessionStatusEnum('status').notNull().default('active'),
-  config: jsonb('config').notNull(),
-  winnerPlayerId: text('winner_player_id'),
-  endMode: endModeEnum('end_mode'),
-  finalPlayers: jsonb('final_players'),
-  startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
-  endedAt: timestamp('ended_at', { withTimezone: true }),
-})
+export const gameMatches = pgTable(
+  'game_matches',
+  {
+    id: text('id')
+      .primaryKey()
+      .$defaultFn(() => createId()),
+    sessionId: text('session_id')
+      .notNull()
+      .references((): AnyPgColumn => gameSessions.id, { onDelete: 'cascade' }),
+    status: sessionStatusEnum('status').notNull().default('active'),
+    config: jsonb('config').notNull(),
+    winnerPlayerId: text('winner_player_id'),
+    endMode: endModeEnum('end_mode'),
+    finalPlayers: jsonb('final_players'),
+    startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
+    endedAt: timestamp('ended_at', { withTimezone: true }),
+  },
+  (t) => [
+    unique('game_matches_session_id_id_unique').on(t.sessionId, t.id),
+    foreignKey({
+      name: 'game_matches_winner_membership_fk',
+      columns: [t.sessionId, t.winnerPlayerId],
+      foreignColumns: [gamePlayers.sessionId, gamePlayers.id],
+    }),
+  ],
+)
 
 export const gamePlayers = pgTable(
   'game_players',
@@ -142,7 +163,7 @@ export const gamePlayers = pgTable(
       .$defaultFn(() => createId()),
     sessionId: text('session_id')
       .notNull()
-      .references(() => gameSessions.id),
+      .references((): AnyPgColumn => gameSessions.id),
     username: text('username').notNull(),
     role: playerRoleEnum('role').notNull().default('player'),
     score: integer('score').notNull().default(0),
@@ -154,6 +175,7 @@ export const gamePlayers = pgTable(
     joinedAt: timestamp('joined_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
+    unique('game_players_session_id_id_unique').on(t.sessionId, t.id),
     // A handle belongs to one live membership; historical identities remain immutable.
     uniqueIndex('unique_live_handle_per_session')
       .on(t.sessionId, t.username)
@@ -174,21 +196,29 @@ export const gameRounds = pgTable(
     sessionId: text('session_id')
       .notNull()
       .references(() => gameSessions.id),
-    matchId: text('match_id')
-      .notNull()
-      .references(() => gameMatches.id),
+    matchId: text('match_id').notNull(),
     roundNum: integer('round_num').notNull(),
     blackCardId: text('black_card_id')
       .notNull()
       .references(() => blackCards.id),
     czarPlayerId: text('czar_player_id').references(() => gamePlayers.id),
-    winnerPlayerId: text('winner_player_id').references(() => gamePlayers.id),
+    winnerPlayerId: text('winner_player_id'),
     winningSubmissionFills: jsonb('winning_submission_fills'),
     ranking: jsonb('ranking'),
     voteTally: jsonb('vote_tally'),
     playedAt: timestamp('played_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
+    foreignKey({
+      name: 'game_rounds_match_room_fk',
+      columns: [t.sessionId, t.matchId],
+      foreignColumns: [gameMatches.sessionId, gameMatches.id],
+    }),
+    foreignKey({
+      name: 'game_rounds_winner_membership_fk',
+      columns: [t.sessionId, t.winnerPlayerId],
+      foreignColumns: [gamePlayers.sessionId, gamePlayers.id],
+    }),
     unique().on(t.matchId, t.roundNum),
     index('gin_winning_fills').on(t.winningSubmissionFills),
   ],

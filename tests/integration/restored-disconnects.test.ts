@@ -6,7 +6,8 @@ it('restores an expired grace deadline once, preserving roster and host successi
   const proxy = await redisFaultProxy(realRedisUrl)
   process.env['REDIS_URL'] = proxy.url
   const { db } = await import('../../src/db')
-  const { gameSessions, gamePlayers, gameRounds, packs } = await import('../../src/db/schema')
+  const { gameSessions, gamePlayers, gameRounds, gameMatches, packs } =
+    await import('../../src/db/schema')
   const state = await import('../../src/lib/game-state')
   const engine = await import('../../src/lib/game-engine')
   const { redis, KEYS } = await import('../../src/lib/redis')
@@ -224,7 +225,12 @@ it('restores an expired grace deadline once, preserving roster and host successi
       .update(gameSessions)
       .set({ hostPlayerId: null })
       .where(eq(gameSessions.id, session!.id))
+    await db
+      .update(gameSessions)
+      .set({ hostPlayerId: null, winnerPlayerId: null, currentMatchId: null })
+      .where(eq(gameSessions.id, session!.id))
     await db.delete(gameRounds).where(eq(gameRounds.sessionId, session!.id))
+    await db.delete(gameMatches).where(eq(gameMatches.sessionId, session!.id))
     await db.delete(gamePlayers).where(eq(gamePlayers.sessionId, session!.id))
     await db.delete(gameSessions).where(eq(gameSessions.id, session!.id))
     await subscriber.quit()

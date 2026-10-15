@@ -27,13 +27,181 @@ function succeeds(command, cwd) {
   assert.equal(result.status, 0, result.stderr)
 }
 
+testDrill('reviewed schema rejects invalid room host and winner memberships', async () => {
+  assert.match(new URL(url).pathname, /^\/cab_audit_issue(?:45|46|52|57)(?:_|$)/)
+  const sql = postgres(url, { max: 1, onnotice: () => {} })
+  try {
+    await sql.unsafe(
+      'DROP SCHEMA public CASCADE; CREATE SCHEMA public; DROP SCHEMA IF EXISTS cab_migrations CASCADE',
+    )
+    succeeds('apply')
+    // Session-first creation remains valid before the host membership exists.
+    await sql`INSERT INTO game_sessions (id,code,config) VALUES ('room','MEM057','{}'),('other','OTH057','{}')`
+    await sql`INSERT INTO game_players (id,session_id,username) VALUES ('host','room','Host'),('foreign','other','Other')`
+    for (const pointer of ['host_player_id', 'winner_player_id']) {
+      for (const invalid of ['missing', 'foreign'])
+        await assert.rejects(
+          sql.unsafe(`UPDATE game_sessions SET ${pointer}=$1 WHERE id='room'`, [invalid]),
+          { code: '23503' },
+        )
+      await sql.unsafe(`UPDATE game_sessions SET ${pointer}='host' WHERE id='room'`)
+    }
+    await assert.rejects(sql`DELETE FROM game_players WHERE id='host'`, { code: '23503' })
+    await sql`UPDATE game_players SET status='dropped' WHERE id='host'`
+    assert.equal(
+      (await sql`SELECT winner_player_id FROM game_sessions WHERE id='room'`)[0].winner_player_id,
+      'host',
+    )
+    await sql`UPDATE game_sessions SET host_player_id=NULL,winner_player_id=NULL WHERE id='room'`
+    await sql`DELETE FROM game_players WHERE id='host'`
+    await assert.rejects(sql`UPDATE game_sessions SET host_player_id='host' WHERE id='room'`, {
+      code: '23503',
+    })
+    succeeds('check')
+  } finally {
+    await sql.end()
+  }
+})
+
+testDrill(
+  'match and round winners retain same-room membership through reset and deletion',
+  async () => {
+    assert.match(new URL(url).pathname, /^\/cab_audit_issue(?:45|46|52|57)(?:_|$)/)
+    const sql = postgres(url, { max: 1, onnotice: () => {} })
+    try {
+      await sql.unsafe(
+        'DROP SCHEMA public CASCADE; CREATE SCHEMA public; DROP SCHEMA IF EXISTS cab_migrations CASCADE',
+      )
+      succeeds('apply')
+      await sql`INSERT INTO game_sessions (id,code,config) VALUES ('room','MAT057','{}'),('other','FOR057','{}')`
+      await sql`INSERT INTO game_players (id,session_id,username) VALUES ('winner','room','Winner'),('foreign','other','Other')`
+      await sql`INSERT INTO game_matches (id,session_id,config) VALUES ('match','room','{}'),('foreign-match','other','{}')`
+      await sql`INSERT INTO packs (id,name,slug) VALUES ('pack','Pack','pack')`
+      await sql`INSERT INTO black_cards (id,pack_id,text,pick) VALUES ('prompt','pack','Prompt',1)`
+      await sql`INSERT INTO game_rounds (id,session_id,match_id,round_num,black_card_id) VALUES ('round','room','match',1,'prompt')`
+      for (const invalid of ['missing', 'foreign']) {
+        await assert.rejects(
+          sql`UPDATE game_matches SET winner_player_id=${invalid} WHERE id='match'`,
+          { code: '23503' },
+        )
+        await assert.rejects(
+          sql`UPDATE game_rounds SET winner_player_id=${invalid} WHERE id='round'`,
+          { code: '23503' },
+        )
+      }
+      for (const invalid of ['missing', 'foreign-match']) {
+        await assert.rejects(
+          sql`UPDATE game_sessions SET current_match_id=${invalid} WHERE id='room'`,
+          { code: '23503' },
+        )
+        await assert.rejects(sql`UPDATE game_rounds SET match_id=${invalid} WHERE id='round'`, {
+          code: '23503',
+        })
+      }
+      await sql`UPDATE game_sessions SET current_match_id='match',winner_player_id='winner' WHERE id='room'`
+      await sql`UPDATE game_matches SET status='ended',winner_player_id='winner',final_players='[{"id":"winner","score":3}]' WHERE id='match'`
+      await sql`UPDATE game_rounds SET winner_player_id='winner' WHERE id='round'`
+      await sql`UPDATE game_players SET status='dropped' WHERE id='winner'`
+      // Reset clears only the room outcome. History still protects the original identity.
+      await sql`UPDATE game_sessions SET current_match_id=NULL,winner_player_id=NULL,status='lobby' WHERE id='room'`
+      await assert.rejects(sql`DELETE FROM game_players WHERE id='winner'`, { code: '23503' })
+      assert.deepEqual(
+        (await sql`SELECT winner_player_id,final_players FROM game_matches WHERE id='match'`)[0],
+        {
+          winner_player_id: 'winner',
+          final_players: [{ id: 'winner', score: 3 }],
+        },
+      )
+      await sql`DELETE FROM game_rounds WHERE id='round'`
+      await assert.rejects(sql`DELETE FROM game_players WHERE id='winner'`, { code: '23503' })
+      await sql`UPDATE game_sessions SET current_match_id='match' WHERE id='room'`
+      await assert.rejects(sql`DELETE FROM game_matches WHERE id='match'`, { code: '23503' })
+      await sql`UPDATE game_sessions SET current_match_id=NULL WHERE id='room'`
+      await sql`DELETE FROM game_matches WHERE id='match'`
+      await sql`DELETE FROM game_players WHERE id='winner'`
+      await assert.rejects(
+        sql`UPDATE game_sessions SET winner_player_id='winner' WHERE id='room'`,
+        { code: '23503' },
+      )
+      await assert.rejects(sql`UPDATE game_sessions SET current_match_id='match' WHERE id='room'`, {
+        code: '23503',
+      })
+      // A room deletion may still cascade to its own current match.
+      await sql`INSERT INTO game_matches (id,session_id,config) VALUES ('empty-match','room','{}')`
+      await sql`UPDATE game_sessions SET current_match_id='empty-match' WHERE id='room'`
+      await sql`DELETE FROM game_sessions WHERE id='room'`
+      assert.equal(
+        (await sql`SELECT count(*)::int AS count FROM game_matches WHERE id='empty-match'`)[0]
+          .count,
+        0,
+      )
+      succeeds('check')
+    } finally {
+      await sql.end()
+    }
+  },
+)
+
+testDrill('upgrade identifies invalid legacy pointers without rewriting history', async () => {
+  assert.match(new URL(url).pathname, /^\/cab_audit_issue(?:45|46|52|57)(?:_|$)/)
+  const sql = postgres(url, { max: 1, onnotice: () => {} })
+  const temporary = mkdtempSync(join(tmpdir(), 'cab-issue57-'))
+  try {
+    cpSync('drizzle', join(temporary, 'drizzle'), { recursive: true })
+    const manifest = JSON.parse(readFileSync('drizzle/manifest.json', 'utf8'))
+    writeFileSync(join(temporary, 'drizzle/manifest.json'), JSON.stringify(manifest.slice(0, 3)))
+    await sql.unsafe(
+      'DROP SCHEMA public CASCADE; CREATE SCHEMA public; DROP SCHEMA IF EXISTS cab_migrations CASCADE',
+    )
+    succeeds('apply', temporary)
+    await sql`INSERT INTO game_sessions (id,code,config) VALUES ('legacy-room','LEG057','{}'),('other','BAD057','{}')`
+    await sql`INSERT INTO game_players (id,session_id,username) VALUES ('foreign','other','Other')`
+    await sql`INSERT INTO game_matches (id,session_id,config) VALUES ('legacy-match','legacy-room','{}'),('foreign-match','other','{}')`
+    await sql`INSERT INTO packs (id,name,slug) VALUES ('pack','Pack','pack')`
+    await sql`INSERT INTO black_cards (id,pack_id,text,pick) VALUES ('prompt','pack','Prompt',1)`
+    await sql`INSERT INTO game_rounds (id,session_id,match_id,round_num,black_card_id) VALUES ('legacy-round','legacy-room','legacy-match',1,'prompt')`
+    for (const [table, row, pointer, invalid, restored] of [
+      ['game_sessions', 'legacy-room', 'host_player_id', 'missing', null],
+      ['game_sessions', 'legacy-room', 'winner_player_id', 'foreign', null],
+      ['game_sessions', 'legacy-room', 'current_match_id', 'foreign-match', null],
+      ['game_matches', 'legacy-match', 'winner_player_id', 'missing', null],
+      ['game_rounds', 'legacy-round', 'winner_player_id', 'foreign', null],
+      ['game_rounds', 'legacy-round', 'match_id', 'foreign-match', 'legacy-match'],
+    ]) {
+      await sql.unsafe(`UPDATE ${table} SET ${pointer}=$1 WHERE id=$2`, [invalid, row])
+      const result = cli('apply')
+      assert.notEqual(result.status, 0)
+      assert.match(result.stderr, /Membership integrity preflight failed/)
+      assert.ok(result.stderr.includes(`${table}.${pointer}`), result.stderr)
+      assert.ok(result.stderr.includes(row), result.stderr)
+      assert.match(result.stderr, /Repair.*review/)
+      assert.equal(
+        (await sql`SELECT count(*)::int AS count FROM cab_migrations.history`)[0].count,
+        3,
+      )
+      assert.equal(
+        (await sql.unsafe(`SELECT ${pointer} AS pointer FROM ${table} WHERE id=$1`, [row]))[0]
+          .pointer,
+        invalid,
+      )
+      succeeds('check', temporary) // failed upgrade rolled back every schema change
+      await sql.unsafe(`UPDATE ${table} SET ${pointer}=$1 WHERE id=$2`, [restored, row])
+    }
+    succeeds('apply')
+    succeeds('check')
+  } finally {
+    await sql.end()
+    rmSync(temporary, { recursive: true, force: true })
+  }
+})
+
 testDrill(
   'reviewed deployment supports clean install, adoption, drift refusal and failure rollback/restore',
   async () => {
     const sql = postgres(url, { max: 1, onnotice: () => {} })
     const temporary = mkdtempSync(join(tmpdir(), 'cab-issue52-'))
     try {
-      assert.match(new URL(url).pathname, /^\/cab_audit_issue(?:45|46|52)(?:_|$)/)
+      assert.match(new URL(url).pathname, /^\/cab_audit_issue(?:45|46|52|57)(?:_|$)/)
       const reviewedManifest = JSON.parse(readFileSync('drizzle/manifest.json', 'utf8'))
       const reviewedCount = reviewedManifest.length
       await sql.unsafe(

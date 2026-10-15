@@ -36,12 +36,13 @@ export async function seedReplayStats() {
       await tx`INSERT INTO black_cards (id, pack_id, text, pick)
         VALUES (${promptId}, ${packId}, 'Secret statistics prompt __________.', 2)`
       await tx`INSERT INTO white_cards ${tx(cards.map((card) => ({ ...card, pack_id: packId })))}`
-      await tx`INSERT INTO game_sessions (id, code, status, config, winner_player_id, end_mode, ended_at)
+      await tx`INSERT INTO game_sessions (id, code, status, config, end_mode, ended_at)
         VALUES (${sessionId}, ${randomUUID().replace(/-/g, '').slice(0, 6).toUpperCase()}, 'ended',
           ${tx.json({ maxPlayers: 3, roundsToWin: 20, timer: 'Off', packs: [packId], rules: [] })},
-          ${playerId}, 'normal', now())`
+          'normal', now())`
       await tx`INSERT INTO game_players (id, session_id, username, is_host, score)
         VALUES (${playerId}, ${sessionId}, 'Replay fixture winner', true, ${rounds})`
+      await tx`UPDATE game_sessions SET winner_player_id=${playerId} WHERE id=${sessionId}`
       await tx`INSERT INTO game_matches (id, session_id, status, config, winner_player_id, end_mode, ended_at, final_players)
         SELECT id, id, status, config, winner_player_id, end_mode, ended_at,
           ${tx.json([{ id: playerId, username: 'Replay fixture winner', role: 'player', score: rounds, isRando: false }])}
@@ -67,7 +68,9 @@ export async function seedReplayStats() {
         const cleanupDb = postgres(databaseUrl)
         try {
           await cleanupDb.begin(async (tx) => {
+            await tx`UPDATE game_sessions SET current_match_id=NULL,winner_player_id=NULL,host_player_id=NULL WHERE id=${sessionId}`
             await tx`DELETE FROM game_rounds WHERE session_id = ${sessionId}`
+            await tx`DELETE FROM game_matches WHERE session_id = ${sessionId}`
             await tx`DELETE FROM game_players WHERE session_id = ${sessionId}`
             await tx`DELETE FROM game_sessions WHERE id = ${sessionId}`
             await tx`DELETE FROM black_cards WHERE pack_id = ${packId}`
