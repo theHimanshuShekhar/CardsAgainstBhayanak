@@ -171,8 +171,20 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
   const { submitted, expected } = await engine.submissionProgress(code)
   const roundTimerExpiresAt = await state.getRoundTimerExpiresAt(code)
   const outcome = await state.getRoundOutcome(code)
-  if (phase === 'transition' && submissions.length === 0) {
-    submissions = JSON.parse((await redis.hget(KEYS.round(code), 'resolvedSubmissions')) ?? '[]')
+  if (phase === 'transition') {
+    // Card cleanup commits the result board before deleting shuffled slots.
+    // Prefer it even while those slots still exist with cleared live fills.
+    const resolved = await redis.hget(KEYS.round(code), 'resolvedSubmissions')
+    if (resolved) submissions = JSON.parse(resolved)
+  }
+  const resolvedReceipt: Partial<SessionState> =
+    phase === 'transition'
+      ? (JSON.parse((await redis.hget(KEYS.round(code), 'resolvedRecipients')) ?? '{}')[playerId] ??
+        {})
+      : {}
+  if (phase === 'transition' && config.rules.includes('godmode')) {
+    const resolvedTally = await redis.hget(KEYS.round(code), 'resolvedVoteTally')
+    if (resolvedTally) voteTally = JSON.parse(resolvedTally)
   }
   const eliminationTurnPlayerId = config.rules.includes('survival')
     ? ((await state.getEliminationTurn(code)) ?? undefined)
@@ -206,6 +218,16 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
     myVotedSubmissionId: await redis.hget(`${KEYS.round(code)}:voterchoices`, playerId),
     voteCandidateIds:
       JSON.parse((await redis.hget(KEYS.round(code), 'voteCandidateIds')) ?? 'null') ?? undefined,
+    ...(resolvedReceipt.myHasGambled !== undefined
+      ? {
+          myHasGambled: resolvedReceipt.myHasGambled,
+          mySubmissionCount: resolvedReceipt.mySubmissionCount ?? 0,
+          mySubmissionIds: config.rules.includes('godmode')
+            ? (resolvedReceipt.mySubmissionIds ?? [])
+            : [],
+          myVotedSubmissionId: resolvedReceipt.myVotedSubmissionId ?? null,
+        }
+      : {}),
     ...(voteTally ? { voteTally } : {}),
     ...(eliminationTurnPlayerId ? { eliminationTurnPlayerId } : {}),
     ...(ranking ? { ranking } : {}),
