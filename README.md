@@ -90,6 +90,12 @@ services have healthchecks; the app is `build: .` — rebuild with
 
 Cloudflare Tunnel is managed externally — see `SPEC.md § Deployment` for details.
 
+Run one app process with its own PostgreSQL database and dedicated Redis database.
+The production entry refuses a competing owner before starting engines or jobs;
+ownership loss stops the process and requires a supervisor restart. Stop the old
+app before starting a replacement. See [runtime ownership and future scaling](docs/operations/runtime-ownership.md)
+for the storage/proxy constraints, recovery behavior and deployment regression.
+
 ### Trusted ingress and rate-limit identity
 
 The production server uses the TCP socket's remote IP for create/join budgets.
@@ -124,8 +130,8 @@ For local `pnpm start`, the allowlist is empty unless explicitly configured.
 Local `pnpm dev` may lack socket context, in which case identity falls back to
 `unknown`; it still ignores forwarding headers. Rate enforcement remains
 enabled only with `NODE_ENV=production`. Production HTTP identity regression
-tests start their own production entry server and real reverse proxy against
-the test suite's disposable DB/Redis:
+tests start their own production entry server and real reverse proxy, with
+temporary PostgreSQL/Valkey containers owned by the fixture (Docker required):
 
 ```bash
 pnpm build

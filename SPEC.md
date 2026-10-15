@@ -1038,6 +1038,15 @@ Test matrix using multi-context (separate browser contexts per player):
 
 ## Docker Compose / Deployment — ✅ DONE
 
+Supported runtime ownership is one production app process per private PostgreSQL
+database and dedicated Redis database. After schema validation and before loading
+engines or jobs, the production entry takes a dedicated PostgreSQL session
+advisory lock. A competing app exits before listening or executing room effects;
+loss of the ownership session stops the process and requires supervisor restart.
+Overlapping rolling replicas and transaction-pooling ownership connections are
+unsupported. See [runtime ownership](docs/operations/runtime-ownership.md) for
+failure-detection limits and the separate future per-room lease/fencing design.
+
 ### Services
 
 ```yaml

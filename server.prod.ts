@@ -16,10 +16,12 @@ import { readSiteOrigin } from './src/lib/site-origin.server'
 readSiteOrigin()
 
 import { waitForSchema } from './src/lib/schema-startup'
+import { acquireRuntimeOwnership } from './src/lib/runtime-ownership'
 
 const port = Number(process.env['PORT'] ?? 3000)
 await waitForSchema(port)
-// Load modules that start seeding/jobs only after compatibility succeeds.
+await acquireRuntimeOwnership()
+// Load modules that start seeding/jobs only after compatibility and ownership.
 const { gameWebSocketPlugin } = await import('./src/ws/server')
 const { default: tssServer } = await import('./dist/server/server.js')
 
