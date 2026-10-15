@@ -818,6 +818,7 @@ export async function claimPlayerDrop(
   code: string,
   playerId: string,
   connection?: string,
+  reason: 'grace' | 'leave' = 'leave',
 ): Promise<boolean> {
   return Boolean(
     await redis.eval(
@@ -829,6 +830,8 @@ export async function claimPlayerDrop(
       if player.status == 'dropped' then return 0 end
       if ARGV[2] ~= '' and (redis.call('GET', KEYS[3]) ~= ARGV[2]
         or redis.call('EXISTS', KEYS[2]) == 1) then return 0 end
+      redis.call('HSET', KEYS[7], ARGV[1], cjson.encode({reason=ARGV[6], roundId=redis.call('HGET', KEYS[8], 'roundId') or ''}))
+      redis.call('EXPIRE', KEYS[7], ARGV[3])
       player.status = 'dropped'
       redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(player))
       redis.call('DEL', KEYS[2], KEYS[3], KEYS[5], KEYS[6])
@@ -836,18 +839,21 @@ export async function claimPlayerDrop(
       redis.call('PUBLISH', ARGV[4], ARGV[5])
       return 1
       `,
-      6,
+      8,
       KEYS.players(code),
       KEYS.grace(code, playerId),
       KEYS.graceConnection(code, playerId),
       KEYS.game(code),
       KEYS.connections(code, playerId),
       KEYS.graceDeadline(code, playerId),
+      KEYS.drops(code),
+      KEYS.round(code),
       playerId,
       connection ?? '',
       ROOM_TTL_SECONDS,
       KEYS.channel(code),
       JSON.stringify({ type: 'player_left', playerId }),
+      reason,
     ),
   )
 }
