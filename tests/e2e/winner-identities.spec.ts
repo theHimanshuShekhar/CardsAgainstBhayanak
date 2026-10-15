@@ -263,6 +263,40 @@ test('normal scoring reaches the target and ends after the final round instead o
   }
 })
 
+test('Godmode resolved snapshots retain only each recipient’s answer and vote receipts', async () => {
+  const game = await start(['godmode'])
+  try {
+    await ready(game)
+    const ownIds = game.peers.map((peer) =>
+      peer.events.find((event) => event.type === 'my_submission_ids'),
+    )
+    for (const [index, peer] of game.peers.entries()) {
+      const own = ownIds[index]
+      expect(own?.type).toBe('my_submission_ids')
+      peer.send({
+        type: 'vote',
+        submissionId:
+          own?.type === 'my_submission_ids' && own.submissionIds.includes('1') ? '0' : '1',
+      })
+    }
+    await game.peers[0]!.wait('round_end')
+    const receipts = await Promise.all(game.peers.map((peer) => peer.snapshot()))
+    for (const [index, receipt] of receipts.entries()) {
+      const own = ownIds[index]
+      expect(receipt.phase).toBe('transition')
+      expect(receipt.voteTally).toEqual({ '0': 1, '1': 3 })
+      expect(receipt.mySubmissionIds).toEqual(
+        own?.type === 'my_submission_ids' ? own.submissionIds : [],
+      )
+      expect(receipt.myVotedSubmissionId).toBe(receipt.mySubmissionIds.includes('1') ? '0' : '1')
+      expect(receipt.mySubmissionCount).toBe(1)
+      expect(receipt.submissions.every((submission) => !submission.playerId)).toBe(true)
+    }
+  } finally {
+    game.close()
+  }
+})
+
 for (const mode of ['normal', 'serious_business', 'survival', 'godmode'] as const) {
   test(`${mode} result shows the same named winning cards live and after refresh`, async ({
     page,
@@ -322,12 +356,31 @@ for (const mode of ['normal', 'serious_business', 'survival', 'godmode'] as cons
       await expect(winner).toHaveCount(board.prompt.pick)
       for (const card of board.submissions[1]!.fills)
         await expect(winner.filter({ hasText: card.text })).toHaveCount(1)
+      if (mode === 'godmode')
+        await expect(page.getByTestId('vote-tally').nth(1)).toHaveText('3 votes')
       await viewer.wait('round_end')
       await page.reload()
       await expect(page.locator('.winner-badge')).toContainText(name)
       await expect(winner).toHaveCount(board.prompt.pick)
+      if (mode === 'godmode')
+        await expect(page.getByTestId('vote-tally').nth(1)).toHaveText('3 votes')
+      if (mode === 'survival')
+        await expect(page.locator('.sub-card.is-eliminated')).toHaveCount(2 * board.prompt.pick)
       for (const card of board.submissions[1]!.fills)
         await expect(winner.filter({ hasText: card.text })).toHaveCount(1)
+      if (mode === 'godmode') {
+        await expect.poll(async () => (await viewer.snapshot()).round, { timeout: 20_000 }).toBe(2)
+        expect(await viewer.snapshot()).toMatchObject({
+          phase: 'picking',
+          winningPlayerId: null,
+          winningSubmissionId: null,
+          mySubmissionCount: 0,
+          mySubmissionIds: [],
+          myVotedSubmissionId: null,
+          myHasGambled: false,
+        })
+        expect((await viewer.snapshot()).voteTally).toBeUndefined()
+      }
     } finally {
       game.close()
     }

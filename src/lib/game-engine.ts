@@ -315,7 +315,7 @@ export async function startRound(
   await redis.eval(
     `
     if redis.call('HGET', KEYS[1], 'roundId') == ARGV[1] then return end
-    redis.call('HDEL', KEYS[1], 'winnerId', 'winningPlayerId', 'winningSubmissionId', 'resolvedSubmissions', 'ranking', 'eliminationTurnPlayerId', 'outcomeClaim', 'completionClaim', 'voteEpoch', 'voteClosed', 'voteCandidateIds', 'postResolveResumeAt', 'roundTimerExpiresAt')
+    redis.call('HDEL', KEYS[1], 'winnerId', 'winningPlayerId', 'winningSubmissionId', 'resolvedSubmissions', 'resolvedRecipients', 'resolvedVoteTally', 'ranking', 'eliminationTurnPlayerId', 'outcomeClaim', 'completionClaim', 'voteEpoch', 'voteClosed', 'voteCandidateIds', 'postResolveResumeAt', 'roundTimerExpiresAt')
     redis.call('HSET', KEYS[1], 'roundId', ARGV[1], 'czarId', ARGV[2], 'phase', 'picking')
     redis.call('HSET', KEYS[2], 'currentRound', ARGV[3])
     redis.call('DEL', KEYS[3])
@@ -1328,6 +1328,25 @@ async function completeRoundCards(code: string, roundId: string): Promise<void> 
     fills: intent.submissions[key]?.fills ?? [],
     ...(intent.submissions[key]?.eliminated ? { eliminated: true } : {}),
   }))
+  // Keep private action receipts through the result pause, even after card
+  // cleanup clears live submissions and wager flags. Each snapshot selects
+  // only its authenticated recipient's receipt.
+  const choices = await redis.hgetall(voterChoicesKeyFor(code))
+  const resolvedRecipients = Object.fromEntries(
+    (await state.getAllPlayers(code)).map((player) => [
+      player.id,
+      {
+        myHasGambled: player.hasGambled ?? false,
+        mySubmissionCount:
+          Number(!!intent.submissions[player.id]) +
+          Number(!!intent.submissions[`${player.id}:gamble`]),
+        mySubmissionIds: order.flatMap((key, index) =>
+          resolvePlayerId(key) === player.id ? [String(index)] : [],
+        ),
+        myVotedSubmissionId: choices[player.id] ?? null,
+      },
+    ]),
+  )
   // Card movement, activation, and the recoverable pause cursor commit together.
   const randoms = Array.from(
     {
@@ -1389,7 +1408,7 @@ async function completeRoundCards(code: string, roundId: string): Promise<void> 
       end
       redis.call('EXPIRE', hand, ARGV[5])
     end
-    redis.call('HSET', KEYS[2], 'resolvedSubmissions', ARGV[2], 'submissions', '{}', 'phase', 'transition', 'postResolveResumeAt', ARGV[6])
+    redis.call('HSET', KEYS[2], 'resolvedSubmissions', ARGV[2], 'resolvedRecipients', ARGV[8], 'resolvedVoteTally', ARGV[9], 'submissions', '{}', 'phase', 'transition', 'postResolveResumeAt', ARGV[6])
     redis.call('HSET', KEYS[1], 'completionCards', cjson.encode(activated), 'completionResumeAt', ARGV[6])
     for i=1,#KEYS do redis.call('EXPIRE', KEYS[i], ARGV[5]) end
     redis.call('DEL', KEYS[7])
@@ -1411,6 +1430,8 @@ async function completeRoundCards(code: string, roundId: string): Promise<void> 
     ROOM_TTL_SECONDS,
     Date.now() + roundResultPauseMs(),
     roundRow?.blackCardId ?? '',
+    JSON.stringify(resolvedRecipients),
+    JSON.stringify(intent.voteTally ?? {}),
   )
   const activation = Object.values(
     JSON.parse(String(activated ?? (await redis.hget(KEYS.game(code), 'completionCards')) ?? '[]')),

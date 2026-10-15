@@ -1034,6 +1034,8 @@ export async function clearRoundResolution(code: string): Promise<void> {
     'winningPlayerId',
     'winningSubmissionId',
     'resolvedSubmissions',
+    'resolvedRecipients',
+    'resolvedVoteTally',
     'ranking',
     'eliminationTurnPlayerId',
     'outcomeClaim',

@@ -169,6 +169,22 @@ for (const mode of ['godmode', 'survival', 'serious_business'] as const) {
       }
       await ready(game)
       let board = await game.peers[0]!.snapshot()
+      let votedPlayerId: string | undefined
+      let votedSubmissionId: string | undefined
+      if (mode === 'godmode') {
+        const first = viewers[0]!
+        const ownIds = (await first.actor.snapshot()).mySubmissionIds
+        votedSubmissionId = board.submissions.find(
+          (submission) => !ownIds.includes(submission.submissionId),
+        )!.submissionId
+        const marker = first.actor.events.length
+        await first.page.getByTestId('vote-btn').nth(Number(votedSubmissionId)).click()
+        await first.actor.wait('vote_tally', marker)
+        votedPlayerId = first.actor.playerId
+        board = await first.actor.snapshot()
+        expect(board.myVotedSubmissionId).toBe(votedSubmissionId)
+        expect(board.voteTally).toEqual({ [votedSubmissionId]: 1 })
+      }
       if (mode === 'survival') {
         const firstActor = viewers.find(
           (viewer) => viewer.actor.playerId === board.eliminationTurnPlayerId,
@@ -198,10 +214,24 @@ for (const mode of ['godmode', 'survival', 'serious_business'] as const) {
             await expect(page.locator('.sub-card.is-eliminated')).toHaveCount(board.prompt.pick)
             await expect(controls.nth(0)).toHaveText('Eliminated')
           }
+          if (mode === 'godmode')
+            await expect(page.getByTestId('vote-tally').nth(Number(votedSubmissionId))).toHaveText(
+              '1 vote',
+            )
           for (const [index, control] of (await controls.all()).entries()) {
             const ownAnswer = ownSubmissionIds.includes(board.submissions[index]!.submissionId)
             if (ownAnswer) await expect(control).toHaveText('Your answer')
-            if (legal && !ownAnswer && !(mode === 'survival' && index === 0))
+            if (
+              actor.playerId === votedPlayerId &&
+              board.submissions[index]!.submissionId === votedSubmissionId
+            )
+              await expect(control).toHaveText('Voted')
+            if (
+              legal &&
+              actor.playerId !== votedPlayerId &&
+              !ownAnswer &&
+              !(mode === 'survival' && index === 0)
+            )
               await expect(control).toBeEnabled()
             else await expect(control).toBeDisabled()
           }

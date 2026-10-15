@@ -24,7 +24,7 @@ process.env['POSTHOG_HOST'] = `http://127.0.0.1:${telemetryAddress.port}`
 const sql = postgres(process.env['DATABASE_URL']!, { onnotice: () => {} })
 const { db } = await import('../../src/db')
 const { gameSessions, gamePlayers, gameRounds, packs } = await import('../../src/db/schema')
-const { eq } = await import('drizzle-orm')
+const { eq, sql: query } = await import('drizzle-orm')
 const state = await import('../../src/lib/game-state')
 const engine = await import('../../src/lib/game-engine')
 const { redis, KEYS } = await import('../../src/lib/redis')
@@ -72,12 +72,29 @@ const cases = [
 it.each(cases)(
   '%s resumes after %s without duplicate outcomes or lost cards',
   async (mode, fault) => {
-    const code = 'REC038'
+    // Successor plays can still have staggered reveal timers when a case
+    // finishes. Give each room its own event stream and recovery identity.
+    const caseIndex = cases.findIndex(
+      ([testMode, testFault]) => testMode === mode && testFault === fault,
+    )
+    const code = `REC${String(caseIndex).padStart(3, '0')}`
     const subscriber = redis.duplicate()
     const events: Event[] = []
     subscriber.on('message', (_channel, raw) => events.push(JSON.parse(raw)))
     await subscriber.subscribe(KEYS.channel(code))
-    const [pack] = await db.select().from(packs).limit(1)
+    // Mixed real seeds include novelty packs with fewer than ten cards per
+    // player. Completion needs four initial hands, a queued player's hand,
+    // and enough prompts to exercise recovery into the next round.
+    const [pack] = await db
+      .select()
+      .from(packs)
+      .where(
+        query`(select count(*) from white_cards where pack_id = ${packs.id}) >= 100
+        and (select count(*) from black_cards where pack_id = ${packs.id}) >= 3`,
+      )
+      .orderBy(packs.id)
+      .limit(1)
+    if (!pack) throw new Error('Seed a pack with at least 100 white cards and 3 black cards')
     const finishesGame = fault === 'end_game_sql' || fault === 'completionGameOverPublished'
     const config = {
       maxPlayers: 5,
@@ -91,7 +108,7 @@ it.each(cases)(
     let snapshotSocket: WebSocket | undefined
     let snapshotServer: import('srvx').Server | undefined
     const originalPause = process.env['CAB_ROUND_RESULT_PAUSE_MS']
-    if (mode === 'survival' && fault === 'completionEndPublished')
+    if ((mode === 'survival' && fault === 'completionEndPublished') || fault === 'completionCards')
       process.env['CAB_ROUND_RESULT_PAUSE_MS'] = '3000'
     try {
       const players = await db
@@ -251,7 +268,10 @@ it.each(cases)(
       }
       await expect(resolve()).rejects.toThrow()
       restoreFault()
-      if (mode === 'survival' && fault === 'completionEndPublished') {
+      if (
+        (mode === 'survival' && fault === 'completionEndPublished') ||
+        fault === 'completionCards'
+      ) {
         const { serve } = await import('srvx')
         const { gameWebSocketPlugin } = await import('../../src/ws/server')
         const { signSessionToken } = await import('../../src/lib/session-token')
@@ -272,10 +292,11 @@ it.each(cases)(
         await new Promise<void>((resolve) => {
           snapshotSocket!.onopen = () => resolve()
         })
+        const recipient = fault === 'completionCards' ? submitters[0]! : queued!
         snapshotSocket.send(
           JSON.stringify({
             type: 'auth',
-            sessionToken: await signSessionToken({ playerId: queued!.id, roomCode: code }),
+            sessionToken: await signSessionToken({ playerId: recipient.id, roomCode: code }),
           }),
         )
         await expect.poll(() => socketEvents.some((event) => event.type === 'auth_ok')).toBe(true)
@@ -285,18 +306,28 @@ it.each(cases)(
           .toBe(true)
         const snapshot = socketEvents.find((event) => event.type === 'state_snapshot')!.state!
         expect(snapshot.phase).toBe('transition')
-        expect(
-          events
-            .filter((event) => event.type === 'card_eliminated')
-            .map((event) => event.submissionId)
-            .sort(),
-        ).toEqual(['0', '1'])
-        expect(
-          snapshot.submissions
-            .filter((submission) => submission.eliminated)
-            .map((submission) => submission.submissionId)
-            .sort(),
-        ).toEqual(['0', '1'])
+        if (mode === 'godmode') {
+          expect(snapshot.submissions.map((submission) => submission.fills)).toEqual(
+            events.filter((event) => event.type === 'card_revealed').map((event) => event.fills),
+          )
+          expect(snapshot.voteTally).toEqual({ '0': 3, '1': 1 })
+          expect(snapshot.mySubmissionCount).toBe(1)
+          expect(snapshot.mySubmissionIds).toHaveLength(1)
+          expect(snapshot.myVotedSubmissionId).not.toBeNull()
+        } else {
+          expect(
+            events
+              .filter((event) => event.type === 'card_eliminated')
+              .map((event) => event.submissionId)
+              .sort(),
+          ).toEqual(['0', '1'])
+          expect(
+            snapshot.submissions
+              .filter((submission) => submission.eliminated)
+              .map((submission) => submission.submissionId)
+              .sort(),
+          ).toEqual(['0', '1'])
+        }
       }
       for (const table of ['game_rounds', 'game_sessions'])
         await sql.unsafe(`DROP TRIGGER IF EXISTS fail_completion ON ${table}`)
