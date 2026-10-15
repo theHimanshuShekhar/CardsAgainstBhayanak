@@ -1,13 +1,29 @@
 import postgres from 'postgres'
+import pino from 'pino'
+
+// Fail-stop records must reach stderr before exit, without waiting for the
+// ordinary logger's asynchronous pretty/Axiom worker to start or flush.
+const ownershipLogger = pino({ level: 'fatal' }, pino.destination({ dest: 2, sync: true })).child({
+  mod: 'cab.runtime',
+})
 
 // Session ownership is database-wide and distinct from the migration lock.
 // Keep this connection private: a pooled/reconnecting session is not an owner.
 export async function acquireRuntimeOwnership(): Promise<void> {
   let owned = false
   const lost = (reason: unknown): never => {
-    console.error('Runtime ownership lost; exiting. Restart the app to recover rooms.', reason)
-    // Graceful draining could run timers or socket-close effects without ownership.
-    process.exit(1)
+    try {
+      ownershipLogger.fatal(
+        {
+          reason: reason instanceof Error ? reason.message : String(reason),
+          err: reason instanceof Error ? reason : undefined,
+        },
+        'Runtime ownership lost; exiting. Restart the app to recover rooms.',
+      )
+    } finally {
+      // Exit even if stderr fails. Draining could run engine work without ownership.
+      process.exit(1)
+    }
   }
   const owner = postgres(process.env['DATABASE_URL']!, {
     max: 1,

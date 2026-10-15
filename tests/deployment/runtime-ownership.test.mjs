@@ -32,12 +32,19 @@ function start(url = base, env = {}) {
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   let output = ''
+  let stderr = ''
   child.stdout.on('data', (data) => (output += data))
-  child.stderr.on('data', (data) => (output += data))
+  child.stderr.on('data', (data) => {
+    output += data
+    stderr += data
+  })
   return {
     child,
     get output() {
       return output
+    },
+    get stderr() {
+      return stderr
     },
     async ready() {
       await until(async () => {
@@ -55,6 +62,21 @@ function start(url = base, env = {}) {
       await exited
     },
   }
+}
+
+function ownershipFailure(app) {
+  const records = app.stderr.split('\n').flatMap((line) => {
+    try {
+      return [JSON.parse(line)]
+    } catch {
+      return []
+    }
+  })
+  const record = records.find((entry) => entry.msg?.includes('Runtime ownership lost; exiting'))
+  assert.ok(record, `Expected structured ownership failure on stderr:\n${app.stderr}`)
+  assert.equal(record.level, 60)
+  assert.equal(record.mod, 'cab.runtime')
+  return record
 }
 async function post(path, body, token) {
   const response = await fetch(base + path, {
@@ -214,7 +236,7 @@ test(
 test(
   'loss of the ownership session stops the runtime and permits supervisor recovery',
   { timeout: 20000 },
-  async () => {
+  async (t) => {
     assert.equal(new URL(process.env.DATABASE_URL).pathname, '/cab_audit_issue54')
     assert.equal(new URL(process.env.REDIS_URL).pathname, '/9')
     const sql = postgres(process.env.DATABASE_URL)
@@ -230,7 +252,9 @@ test(
       assert.equal(terminated[0].terminated, true)
       await until(() => owner.child.exitCode !== null, 5000)
       assert.equal(owner.child.exitCode, 1, owner.output)
-      assert.match(owner.output, /Runtime ownership lost; exiting/)
+      const failure = ownershipFailure(owner)
+      assert.match(failure.reason, /ownership session closed|terminating connection/)
+      t.diagnostic(`Captured stderr: ${JSON.stringify(failure)}`)
       await assert.rejects(fetch(base + '/api/healthz'))
       const replacement = start()
       processes.push(replacement)
@@ -245,7 +269,7 @@ test(
 test(
   'an unresponsive ownership connection stops the runtime within a bounded deadline',
   { timeout: 25000 },
-  async () => {
+  async (t) => {
     assert.equal(new URL(process.env.DATABASE_URL).pathname, '/cab_audit_issue54')
     assert.equal(new URL(process.env.REDIS_URL).pathname, '/9')
     const pg = await storageProxy(process.env.DATABASE_URL)
@@ -258,7 +282,9 @@ test(
       pg.setResponsive(false)
       await until(() => owner.child.exitCode !== null, 8000)
       assert.equal(owner.child.exitCode, 1, owner.output)
-      assert.match(owner.output, /Runtime ownership lost; exiting.*\bprobe timed out/)
+      const failure = ownershipFailure(owner)
+      assert.equal(failure.reason, 'PostgreSQL ownership probe timed out')
+      t.diagnostic(`Captured stderr: ${JSON.stringify(failure)}`)
       await assert.rejects(fetch(base + '/api/healthz'))
       pg.setAvailable(false)
       const replacement = start()

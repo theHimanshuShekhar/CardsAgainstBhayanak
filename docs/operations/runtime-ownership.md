@@ -44,6 +44,13 @@ and completion checkpoints. Clients reconnect through the ordinary session flow.
 An initial transient schema-storage outage still uses the health-only retry
 listener before ownership acquisition.
 
+The terminal ownership-loss record is synchronous Pino JSON on stderr, with
+`mod: "cab.runtime"`, fatal `level: 60`, and a `reason` field. It reaches stderr
+before immediate exit, including when the ordinary pretty/Axiom worker is still
+starting. A logging failure also cannot prevent termination. Collect stderr with
+the container/supervisor logs; use a host collector if these terminal records
+must reach Axiom, because the app does not wait for asynchronous delivery.
+
 This guard prevents accidental competing processes in the supported topology.
 It is not a distributed fencing protocol: an event-loop stall, storage failover
 or administrative termination of the ownership session can delay detection, and
