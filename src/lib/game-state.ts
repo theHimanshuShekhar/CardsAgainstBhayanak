@@ -1,4 +1,5 @@
 import { redis, KEYS, ROOM_TTL_SECONDS } from './redis'
+import { ROOM_LIFETIME_LUA, EXPIRE_ROOM_KEY_LUA, expireRoomStateKeys } from './room-lifetime'
 import { GRACE_WINDOW_MS, KEEPALIVE_TIMEOUT_MS } from './timing'
 import { GameCommandError } from './game-command-error'
 import type { GameConfig, GamePlayer, GamePhase, Submission, Card } from './types'
@@ -24,7 +25,7 @@ export async function createGameState(
 export async function addPlayer(code: string, player: GamePlayer): Promise<void> {
   const pipeline = redis.multi()
   pipeline.hset(KEYS.players(code), player.id, JSON.stringify(player))
-  pipeline.expire(KEYS.players(code), ROOM_TTL_SECONDS)
+  pipeline.eval(EXPIRE_ROOM_KEY_LUA, 1, KEYS.players(code))
   await pipeline.exec()
 }
 
@@ -42,9 +43,10 @@ export async function updateLiveRoom(
   hostPlayerId?: string,
   clearKeys: string[] = [],
   expectedStatus?: string,
+  renewLifetime = false,
 ): Promise<void> {
   const result = await redis.eval(
-    `
+    `${ROOM_LIFETIME_LUA}
     if not redis.call('HGET', KEYS[1], 'status') then return 'invalid_token' end
     if ARGV[2] ~= '' then
       local raw = redis.call('HGET', KEYS[2], ARGV[2])
@@ -60,7 +62,7 @@ export async function updateLiveRoom(
     for field, value in pairs(cjson.decode(ARGV[1])) do
       redis.call('HSET', KEYS[1], field, value)
     end
-    redis.call('EXPIRE', KEYS[1], ARGV[3])
+    if ARGV[5] == '1' then renewRoomState(KEYS[1]) end
     return 1
     `,
     2 + clearKeys.length,
@@ -71,6 +73,7 @@ export async function updateLiveRoom(
     hostPlayerId ?? '',
     ROOM_TTL_SECONDS,
     expectedStatus ?? '',
+    renewLifetime ? '1' : '',
   )
   if (result === 'invalid_state')
     throw new GameCommandError('invalid_state', 'Game is not over or reset already in progress')
@@ -108,13 +111,13 @@ export async function updatePlayer(
 // Apply the delta to the live score so an earlier read cannot undo its cost.
 export async function adjustScore(code: string, playerId: string, delta: number): Promise<void> {
   await redis.eval(
-    `
+    `${ROOM_LIFETIME_LUA}
     local raw = redis.call('HGET', KEYS[1], ARGV[1])
     if not raw then return 0 end
     local player = cjson.decode(raw)
     player.score = math.max(0, (player.score or 0) + tonumber(ARGV[2]))
     redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(player))
-    redis.call('EXPIRE', KEYS[1], ARGV[3])
+    expireRoomKey(KEYS[1])
     return 1
     `,
     1,
@@ -128,7 +131,7 @@ export async function adjustScore(code: string, playerId: string, delta: number)
 // Eligibility, wager ownership, and extra-card delivery share the submission
 // commit's Redis boundary. A concurrent play sees either the whole wager or
 // none of it, and cannot have consumed cards restored by a hand replacement.
-const CLAIM_GAMBLE_LUA = `
+const CLAIM_GAMBLE_LUA = `${ROOM_LIFETIME_LUA}
 local storedRoundId = redis.call('HGET', KEYS[3], 'roundId')
 if redis.call('HGET', KEYS[2], 'status') ~= 'active'
   or redis.call('HGET', KEYS[2], 'currentRound') ~= ARGV[3]
@@ -164,9 +167,10 @@ for i = 1, pick do
 end
 redis.call('HSETNX', KEYS[3], 'roundId', ARGV[2])
 redis.call('HSETNX', KEYS[3], 'czarId', ARGV[4])
-for i = 1, 3 do redis.call('EXPIRE', KEYS[i], ARGV[6]) end
-redis.call('EXPIRE', KEYS[5], ARGV[6])
-redis.call('EXPIRE', KEYS[6], ARGV[6])
+for i = 1, 3 do expireRoomKey(KEYS[i]) end
+expireRoomKey(KEYS[5])
+expireRoomKey(KEYS[6])
+renewRoomState(KEYS[2])
 return 1
 `
 
@@ -227,7 +231,7 @@ export async function getLivePlayers(code: string): Promise<GamePlayer[]> {
 export async function setCzarOrder(code: string, order: string[]): Promise<void> {
   await redis.del(KEYS.czarOrder(code))
   if (order.length > 0) await redis.rpush(KEYS.czarOrder(code), ...order)
-  await redis.expire(KEYS.czarOrder(code), ROOM_TTL_SECONDS)
+  await expireRoomStateKeys(code, [KEYS.czarOrder(code)])
 }
 
 export async function getCzarOrder(code: string): Promise<string[]> {
@@ -238,7 +242,7 @@ export async function getCzarOrder(code: string): Promise<string[]> {
 // keeps its existing offsets (never recompute from live arrays).
 export async function appendCzarOrder(code: string, playerId: string): Promise<void> {
   await redis.rpush(KEYS.czarOrder(code), playerId)
-  await redis.expire(KEYS.czarOrder(code), ROOM_TTL_SECONDS)
+  await expireRoomStateKeys(code, [KEYS.czarOrder(code)])
 }
 
 export async function pushDeck(
@@ -249,7 +253,7 @@ export async function pushDeck(
   const key = kind === 'black' ? KEYS.deckBlack(code) : KEYS.deckWhite(code)
   await redis.del(key)
   if (ids.length > 0) await redis.rpush(key, ...ids)
-  await redis.expire(key, ROOM_TTL_SECONDS)
+  await expireRoomStateKeys(code, [key])
 }
 
 export async function reshuffleWhiteIfLow(code: string, minCards: number): Promise<void> {
@@ -261,7 +265,7 @@ export async function reshuffleWhiteIfLow(code: string, minCards: number): Promi
     // Keep the seeded shuffle, but never delete discards added since its
     // snapshot (for example, by a legal transition redraw).
     const committed = await redis.eval(
-      `
+      `${ROOM_LIFETIME_LUA}
       if redis.call('LLEN', KEYS[1]) >= tonumber(ARGV[1]) then return 1 end
       local expected = cjson.decode(ARGV[2])
       local current = redis.call('LRANGE', KEYS[2], 0, -1)
@@ -272,7 +276,7 @@ export async function reshuffleWhiteIfLow(code: string, minCards: number): Promi
       local shuffled = cjson.decode(ARGV[3])
       redis.call('DEL', KEYS[2])
       for _, id in ipairs(shuffled) do redis.call('RPUSH', KEYS[1], id) end
-      redis.call('EXPIRE', KEYS[1], ARGV[4])
+      expireRoomKey(KEYS[1])
       return 1
       `,
       2,
@@ -310,7 +314,7 @@ export async function discardCards(
   if (ids.length === 0) return
   const key = kind === 'black' ? KEYS.discardBlack(code) : KEYS.discardWhite(code)
   await redis.rpush(key, ...ids)
-  await redis.expire(key, ROOM_TTL_SECONDS)
+  await expireRoomStateKeys(code, [key])
 }
 
 // The hand is an ordered Redis list (not a set): a set's SMEMBERS returns
@@ -321,7 +325,7 @@ export async function discardCards(
 export async function setHand(code: string, playerId: string, cardIds: string[]): Promise<void> {
   await redis.del(KEYS.hand(code, playerId))
   if (cardIds.length > 0) await redis.rpush(KEYS.hand(code, playerId), ...cardIds)
-  await redis.expire(KEYS.hand(code, playerId), ROOM_TTL_SECONDS)
+  await expireRoomStateKeys(code, [KEYS.hand(code, playerId)])
 }
 
 export async function getHand(code: string, playerId: string): Promise<string[]> {
@@ -334,21 +338,21 @@ export async function appendToHand(code: string, playerId: string, ids: string[]
   await redis
     .multi()
     .rpush(KEYS.hand(code, playerId), ...ids)
-    .expire(KEYS.hand(code, playerId), ROOM_TTL_SECONDS)
+    .eval(EXPIRE_ROOM_KEY_LUA, 1, KEYS.hand(code, playerId))
     .exec()
 }
 
 // Packing Heat draws append to the live hand, sharing redraw's card boundary.
 export async function drawToHand(code: string, playerId: string, count: number): Promise<void> {
   await redis.eval(
-    `
+    `${ROOM_LIFETIME_LUA}
     for i = 1, tonumber(ARGV[1]) do
       local id = redis.call('LPOP', KEYS[1])
       if not id then break end
       redis.call('RPUSH', KEYS[2], id)
     end
-    redis.call('EXPIRE', KEYS[1], ARGV[2])
-    redis.call('EXPIRE', KEYS[2], ARGV[2])
+    expireRoomKey(KEYS[1])
+    expireRoomKey(KEYS[2])
     `,
     2,
     KEYS.deckWhite(code),
@@ -362,15 +366,15 @@ export async function drawToHand(code: string, playerId: string, count: number):
 // concurrent redraw. Card movement and the size check share one boundary.
 export async function refillHand(code: string, playerId: string, size: number): Promise<void> {
   await redis.eval(
-    `
+    `${ROOM_LIFETIME_LUA}
     local needed = tonumber(ARGV[1]) - redis.call('LLEN', KEYS[1])
     for i = 1, needed do
       local id = redis.call('LPOP', KEYS[2])
       if not id then break end
       redis.call('RPUSH', KEYS[1], id)
     end
-    redis.call('EXPIRE', KEYS[1], ARGV[2])
-    redis.call('EXPIRE', KEYS[2], ARGV[2])
+    expireRoomKey(KEYS[1])
+    expireRoomKey(KEYS[2])
     return 1
     `,
     2,
@@ -384,7 +388,7 @@ export async function refillHand(code: string, playerId: string, size: number): 
 // Validate the live room/player and exchange the entire hand in the same
 // operation as the point debit. Submission and wager commits use these
 // same keys, so no request can restore or discard a stale copy of the hand.
-const REDRAW_LUA = `
+const REDRAW_LUA = `${ROOM_LIFETIME_LUA}
 local phase = redis.call('HGET', KEYS[2], 'phase')
 if redis.call('HGET', KEYS[1], 'status') ~= 'active'
   or (phase ~= 'picking' and phase ~= 'transition') then return 'phase' end
@@ -405,7 +409,8 @@ redis.call('HSET', KEYS[3], ARGV[1], cjson.encode(player))
 for _, id in ipairs(old) do redis.call('RPUSH', KEYS[6], id) end
 redis.call('DEL', KEYS[4])
 for i = 1, 10 do redis.call('RPUSH', KEYS[4], redis.call('LPOP', KEYS[5])) end
-for i = 1, 6 do redis.call('EXPIRE', KEYS[i], ARGV[2]) end
+for i = 1, 6 do expireRoomKey(KEYS[i]) end
+renewRoomState(KEYS[1])
 return 1
 `
 
@@ -434,7 +439,7 @@ export async function commitRedraw(code: string, playerId: string): Promise<void
 
 // Confession eligibility and the replacement share one Redis commit with
 // submissions/redraws. Failed requests leave every card and allowance intact.
-const COMMIT_CONFESSION_LUA = `
+const COMMIT_CONFESSION_LUA = `${ROOM_LIFETIME_LUA}
 local player = cjson.decode(redis.call('HGET', KEYS[1], ARGV[1]) or '{}')
 if player.role == 'spectator' then return 'spectator' end
 if player.role ~= 'player' or player.status ~= 'active' or player.isRando then return 'actor' end
@@ -458,7 +463,8 @@ redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(player))
 redis.call('LREM', KEYS[4], 1, ARGV[2])
 redis.call('RPUSH', KEYS[6], ARGV[2])
 redis.call('RPUSH', KEYS[4], redis.call('LPOP', KEYS[5]))
-for i = 1, 6 do redis.call('EXPIRE', KEYS[i], ARGV[3]) end
+for i = 1, 6 do expireRoomKey(KEYS[i]) end
+renewRoomState(KEYS[2])
 return player.discardsUsed
 `
 
@@ -543,7 +549,7 @@ const submissionsKey = (code: string) => `${KEYS.round(code)}:submissions`
 
 // Ownership is checked against the live hand at the same instant the
 // submission is recorded and its cards are consumed.
-const COMMIT_SUBMISSION_LUA = `
+const COMMIT_SUBMISSION_LUA = `${ROOM_LIFETIME_LUA}
 local storedRoundId = redis.call('HGET', KEYS[4], 'roundId')
 local legacyRound = not storedRoundId
   and redis.call('HGET', KEYS[5], 'currentRound') == ARGV[6]
@@ -587,15 +593,16 @@ if redis.call('HEXISTS', KEYS[1], slot) == 1 then return 'submitted' end
 if legacyRound then
   redis.call('HSET', KEYS[4], 'roundId', ARGV[5], 'czarId', czarId)
   redis.call('HSET', KEYS[5], 'status', 'active')
-  redis.call('EXPIRE', KEYS[4], ARGV[3])
-  redis.call('EXPIRE', KEYS[5], ARGV[3])
+  expireRoomKey(KEYS[4])
+  expireRoomKey(KEYS[5])
 end
 redis.call('HSET', KEYS[1], slot, ARGV[2])
 for _, card in ipairs(submission.fills) do
   redis.call('LREM', KEYS[2], 0, card.id)
 end
-redis.call('EXPIRE', KEYS[1], ARGV[3])
-redis.call('EXPIRE', KEYS[2], ARGV[3])
+expireRoomKey(KEYS[1])
+expireRoomKey(KEYS[2])
+renewRoomState(KEYS[5])
 return 1
 `
 
@@ -644,7 +651,7 @@ export async function setSubmission(
   submission: Submission,
 ): Promise<void> {
   await redis.hset(submissionsKey(code), playerId, JSON.stringify(submission))
-  await redis.expire(submissionsKey(code), ROOM_TTL_SECONDS)
+  await expireRoomStateKeys(code, [submissionsKey(code)])
 }
 
 export async function getSubmissions(code: string): Promise<Record<string, Submission>> {
@@ -665,7 +672,7 @@ export async function publishEvent(code: string, event: unknown): Promise<void> 
 // Publish each answer and its snapshot cursor atomically with the live
 // round check. Automatic outcomes can finish the reveal they claimed;
 // sleeping stagger callbacks cannot publish into a finished round.
-const PUBLISH_REVEALS_LUA = `
+const PUBLISH_REVEALS_LUA = `${ROOM_LIFETIME_LUA}
 if not redis.call('HGET', KEYS[4], 'status') then return 0 end
 if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1] then return 0 end
 if ARGV[2] == '1' then
@@ -682,7 +689,8 @@ for _, raw in ipairs(cjson.decode(ARGV[3])) do
     cursor = cursor + 1
   end
 end
-redis.call('SET', KEYS[2], cursor, 'EX', ARGV[4])
+redis.call('SET', KEYS[2], cursor)
+expireRoomKey(KEYS[2])
 return 1
 `
 
@@ -730,7 +738,7 @@ export async function reconnectPlayer(
 ): Promise<boolean> {
   return Boolean(
     await redis.eval(
-      `
+      `${ROOM_LIFETIME_LUA}
       if not redis.call('HGET', KEYS[4], 'status') then return 0 end
       local raw = redis.call('HGET', KEYS[1], ARGV[1])
       if not raw then return 0 end
@@ -741,13 +749,13 @@ export async function reconnectPlayer(
       end
       if ARGV[3] ~= '' then
         redis.call('HSET', KEYS[5], ARGV[3], ARGV[4])
-        redis.call('EXPIRE', KEYS[5], ARGV[2])
+        redis.call('EXPIRE', KEYS[5], ARGV[2]) -- socket registry
       end
       redis.call('DEL', KEYS[6])
       player.connectionStatus = 'connected'
       redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(player))
       redis.call('DEL', KEYS[2], KEYS[3])
-      redis.call('EXPIRE', KEYS[1], ARGV[2])
+      expireRoomKey(KEYS[1])
       return 1
       `,
       6,
@@ -773,7 +781,7 @@ export async function disconnectPlayer(
 ): Promise<boolean> {
   return Boolean(
     await redis.eval(
-      `
+      `${ROOM_LIFETIME_LUA}
       if not redis.call('HGET', KEYS[4], 'status') then return 0 end
       for _, expiry in ipairs(redis.call('HVALS', KEYS[5])) do
         if tonumber(expiry) > tonumber(ARGV[5]) then return 0 end
@@ -794,7 +802,7 @@ export async function disconnectPlayer(
       -- Preserve the connection generation past grace-key expiry so an old
       -- timer cannot drop a later disconnect or a successful reconnect.
       redis.call('SET', KEYS[3], ARGV[2], 'EX', ARGV[4])
-      redis.call('EXPIRE', KEYS[1], ARGV[4])
+      expireRoomKey(KEYS[1])
       return 1
       `,
       6,
@@ -822,7 +830,7 @@ export async function claimPlayerDrop(
 ): Promise<boolean> {
   return Boolean(
     await redis.eval(
-      `
+      `${ROOM_LIFETIME_LUA}
       if not redis.call('HGET', KEYS[4], 'status') then return 0 end
       local raw = redis.call('HGET', KEYS[1], ARGV[1])
       if not raw then return 0 end
@@ -831,11 +839,12 @@ export async function claimPlayerDrop(
       if ARGV[2] ~= '' and (redis.call('GET', KEYS[3]) ~= ARGV[2]
         or redis.call('EXISTS', KEYS[2]) == 1) then return 0 end
       redis.call('HSET', KEYS[7], ARGV[1], cjson.encode({reason=ARGV[6], roundId=redis.call('HGET', KEYS[8], 'roundId') or ''}))
-      redis.call('EXPIRE', KEYS[7], ARGV[3])
+      expireRoomKey(KEYS[7])
       player.status = 'dropped'
       redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(player))
       redis.call('DEL', KEYS[2], KEYS[3], KEYS[5], KEYS[6])
-      redis.call('EXPIRE', KEYS[1], ARGV[3])
+      expireRoomKey(KEYS[1])
+      if ARGV[6] == 'leave' then renewRoomState(KEYS[4]) end
       redis.call('PUBLISH', ARGV[4], ARGV[5])
       return 1
       `,
@@ -876,16 +885,16 @@ export async function ensureRoundIdentity(
   czarId: string | null,
 ): Promise<boolean> {
   const ok = await redis.eval(
-    `
+    `${ROOM_LIFETIME_LUA}
     if redis.call('HGET', KEYS[1], 'currentRound') ~= ARGV[1] then return 0 end
     local current = redis.call('HGET', KEYS[2], 'roundId')
     if current and current ~= ARGV[2] then return 0 end
     redis.call('HSETNX', KEYS[2], 'roundId', ARGV[2])
     redis.call('HSETNX', KEYS[2], 'czarId', ARGV[3])
-    redis.call('EXPIRE', KEYS[2], ARGV[4])
+    expireRoomKey(KEYS[2])
     if not current and redis.call('HGET', KEYS[1], 'status') == 'lobby' then
       redis.call('HSET', KEYS[1], 'status', 'active')
-      redis.call('EXPIRE', KEYS[1], ARGV[4])
+      expireRoomKey(KEYS[1])
     end
     return 1
     `,
@@ -902,7 +911,7 @@ export async function ensureRoundIdentity(
 
 export async function setRoundTimerExpiresAt(code: string, expiresAt: number): Promise<void> {
   await redis.hset(KEYS.round(code), 'roundTimerExpiresAt', String(expiresAt))
-  await redis.expire(KEYS.round(code), ROOM_TTL_SECONDS)
+  await expireRoomStateKeys(code, [KEYS.round(code)])
 }
 
 // S2-10: read back the persisted expiry so a server restart can re-arm
@@ -920,7 +929,7 @@ export async function getRoundTimerExpiresAt(code: string): Promise<number | nul
 // the finalize step that endRound would have run.
 export async function setPostResolveResumeAt(code: string, ts: number): Promise<void> {
   await redis.hset(KEYS.round(code), 'postResolveResumeAt', String(ts))
-  await redis.expire(KEYS.round(code), ROOM_TTL_SECONDS)
+  await expireRoomStateKeys(code, [KEYS.round(code)])
 }
 
 export async function getPostResolveResumeAt(code: string): Promise<number | null> {
@@ -937,7 +946,7 @@ export async function clearPostResolveResumeAt(code: string): Promise<void> {
 // to re-derive it the way buildSnapshot does.
 export async function setPhase(code: string, phase: GamePhase): Promise<void> {
   await redis.hset(KEYS.round(code), 'phase', phase)
-  await redis.expire(KEYS.round(code), ROOM_TTL_SECONDS)
+  await expireRoomStateKeys(code, [KEYS.round(code)])
 }
 
 export async function getHostId(code: string): Promise<string | null> {
@@ -956,13 +965,13 @@ export async function getPhase(code: string): Promise<GamePhase | null> {
 // Every terminal mode competes for this same generation-bound claim. Checking
 // phase and identity in Redis prevents a delayed command from claiming a new
 // round after its own round's resolution fields have been cleared.
-const CLAIM_ROUND_OUTCOME_LUA = `
+const CLAIM_ROUND_OUTCOME_LUA = `${ROOM_LIFETIME_LUA}
 if not redis.call('HGET', KEYS[2], 'status') then return 0 end
 if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1] then return 0 end
 if redis.call('HGET', KEYS[1], 'phase') ~= ARGV[2] then return 0 end
 if redis.call('HEXISTS', KEYS[1], 'outcomeClaim') == 1 then return 0 end
 redis.call('HSET', KEYS[1], 'outcomeClaim', ARGV[1], 'winningPlayerId', ARGV[3], 'winningSubmissionId', ARGV[5], 'phase', 'transition')
-redis.call('EXPIRE', KEYS[1], ARGV[4])
+expireRoomKey(KEYS[1])
 return 1
 `
 
@@ -989,14 +998,14 @@ export async function claimRoundOutcome(
 }
 
 // A sleeping reveal must not overwrite a claimed outcome or a newer round.
-const ADVANCE_REVEAL_LUA = `
+const ADVANCE_REVEAL_LUA = `${ROOM_LIFETIME_LUA}
 if not redis.call('HGET', KEYS[2], 'status') then return 0 end
 if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1] then return 0 end
 if redis.call('HGET', KEYS[1], 'phase') ~= 'reveal' then return 0 end
 if redis.call('HEXISTS', KEYS[1], 'outcomeClaim') == 1 then return 0 end
 redis.call('HSET', KEYS[1], 'phase', ARGV[2])
 if ARGV[3] ~= '' then redis.call('HSET', KEYS[1], 'eliminationTurnPlayerId', ARGV[3]) end
-redis.call('EXPIRE', KEYS[1], ARGV[4])
+expireRoomKey(KEYS[1])
 return 1
 `
 
@@ -1047,7 +1056,7 @@ export async function getRoundOutcome(code: string): Promise<{
 
 export async function setRoundRanking(code: string, ranking: Submission[]): Promise<void> {
   await redis.hset(KEYS.round(code), 'ranking', JSON.stringify(ranking))
-  await redis.expire(KEYS.round(code), ROOM_TTL_SECONDS)
+  await expireRoomStateKeys(code, [KEYS.round(code)])
 }
 
 export async function getRoundRanking(code: string): Promise<Submission[] | null> {
@@ -1085,7 +1094,7 @@ const skippedKey = (code: string) => `${KEYS.round(code)}:skipped`
 
 export async function addSkippedPlayer(code: string, playerId: string): Promise<void> {
   await redis.sadd(skippedKey(code), playerId)
-  await redis.expire(skippedKey(code), ROOM_TTL_SECONDS)
+  await expireRoomStateKeys(code, [skippedKey(code)])
 }
 
 export async function getSkippedPlayers(code: string): Promise<string[]> {
@@ -1098,7 +1107,7 @@ export async function clearSkippedPlayers(code: string): Promise<void> {
 
 // Turn validation, card removal and turn advancement are one operation.
 // A second frame from the old actor cannot remove another submission.
-const ELIMINATE_LUA = `
+const ELIMINATE_LUA = `${ROOM_LIFETIME_LUA}
 if not redis.call('HGET', KEYS[4], 'status') then return nil end
 if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1] then return nil end
 if redis.call('HGET', KEYS[1], 'phase') ~= 'eliminating' then return nil end
@@ -1114,8 +1123,9 @@ local submission = cjson.decode(raw)
 if submission.eliminated then return nil end
 submission.eliminated = true
 redis.call('HSET', KEYS[2], ARGV[3], cjson.encode(submission))
-redis.call('EXPIRE', KEYS[1], ARGV[5])
-redis.call('EXPIRE', KEYS[2], ARGV[5])
+renewRoomState(KEYS[4])
+expireRoomKey(KEYS[1])
+expireRoomKey(KEYS[2])
 local remaining = {}
 local entries = redis.call('HGETALL', KEYS[2])
 for i = 1, #entries, 2 do
@@ -1153,7 +1163,7 @@ export async function commitElimination(
 
 // Claim and finish automatic Survival eliminations together: a live turn
 // racing the Czar drop cannot make an already eliminated answer win.
-const AUTO_ELIMINATE_LUA = `
+const AUTO_ELIMINATE_LUA = `${ROOM_LIFETIME_LUA}
 if not redis.call('HGET', KEYS[3], 'status') then return {} end
 if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1] then return {} end
 if redis.call('HGET', KEYS[1], 'phase') ~= ARGV[2] then return {} end
@@ -1175,8 +1185,8 @@ for i = 1, #remaining - 1 do
   submission.eliminated = true
   redis.call('HSET', KEYS[2], remaining[i], cjson.encode(submission))
 end
-redis.call('EXPIRE', KEYS[1], ARGV[4])
-redis.call('EXPIRE', KEYS[2], ARGV[4])
+expireRoomKey(KEYS[1])
+expireRoomKey(KEYS[2])
 return remaining
 `
 
@@ -1203,7 +1213,7 @@ export async function autoEliminateRemaining(
 
 // Register a ballot and close its election in one Redis operation. Only
 // the last accepted ballot can decide a winner or open the next revote.
-const VOTE_LUA = `
+const VOTE_LUA = `${ROOM_LIFETIME_LUA}
 if not redis.call('HGET', KEYS[8], 'status') then return nil end
 if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1] then return nil end
 if redis.call('HGET', KEYS[1], 'phase') ~= 'waiting' then return nil end
@@ -1225,8 +1235,9 @@ end
 if redis.call('SADD', KEYS[4], ARGV[3]) == 0 then return nil end
 redis.call('HSET', KEYS[5], ARGV[3], ARGV[4])
 redis.call('HINCRBY', KEYS[6], ARGV[4], 1)
-redis.call('EXPIRE', KEYS[1], ARGV[6])
-for i = 4, 7 do redis.call('EXPIRE', KEYS[i], ARGV[6]) end
+renewRoomState(KEYS[8])
+expireRoomKey(KEYS[1])
+for i = 4, 7 do expireRoomKey(KEYS[i]) end
 local tally = {}
 local total = 0
 local max = 0
@@ -1248,7 +1259,7 @@ for sid, n in pairs(tally) do if n == max then table.insert(leaders, sid) end en
 local attempts = 0
 if #leaders > 1 then
   attempts = redis.call('INCR', KEYS[7])
-  redis.call('EXPIRE', KEYS[7], ARGV[6])
+  expireRoomKey(KEYS[7])
 end
 if #leaders > 1 and attempts <= 2 then
   table.sort(leaders, function(a, b) return tonumber(a) < tonumber(b) end)

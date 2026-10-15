@@ -810,7 +810,7 @@ INDEX gin_winning_fills ON game_rounds USING gin (winning_submission_fills)  -- 
 
 ### `last_activity_at` and stale-game sweeper
 
-`last_activity_at` is updated on every WS message and HTTP API call for the session. A background job (`src/lib/sweeper.ts`) runs via [`node-cron`](https://github.com/node-cron/node-cron) scheduled at `*/30 * * * *` (every 30 min). Scheduled at process boot from the server entry point. Sweep query:
+`last_activity_at` records gameplay and membership lifecycle activity for the SQL sweeper. It does not control or renew the Redis room deadline; the idle lifetime policy below does. A background job (`src/lib/sweeper.ts`) runs via [`node-cron`](https://github.com/node-cron/node-cron) scheduled at `*/30 * * * *` (every 30 min). Scheduled at process boot from the server entry point. Sweep query:
 
 - Find sessions with `status IN ('active', 'paused')` AND `last_activity_at < now() - INTERVAL '6 hours'` AND zero present players in Redis
 - Mark these as `status='abandoned'`, `end_mode='abandoned'`, set `ended_at = now()`
@@ -885,6 +885,7 @@ Query-time aggregations with `Cache-Control: public, max-age=300`:
 ```
 game:{code}                hash: status, currentRound, totalRounds, czarIndex, hostId, config JSON, lastActivityAt
 game:{code}:players        hash: playerId → GamePlayer JSON (includes discardsUsed)
+game:{code}:czarOrder      list: stable Czar rotation, including dropped memberships
 game:{code}:round          hash with mode-aware fields:
                              blackCardId         (always)
                              czarId              (null in God Is Dead)
@@ -906,7 +907,13 @@ game:{code}:grace:{id}     string with PX expiry = GRACE_WINDOW_MS; set on disco
 game:{code}:channel        pub/sub channel
 ```
 
-All keys: 24h TTL on idle. Refreshed on any state mutation.
+### Room idle lifetime
+
+The room root owns one **24-hour idle deadline**. The roster (including dropped-membership tombstones), Czar order, decks, discards, every player's hand, round phase and outcome, submissions, shuffled answer order, reveal cursor, skipped players, ballots/tallies/tiebreak state, and pending drop intents all expire at that same deadline. The round's `resolving` marker is durable completion state and shares it too. New state and internal transitions inherit the current deadline.
+
+An accepted join, lobby configuration change, start, reset, card submission, wager, redraw, confession discard, Czar pick/ranking, vote, elimination, Happy Ending request, or explicit leave renews the entire durable state together. Validation failures and repeated commands that do not mutate state do not renew it. WebSocket authentication, heartbeats, snapshot reads, disconnect/grace handling, automatic round transitions and periodic recovery/sweeper work do not renew it. An unattended connected browser therefore cannot keep a room alive indefinitely. Idle expiry revokes access even while historical SQL rows remain; the sweeper subsequently marks unfinished matches abandoned.
+
+Socket lease timestamps (45 seconds), grace keys (30 seconds), absolute disconnect deadlines and their generation metadata, traffic budgets, and short command locks retain their separate lifetimes. Another participant's activity must never move a socket or disconnect deadline or extend a short lock. Pub/sub channels have no stored lifetime. See `src/lib/room-lifetime.ts` for the bounded durable-state allowlist.
 
 ### Persistence
 

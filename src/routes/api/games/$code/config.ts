@@ -78,7 +78,7 @@ export const Route = createFileRoute('/api/games/$code/config')({
           // pending recovery. Inside the row lock only recheck membership.
           if (!(await checkRoomMembership(code, auth.playerId)).ok)
             return errorResponse(401, 'not_authorized', 'Missing or invalid token')
-          await state.updateLiveRoom(code, {}, auth.playerId)
+          await state.updateLiveRoom(code, {}, auth.playerId, [], undefined, true)
           await tx
             .update(gameSessions)
             .set({ config, lastActivityAt: new Date() })
