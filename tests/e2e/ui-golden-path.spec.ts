@@ -137,14 +137,13 @@ async function submitNCardsViaClick(handle: Handle, n: number): Promise<void> {
   await submit.click()
 }
 
-async function czarPicksFirstSubmission(czar: Handle): Promise<void> {
-  // Reveal is server-staggered; wait for the last card to flip face-up.
-  // `.flip-reveal` mounts per revealed card, so its presence on every
-  // submission slot signals the canPick gate is open.
-  await czar.page.locator('.flip-reveal').first().waitFor({ state: 'visible', timeout: 20_000 })
-  // Small additional settle so the last stagger lands before the click.
-  await humanPause(czar.page, 200, 500)
-  await czar.page.locator('.flip-reveal').first().locator('.card-response').click()
+async function czarPicksFirstSubmission(czar: Handle, expectedCards: number): Promise<void> {
+  // Picking before every submission is revealed is rejected by the server.
+  // Observe the complete set of face-up, clickable cards instead of guessing
+  // when the remaining server-staggered reveals will arrive.
+  const cards = czar.page.locator('.flip-reveal .card-response.card-clickable')
+  await expect(cards).toHaveCount(expectedCards, { timeout: 20_000 })
+  await cards.first().click()
 }
 
 // Reads the current round number from the topbar pill (`Round N`).
@@ -178,7 +177,7 @@ async function playOneRound(players: Handle[]): Promise<{ ended: boolean }> {
 
   // Wait for the reveal grid to render on the czar's page.
   await czar.page.locator('.subs-grid').waitFor({ state: 'visible', timeout: 20_000 })
-  await czarPicksFirstSubmission(czar)
+  await czarPicksFirstSubmission(czar, nonCzars.length * pick)
 
   // Resolve: either /end, or the round counter ticks past `startRound`.
   await czar.page.waitForFunction(
