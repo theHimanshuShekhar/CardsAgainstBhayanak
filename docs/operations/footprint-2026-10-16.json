@@ -1,0 +1,424 @@
+{
+  "measuredAtUtc": "2026-10-15T23:31:47.964395+00:00",
+  "baselineCommit": "4e80737",
+  "candidate": {
+    "image": {
+      "id": "sha256:d230be80bc0a731a9fed573d19e4a666a7efcf517e01092c22a82c96dde22922",
+      "size": 520444088,
+      "repoDigests": [
+        "cab-issue56@sha256:d230be80bc0a731a9fed573d19e4a666a7efcf517e01092c22a82c96dde22922"
+      ]
+    },
+    "directoriesAllocatedKiB": {
+      "node_modules": 232828,
+      "dist": 1256,
+      "src": 812,
+      "drizzle": 112,
+      "scripts": 16
+    },
+    "packageCount": 259,
+    "clientSamples": [
+      {
+        "path": "/",
+        "sample": 1,
+        "status": 200,
+        "domContentLoadedMs": 213.80000007152557,
+        "loadMs": 372.3000000715256,
+        "firstPartyTransferredBytes": 575455,
+        "assetTransferredBytes": 568161,
+        "externalTransferredBytes": 54756,
+        "failures": [],
+        "errors": [],
+        "firstPartyRequestCount": 7,
+        "externalRequestCount": 3
+      },
+      {
+        "path": "/",
+        "sample": 2,
+        "status": 200,
+        "domContentLoadedMs": 211.20000004768372,
+        "loadMs": 346.10000002384186,
+        "firstPartyTransferredBytes": 575455,
+        "assetTransferredBytes": 568161,
+        "externalTransferredBytes": 54755,
+        "failures": [],
+        "errors": [],
+        "firstPartyRequestCount": 7,
+        "externalRequestCount": 3
+      },
+      {
+        "path": "/",
+        "sample": 3,
+        "status": 200,
+        "domContentLoadedMs": 199.5,
+        "loadMs": 333.1999999284744,
+        "firstPartyTransferredBytes": 575455,
+        "assetTransferredBytes": 568161,
+        "externalTransferredBytes": 54755,
+        "failures": [],
+        "errors": [],
+        "firstPartyRequestCount": 7,
+        "externalRequestCount": 3
+      },
+      {
+        "path": "/games/create",
+        "sample": 1,
+        "status": 200,
+        "domContentLoadedMs": 208.59999990463257,
+        "loadMs": 378.5,
+        "firstPartyTransferredBytes": 666530,
+        "assetTransferredBytes": 643862,
+        "externalTransferredBytes": 54755,
+        "failures": [],
+        "errors": [],
+        "firstPartyRequestCount": 10,
+        "externalRequestCount": 3
+      },
+      {
+        "path": "/games/create",
+        "sample": 2,
+        "status": 200,
+        "domContentLoadedMs": 215.5,
+        "loadMs": 379.3000000715256,
+        "firstPartyTransferredBytes": 666530,
+        "assetTransferredBytes": 643862,
+        "externalTransferredBytes": 54755,
+        "failures": [],
+        "errors": [],
+        "firstPartyRequestCount": 10,
+        "externalRequestCount": 3
+      },
+      {
+        "path": "/games/create",
+        "sample": 3,
+        "status": 200,
+        "domContentLoadedMs": 199.19999992847443,
+        "loadMs": 324.89999997615814,
+        "firstPartyTransferredBytes": 666530,
+        "assetTransferredBytes": 643862,
+        "externalTransferredBytes": 54755,
+        "failures": [],
+        "errors": [],
+        "firstPartyRequestCount": 10,
+        "externalRequestCount": 3
+      },
+      {
+        "path": "/stats",
+        "sample": 1,
+        "status": 200,
+        "domContentLoadedMs": 194.19999992847443,
+        "loadMs": 365.10000002384186,
+        "firstPartyTransferredBytes": 576672,
+        "assetTransferredBytes": 570602,
+        "externalTransferredBytes": 54756,
+        "failures": [],
+        "errors": [],
+        "firstPartyRequestCount": 7,
+        "externalRequestCount": 3
+      },
+      {
+        "path": "/stats",
+        "sample": 2,
+        "status": 200,
+        "domContentLoadedMs": 177.69999992847443,
+        "loadMs": 333.7999999523163,
+        "firstPartyTransferredBytes": 576672,
+        "assetTransferredBytes": 570602,
+        "externalTransferredBytes": 54755,
+        "failures": [],
+        "errors": [],
+        "firstPartyRequestCount": 7,
+        "externalRequestCount": 3
+      },
+      {
+        "path": "/stats",
+        "sample": 3,
+        "status": 200,
+        "domContentLoadedMs": 189.10000002384186,
+        "loadMs": 324.8000000715256,
+        "firstPartyTransferredBytes": 576672,
+        "assetTransferredBytes": 570602,
+        "externalTransferredBytes": 54756,
+        "failures": [],
+        "errors": [],
+        "firstPartyRequestCount": 7,
+        "externalRequestCount": 3
+      }
+    ],
+    "measurementOrigin": "http://127.0.0.1:32775"
+  },
+  "environment": {
+    "architecture": "linux/amd64",
+    "hostCpu": "AMD Ryzen 7 5700G, 16 logical CPUs",
+    "hostRamGiB": 16,
+    "docker": "29.9.0",
+    "storageDriver": "overlayfs",
+    "baseImage": "node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402",
+    "node": "22.23.3",
+    "pnpm": "10.33.0",
+    "playwright": "1.60.0",
+    "chromium": "148.0.7778.96",
+    "postgres": "16.15 (postgres:16-alpine)",
+    "valkey": "8.1.10 (valkey/valkey:8-alpine)",
+    "transport": "HTTP loopback, no CPU/network throttling, analytics unset",
+    "browserCache": "fresh contexts, service workers blocked, CDP cache disabled",
+    "application": {
+      "NODE_ENV": "production",
+      "PUBLIC_SITE_URL": "https://cards.example.test",
+      "CAB_RNG_SEED": "test-seed-2026",
+      "CAB_ROUND_RESULT_PAUSE_MS": "2000",
+      "SESSION_SECRET": "disposable local secret"
+    }
+  },
+  "catalog": {
+    "packs": 72,
+    "blackCards": 1038,
+    "whiteCards": 4655,
+    "matches": 0
+  },
+  "units": {
+    "imageSizeBytes": "docker image inspect Size from this local daemon",
+    "directoriesAllocatedKiB": "du -sk",
+    "browserTransferredBytes": "CDP Network.loadingFinished encodedDataLength, includes response headers",
+    "timingsMs": "Navigation Timing DOMContentLoadedEventEnd/loadEventEnd"
+  },
+  "clientAssets": [
+    {
+      "file": "Card-B3Fzcz5O.js",
+      "bytes": 1306,
+      "sha256": "69f0420355219f78f8a40d1180b945ad9e6424a94bcff0a8ff5598a4a574e85e"
+    },
+    {
+      "file": "ErrorNotice-CmR6Ze0J.js",
+      "bytes": 246,
+      "sha256": "69b2b5b2f883eba71f18f6bbc3aef597f30486e1c90795f6450e9dba2bc06d93"
+    },
+    {
+      "file": "GameConfigEditor-iFxsWQRX.js",
+      "bytes": 5554,
+      "sha256": "bd3e571fc6608107b66ce4ecc30cbe9f3c48b9d897ef8c06c72f3f2eb4ffee45"
+    },
+    {
+      "file": "Scoreboard-CQsYO0Um.js",
+      "bytes": 567,
+      "sha256": "5f3eb5571e13727b2cb6368827f3a0e02ab0cda3bd5ebccfaa3b307a8a5314f4"
+    },
+    {
+      "file": "Topbar-Djvei2Rm.js",
+      "bytes": 614,
+      "sha256": "b4bbd8333996c17e8fd9c3f3ea779f89210595efca74e32bb113a308a34e34eb"
+    },
+    {
+      "file": "code-gen-CvDkhrkd.js",
+      "bytes": 128,
+      "sha256": "3bfbbef2f92ac5132d71e0eb3e41f338c8e7df69c60ec250b0e635804a857070"
+    },
+    {
+      "file": "create-BGA_PgNO.js",
+      "bytes": 5107,
+      "sha256": "e7592b2115257b9ab8e91940c5b311b1983452a654cb4fe97564b25aeac17257"
+    },
+    {
+      "file": "end-BRr_nZrM.js",
+      "bytes": 4391,
+      "sha256": "fdef2567aeb3c13a21150753cf5d6e526fde378427d3d0ece4ff8cf7407277ac"
+    },
+    {
+      "file": "index-7SWClpcp.css",
+      "bytes": 42197,
+      "sha256": "68502a5aada7518721b4ffe87806689445ba7820fc03e5c86f3fa21ccfad5b9b"
+    },
+    {
+      "file": "index-DiLPEgl0.js",
+      "bytes": 3137,
+      "sha256": "1389e2fc6a428f15044a6cc314bee81065209d31dc82089291878675015593b8"
+    },
+    {
+      "file": "index-DpYKCIZW.js",
+      "bytes": 519716,
+      "sha256": "3ecc64b8d114352e503f120f0cc5f6a31266b73bdfeb07bd273d81202b64de33"
+    },
+    {
+      "file": "join-QTvp0xTt.js",
+      "bytes": 3249,
+      "sha256": "5b803a7dc76041327f97dd0e2a2e428cbbe630aa173aa60002619f8d89cda09e"
+    },
+    {
+      "file": "lobby-Cp9WaT7z.js",
+      "bytes": 5644,
+      "sha256": "26ec359d1eeb6ef36c99a5427e40577dee63697062d7fd6cbea6e2dcd6f89b6c"
+    },
+    {
+      "file": "session-kDRgrZXt.js",
+      "bytes": 17474,
+      "sha256": "114e15d78a6c916940da8bbbe598ff744aa2b6ad8f0e8c9b00ec9ae0f1ff7e18"
+    },
+    {
+      "file": "stats-p047p8ds.js",
+      "bytes": 7122,
+      "sha256": "244d2ae0b0e3fb6c6fa52b5412ffa7c077b1f84b3d26403d4ff3fa76f62056a2"
+    },
+    {
+      "file": "useGameSocket-nNsWkT2o.js",
+      "bytes": 2163,
+      "sha256": "22b4e48ab4843655122ac2d556da75a984b629d895a1787d01f468af0759dda5"
+    },
+    {
+      "file": "useLeaveGame-Dnudl7Ih.js",
+      "bytes": 604,
+      "sha256": "f3d3f1ad9f8c5df565653fe4c200772d59b5bd85b36d6a30a9871d23d09f3cc6"
+    },
+    {
+      "file": "useSession-DsCkf7uS.js",
+      "bytes": 68756,
+      "sha256": "c986bb2413381bf4644bc550aa02dc0cc36bee5eeb8292b26016da785f3490fd"
+    }
+  ],
+  "clientAssetsIdentical": true,
+  "baseline": {
+    "image": {
+      "id": "sha256:765c4a51e603655304c3108b710f3bfe2e14cdb4ed03b8b5fc825933ee8032d8",
+      "size": 658981531,
+      "repoDigests": [
+        "cab-issue56@sha256:765c4a51e603655304c3108b710f3bfe2e14cdb4ed03b8b5fc825933ee8032d8"
+      ]
+    },
+    "directoriesAllocatedKiB": {
+      "node_modules": 343980,
+      "dist": 1256,
+      "src": 812,
+      "drizzle": 112,
+      "scripts": 16
+    },
+    "packageCount": 434,
+    "clientSamples": [
+      {
+        "path": "/",
+        "sample": 1,
+        "status": 200,
+        "domContentLoadedMs": 231.79999995231628,
+        "loadMs": 373.2999999523163,
+        "firstPartyTransferredBytes": 575455,
+        "assetTransferredBytes": 568161,
+        "externalTransferredBytes": 54754,
+        "failures": [],
+        "errors": [],
+        "firstPartyRequestCount": 7,
+        "externalRequestCount": 3
+      },
+      {
+        "path": "/",
+        "sample": 2,
+        "status": 200,
+        "domContentLoadedMs": 215.20000004768372,
+        "loadMs": 373.5,
+        "firstPartyTransferredBytes": 575455,
+        "assetTransferredBytes": 568161,
+        "externalTransferredBytes": 54754,
+        "failures": [],
+        "errors": [],
+        "firstPartyRequestCount": 7,
+        "externalRequestCount": 3
+      },
+      {
+        "path": "/",
+        "sample": 3,
+        "status": 200,
+        "domContentLoadedMs": 207.10000002384186,
+        "loadMs": 405.6999999284744,
+        "firstPartyTransferredBytes": 575455,
+        "assetTransferredBytes": 568161,
+        "externalTransferredBytes": 54754,
+        "failures": [],
+        "errors": [],
+        "firstPartyRequestCount": 7,
+        "externalRequestCount": 3
+      },
+      {
+        "path": "/games/create",
+        "sample": 1,
+        "status": 200,
+        "domContentLoadedMs": 176,
+        "loadMs": 331.39999997615814,
+        "firstPartyTransferredBytes": 666530,
+        "assetTransferredBytes": 643862,
+        "externalTransferredBytes": 54756,
+        "failures": [],
+        "errors": [],
+        "firstPartyRequestCount": 10,
+        "externalRequestCount": 3
+      },
+      {
+        "path": "/games/create",
+        "sample": 2,
+        "status": 200,
+        "domContentLoadedMs": 184.39999997615814,
+        "loadMs": 366.5,
+        "firstPartyTransferredBytes": 666530,
+        "assetTransferredBytes": 643862,
+        "externalTransferredBytes": 54756,
+        "failures": [],
+        "errors": [],
+        "firstPartyRequestCount": 10,
+        "externalRequestCount": 3
+      },
+      {
+        "path": "/games/create",
+        "sample": 3,
+        "status": 200,
+        "domContentLoadedMs": 213.80000007152557,
+        "loadMs": 371.60000002384186,
+        "firstPartyTransferredBytes": 666530,
+        "assetTransferredBytes": 643862,
+        "externalTransferredBytes": 54756,
+        "failures": [],
+        "errors": [],
+        "firstPartyRequestCount": 10,
+        "externalRequestCount": 3
+      },
+      {
+        "path": "/stats",
+        "sample": 1,
+        "status": 200,
+        "domContentLoadedMs": 191,
+        "loadMs": 348.7000000476837,
+        "firstPartyTransferredBytes": 576672,
+        "assetTransferredBytes": 570602,
+        "externalTransferredBytes": 54756,
+        "failures": [],
+        "errors": [],
+        "firstPartyRequestCount": 7,
+        "externalRequestCount": 3
+      },
+      {
+        "path": "/stats",
+        "sample": 2,
+        "status": 200,
+        "domContentLoadedMs": 210.39999997615814,
+        "loadMs": 377.7000000476837,
+        "firstPartyTransferredBytes": 576672,
+        "assetTransferredBytes": 570602,
+        "externalTransferredBytes": 54756,
+        "failures": [],
+        "errors": [],
+        "firstPartyRequestCount": 7,
+        "externalRequestCount": 3
+      },
+      {
+        "path": "/stats",
+        "sample": 3,
+        "status": 200,
+        "domContentLoadedMs": 221,
+        "loadMs": 393.5,
+        "firstPartyTransferredBytes": 576672,
+        "assetTransferredBytes": 570602,
+        "externalTransferredBytes": 54755,
+        "failures": [],
+        "errors": [],
+        "firstPartyRequestCount": 7,
+        "externalRequestCount": 3
+      }
+    ],
+    "measurementOrigin": "http://127.0.0.1:32772"
+  }
+}

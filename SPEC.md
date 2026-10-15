@@ -1055,8 +1055,10 @@ PostgreSQL requires durable fsync, reliable locking and exclusive PGDATA ownersh
 
 ### Dockerfile (multi-stage)
 
-- `build` stage: `node:22-alpine` + pnpm, runs `pnpm install --frozen-lockfile` + `pnpm build`
-- `run` stage: `node:22-alpine`, copies `.output/`, runs `node .output/server/index.mjs`, `USER node`, `EXPOSE 3000`
+- `build` stage: `node:22-alpine` + pnpm, runs `pnpm install --frozen-lockfile` + `pnpm build`.
+- `production-deps` stage: installs frozen production dependencies, including `tsx` for the server and deployment CLIs; excludes development-only tooling. Lifecycle scripts are skipped so the missing Husky prepare hook cannot break this install.
+- `run` stage: `node:22-alpine`, copies `dist/`, source required by the production WebSocket entry, production dependencies and reviewed schema tooling. Runs `pnpm start` through `start-prod.sh` as `USER cab`, `EXPOSE 3000`. `db:migrate`, `db:check`, `db:baseline`, `db:signature` and `seed` remain available; Drizzle generation/studio/push run from a development checkout.
+- See [measured image and cold client footprint](docs/operations/deployment-footprint.md) for the baseline, reproduction commands and validation limits.
 
 ### Environment variables
 
