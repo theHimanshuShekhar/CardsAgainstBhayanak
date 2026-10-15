@@ -48,6 +48,7 @@ it('restores an expired grace deadline once, preserving roster and host successi
     hand?: Array<{ id: string }>
   }> = []
   let socketServer: import('srvx').Server | undefined
+  const submittedBeforeVoid = new Map<string, string[]>()
   const peers: Array<{ socket: WebSocket; playerId: string; events: typeof events }> = []
   subscriber.on('message', (_channel, raw) => events.push(JSON.parse(raw)))
   await subscriber.subscribe(KEYS.channel(code))
@@ -92,7 +93,9 @@ it('restores an expired grace deadline once, preserving roster and host successi
     }
     for (const player of players.slice(1, 3)) {
       const openingHand = await state.getHand(code, player.id)
-      await engine.submitCards(code, player.id, openingHand.slice(0, opening.prompt.pick))
+      const submitted = openingHand.slice(0, opening.prompt.pick)
+      submittedBeforeVoid.set(player.id, submitted)
+      await engine.submitCards(code, player.id, submitted)
     }
     await state.disconnectPlayer(code, players[0]!.id, 'crashed-connection', 1)
     await new Promise((resolve) => setTimeout(resolve, 10))
@@ -173,9 +176,15 @@ it('restores an expired grace deadline once, preserving roster and host successi
       const delivered = peers
         .find((peer) => peer.playerId === player.id)!
         .events.find((event) => event.type === 'hand_update' && event.playerId === player.id)?.hand
-      const hand = delivered
+      const returnedCards = submittedBeforeVoid.get(player.id)
+      if (returnedCards) expect(delivered).toBeDefined()
+      const liveHand = delivered
         ? delivered.map((card) => card.id)
         : await state.getHand(code, player.id)
+      if (returnedCards) expect(returnedCards.every((id) => liveHand.includes(id))).toBe(true)
+      const hand = returnedCards
+        ? [...returnedCards, ...liveHand.filter((id) => !returnedCards.includes(id))]
+        : liveHand
       const pick = events.find((event) => event.type === 'round_started' && event.round === 2)!
         .prompt!.pick
       await engine.submitCards(code, player.id, hand.slice(0, pick))
