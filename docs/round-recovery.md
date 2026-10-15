@@ -47,3 +47,60 @@ retained cards in order, unique ten-card refills and exactly one queued activati
 The end-publication failure regression resolves the successor round fully; a real
 WebSocket rejoin preserves the live Survival elimination flags. A local HTTP
 telemetry collector verifies event names, actor identity and required properties.
+
+## Boot recovery and readiness
+
+Boot retries incomplete room recovery after 1, 2, 4, 8, 16 and then at most 30
+seconds between attempts, until every room has been processed successfully.
+One room's failure does not skip later rooms. Recovery awaits overdue timers,
+completion continuations and reveal handoffs before counting a room complete.
+Future round deadlines share one process timer with ordinary gameplay, including
+across the production source WebSocket and bundled HTTP engines. Failed timer
+callbacks retry with the same capped backoff. Round IDs and persisted deadlines
+continue to fence callbacks from reset matches. Completion continuations share
+their existing promise and retry timer across both engine copies as well.
+
+`GET /api/healthz` keeps `db` and `redis` as backing-store checks and reports a
+separate `recovery` object:
+
+```json
+{
+  "ready": false,
+  "stage": "rooms",
+  "attempts": 3,
+  "rooms": { "total": 4, "recovered": 3, "pending": 1 },
+  "connectionsReady": true,
+  "nextRetryAt": 1800000004000
+}
+```
+
+`stage` progresses from `schema` to `rooms` to `ready`. Attempt counts restart at
+the room stage; room counts describe the current/most recent round recovery pass
+over active and ended SQL rooms. `rooms` is null until that query succeeds.
+`connectionsReady` tracks the boot disconnect reconciliation separately, including
+lobby memberships. `nextRetryAt` is an absolute Unix timestamp in milliseconds,
+or null while running or finished. HTTP remains 503 until both stores are healthy
+and boot recovery is ready, so reachable stores alone cannot hide stalled rooms.
+Health probes return within one second and share outstanding driver work.
+
+Production validates the reviewed schema before importing engines or starting
+jobs. Transient PostgreSQL outages keep the process alive behind a temporary
+health-only listener with the same retry backoff; ordinary requests receive 503.
+Successful validation replaces that listener with the normal HTTP/WS server in
+the same process. Credentials/configuration errors, unversioned or incompatible
+history, drift, pending migrations and migration checksum failures still refuse
+startup. Schema checks never apply migrations automatically.
+
+The deployment regression owns its application process on port3139 and two TCP
+proxies, while shared backing services remain running. It requires the dedicated
+migrated `cab_audit_issue39` database and Redis DB8, and seeds its own deterministic
+catalog. It tests both unavailable stores at startup, a middle room's failed SQL
+outcome, recovery progress while both stores are healthy, future and overdue
+timers, reveal handoff, one outcome/round end/successor per room, and subsequent
+accepted WebSocket play in every recovered room. It also checks schema refusals:
+
+```sh
+pnpm build
+DATABASE_URL=... REDIS_URL=... SESSION_SECRET=... \
+  node --test tests/deployment/boot-recovery.test.mjs
+```

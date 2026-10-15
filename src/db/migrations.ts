@@ -44,7 +44,7 @@ export async function manageSchema(command: 'check' | 'apply' | 'adopt') {
       return { ...entry, sql }
     }),
   )
-  const client = postgres(process.env.DATABASE_URL, { max: 1 })
+  const client = postgres(process.env.DATABASE_URL, { max: 1, connect_timeout: 3 })
   try {
     await client.begin(async (tx) => {
       // Serialize migration/check/adoption across deployment processes.

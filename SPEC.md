@@ -117,12 +117,12 @@ All endpoints under `/api`. JSON request and response bodies. `Authorization: Be
 
 ### Public endpoints
 
-| Method | Path          | Body | Returns                                                             | Notes                                                                                                      |
-| ------ | ------------- | ---- | ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| GET    | `/healthz`    | —    | `200 { db: "ok", redis: "ok", activeGames: N, uptime: T }` or `503` | Used by Docker healthcheck. Returns 503 if DB or Redis is unreachable.                                     |
-| GET    | `/api/packs`  | —    | `200 { packs: Pack[] }`                                             | List of available card packs from DB. Cached 5 min.                                                        |
-| GET    | `/api/stats`  | —    | `200 { ...StatsResponse }`                                          | Aggregated stats for `/stats` page. Cached 5 min.                                                          |
-| GET    | `/api/config` | —    | `200 { posthogKey, posthogHost }`                                   | Client bootstraps PostHog by fetching its key here. Avoids exposing the key via Vite build env. Cached 1h. |
+| Method | Path          | Body | Returns                                                                       | Notes                                                                                                                                                                                              |
+| ------ | ------------- | ---- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/healthz`    | —    | `200 { db: "ok", redis: "ok", activeGames: N, uptime: T, recovery }` or `503` | Used by Docker healthcheck. Returns 503 if DB or Redis is unreachable or boot recovery is incomplete. Recovery stage/progress is separate from backing-store health; see `docs/round-recovery.md`. |
+| GET    | `/api/packs`  | —    | `200 { packs: Pack[] }`                                                       | List of available card packs from DB. Cached 5 min.                                                                                                                                                |
+| GET    | `/api/stats`  | —    | `200 { ...StatsResponse }`                                                    | Aggregated stats for `/stats` page. Cached 5 min.                                                                                                                                                  |
+| GET    | `/api/config` | —    | `200 { posthogKey, posthogHost }`                                             | Client bootstraps PostHog by fetching its key here. Avoids exposing the key via Vite build env. Cached 1h.                                                                                         |
 
 ### Game lifecycle endpoints
 
