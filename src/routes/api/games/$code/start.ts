@@ -8,6 +8,7 @@ import { eq, and, count } from 'drizzle-orm'
 import * as engine from '~/lib/game-engine'
 import * as state from '~/lib/game-state'
 import { captureServerEvent } from '~/lib/posthog-server'
+import { GameCommandError } from '~/lib/game-command-error'
 
 export const Route = createFileRoute('/api/games/$code/start')({
   server: {
@@ -39,9 +40,22 @@ export const Route = createFileRoute('/api/games/$code/start')({
         if (Number(packCount?.cnt ?? 0) === 0)
           return errorResponse(503, 'internal_error', 'No card data available')
 
-        if (!(await authenticate(request, code)))
-          return errorResponse(401, 'not_authorized', 'Missing or invalid token')
-        await engine.startGame(code, auth.playerId)
+        try {
+          await engine.startGame(code, auth.playerId)
+        } catch (error) {
+          if (error instanceof GameCommandError) {
+            const status =
+              error.code === 'invalid_state'
+                ? 409
+                : error.code === 'host_only'
+                  ? 403
+                  : error.code === 'room_not_found'
+                    ? 404
+                    : 401
+            return errorResponse(status, error.code, error.message)
+          }
+          throw error
+        }
 
         // N-1: the engine is the sole emitter of `round_started`
         // (inside startRound). Emit `game_started` first so clients see

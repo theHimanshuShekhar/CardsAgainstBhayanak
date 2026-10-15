@@ -111,95 +111,159 @@ export async function dealStartingHands(
 }
 
 export async function startGame(code: string, hostPlayerId?: string): Promise<void> {
-  const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
-  if (!session) throw new Error('session not found')
-  const config = session.config as GameConfig
+  await startMatch(code, hostPlayerId, 'lobby')
+}
 
-  await state.updateLiveRoom(code, {}, hostPlayerId)
-  if (!session.currentMatchId) {
-    const match = await db.transaction(async (tx) => {
-      // Serialize first-start allocation, including repeated start attempts.
+async function startMatch(
+  code: string,
+  hostPlayerId: string | undefined,
+  expectedStatus: 'lobby' | 'active',
+): Promise<void> {
+  let attemptedMatchId: string | undefined
+  try {
+    await db.transaction(async (tx) => {
+      // Admission and configuration edits use this same lock. Keep it through
+      // setup so failed initialization cannot commit an unplayable active room.
       const [room] = await tx
         .select()
         .from(gameSessions)
-        .where(eq(gameSessions.id, session.id))
+        .where(eq(gameSessions.code, code))
         .for('update')
-      if (room!.currentMatchId) return room!.currentMatchId
-      const [created] = await tx
+      if (!room) throw new GameCommandError('room_not_found', 'Room not found')
+      if (hostPlayerId && room.hostPlayerId !== hostPlayerId)
+        throw new GameCommandError('host_only', 'Only the host can start')
+      if (room.status !== expectedStatus || room.currentMatchId)
+        throw new GameCommandError('invalid_state', 'Game already started')
+
+      // Authentication can recover ownership before taking the lock. Only
+      // validate existing live membership here; recovery would lock this row.
+      await state.updateLiveRoom(code, {}, hostPlayerId)
+      const activePlayers = (await state.getLivePlayers(code))
+        .filter(
+          (player) => player.role === 'player' && player.status === 'active' && !player.isRando,
+        )
+        .sort((a, b) => a.joinedAt.localeCompare(b.joinedAt))
+      if (expectedStatus === 'lobby' && activePlayers.length < 3)
+        throw new GameCommandError('invalid_state', 'Need at least 3 players')
+
+      const config = room.config as GameConfig
+      // A prior failed attempt may have lost its cleanup connection. There is
+      // no current match under this lock, so its partial live setup is obsolete.
+      await clearFailedMatchSetup(code, config, expectedStatus)
+      const [match] = await tx
         .insert(gameMatches)
-        .values({ sessionId: session.id, config })
+        .values({ sessionId: room.id, config })
         .returning()
+      attemptedMatchId = match!.id
+      await buildDecks(code, config.packs)
+
+      if (config.rules.includes('rando')) {
+        // Use the lock-owning connection: a separate INSERT's session FK
+        // would wait for the room row held by this transaction.
+        const [rando] = await tx
+          .insert(gamePlayers)
+          .values({
+            sessionId: room.id,
+            username: 'Rando Cardrissian',
+            role: 'player',
+            status: 'active',
+            isRando: true,
+          })
+          .returning()
+        const randoPlayer: GamePlayer = {
+          id: rando!.id,
+          username: rando!.username,
+          role: 'player',
+          status: 'active',
+          score: 0,
+          isHost: false,
+          isRando: true,
+          discardsUsed: 0,
+          joinedAt: rando!.joinedAt.toISOString(),
+        }
+        await state.addPlayer(code, randoPlayer)
+        activePlayers.push(randoPlayer)
+      }
+
+      // The stable rotation follows human join order; Rando receives a hand
+      // but cannot be Czar. No round or event is published before commit.
+      const czarOrderIds = activePlayers.filter((p) => !p.isRando).map((p) => p.id)
+      await state.setCzarOrder(code, czarOrderIds)
+      await dealStartingHands(
+        code,
+        activePlayers.map((p) => p.id),
+      )
+      const firstCzarIdx = chooseFirstCzar(czarOrderIds.length)
+      await state.updateLiveRoom(
+        code,
+        {
+          status: 'active',
+          config: JSON.stringify(config),
+          czarStartOffset: String(firstCzarIdx),
+        },
+        hostPlayerId,
+      )
       await tx
         .update(gameSessions)
-        .set({ currentMatchId: created!.id })
-        .where(eq(gameSessions.id, session.id))
-      return created!.id
+        .set({ status: 'active', currentMatchId: match!.id, lastActivityAt: new Date() })
+        .where(eq(gameSessions.id, room.id))
+      engineLogger.info({ code, firstCzarIdx, players: activePlayers.length }, 'game initialized')
     })
-    session.currentMatchId = match
-  }
-  await buildDecks(code, config.packs)
-
-  // Ordered by joined_at: czarOrder is built from this and the spec
-  // requires the stable rotation to follow join order (SPEC.md § Czar
-  // selection).
-  const activePlayers = (await state.getLivePlayers(code))
-    .filter((player) => player.role === 'player' && player.status === 'active')
-    .sort((a, b) => a.joinedAt.localeCompare(b.joinedAt))
-
-  if (config.rules.includes('rando')) {
-    const [rando] = await db
-      .insert(gamePlayers)
-      .values({
-        sessionId: session.id,
-        username: 'Rando Cardrissian',
-        role: 'player',
-        status: 'active',
-        isRando: true,
-      })
-      .returning()
-    if (rando) {
-      // Mirror into Redis — engine reads players from there, not the DB.
-      const randoPlayer: GamePlayer = {
-        id: rando.id,
-        username: rando.username,
-        role: 'player',
-        status: 'active',
-        score: 0,
-        isHost: false,
-        isRando: true,
-        discardsUsed: 0,
-        joinedAt: rando.joinedAt.toISOString(),
+  } catch (error) {
+    if (attemptedMatchId) {
+      try {
+        const committed = await db.transaction(async (tx) => {
+          const [room] = await tx
+            .select()
+            .from(gameSessions)
+            .where(eq(gameSessions.code, code))
+            .for('update')
+          // COMMIT may have succeeded despite a lost acknowledgement. Its
+          // pointer is installed only after all setup completed successfully.
+          if (room?.currentMatchId === attemptedMatchId) return true
+          // Never erase a newer successful attempt while compensating ours.
+          if (room && !room.currentMatchId && room.status === expectedStatus)
+            await clearFailedMatchSetup(code, room.config as GameConfig, expectedStatus)
+          return false
+        })
+        if (committed) return
+      } catch (cleanupError) {
+        // A later start cleans this partial setup under the same room lock.
+        engineLogger.warn({ err: cleanupError, code }, 'failed start cleanup deferred')
       }
-      await state.addPlayer(code, randoPlayer)
-      activePlayers.push(randoPlayer)
     }
+    throw error
   }
+}
 
-  const playerIds = activePlayers.map((p) => p.id)
-  // czarOrder excludes Rando (synthetic, can't read prompts) and is the
-  // *stable* rotation list — never rebuilt from a live array (SPEC.md
-  // § Czar selection). playerIds (incl. Rando) is only for hand dealing.
-  const czarOrderIds = activePlayers.filter((p) => !p.isRando).map((p) => p.id)
-  await state.setCzarOrder(code, czarOrderIds)
-  await dealStartingHands(code, playerIds)
-
-  // Round-1 Czar is a random offset into czarOrder; persist it so the
-  // rotation is stable and seeded-RNG runs are deterministic.
-  const firstCzarIdx = chooseFirstCzar(czarOrderIds.length)
-  await state.updateLiveRoom(code, { czarStartOffset: String(firstCzarIdx) }, hostPlayerId)
-  await db
-    .update(gameSessions)
-    .set({ status: 'active', lastActivityAt: new Date() })
-    .where(eq(gameSessions.id, session.id))
-  // Lobby edits live in PostgreSQL. Freeze that authoritative config in
-  // Redis before accepting game actions that validate rules atomically.
+async function clearFailedMatchSetup(
+  code: string,
+  config: GameConfig,
+  expectedStatus: 'lobby' | 'active',
+): Promise<void> {
+  const players = await state.getAllPlayers(code)
   await state.updateLiveRoom(
     code,
-    { status: 'active', config: JSON.stringify(config) },
-    hostPlayerId,
+    {
+      status: expectedStatus === 'lobby' ? 'lobby' : 'resetting',
+      config: JSON.stringify(config),
+      currentRound: '0',
+      czarIndex: '-1',
+    },
+    undefined,
+    [
+      KEYS.round(code),
+      KEYS.deckBlack(code),
+      KEYS.deckWhite(code),
+      KEYS.discardWhite(code),
+      KEYS.discardBlack(code),
+      KEYS.czarOrder(code),
+      ...players.map((player) => KEYS.hand(code, player.id)),
+    ],
   )
-
-  engineLogger.info({ code, firstCzarIdx, players: activePlayers.length }, 'game started')
+  const randoIds = players.filter((player) => player.isRando).map((player) => player.id)
+  if (randoIds.length) await redis.hdel(KEYS.players(code), ...randoIds)
+  await redis.hdel(KEYS.game(code), 'czarStartOffset')
 }
 
 // forceCzarId: undefined = normal rotation, string/null = override (used when voiding a round)
@@ -1888,7 +1952,7 @@ async function performResetGame(
   // czarOrder / hands and flips the room status to active; the late
   // reconnect is hydrated by rejoin → state_snapshot (existing path).
   await state.publishEvent(code, { type: 'game_reset', mode })
-  await startGame(code, hostPlayerId)
+  await startMatch(code, hostPlayerId, 'active')
   await state.publishEvent(code, { type: 'game_started', firstRound: 1 })
   await startRound(code, 1)
   engineLogger.info({ code }, 'game reset — rematch started')
