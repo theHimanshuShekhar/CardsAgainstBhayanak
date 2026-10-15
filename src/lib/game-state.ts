@@ -714,7 +714,11 @@ export async function setGrace(code: string, playerId: string, ms: number): Prom
 }
 
 export async function clearGrace(code: string, playerId: string): Promise<void> {
-  await redis.del(KEYS.grace(code, playerId), KEYS.graceConnection(code, playerId))
+  await redis.del(
+    KEYS.grace(code, playerId),
+    KEYS.graceConnection(code, playerId),
+    KEYS.graceDeadline(code, playerId),
+  )
 }
 
 // Reconnection must never resurrect a concurrent leave or promote a
@@ -827,16 +831,18 @@ export async function claimPlayerDrop(
         or redis.call('EXISTS', KEYS[2]) == 1) then return 0 end
       player.status = 'dropped'
       redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(player))
-      redis.call('DEL', KEYS[2], KEYS[3])
+      redis.call('DEL', KEYS[2], KEYS[3], KEYS[5], KEYS[6])
       redis.call('EXPIRE', KEYS[1], ARGV[3])
       redis.call('PUBLISH', ARGV[4], ARGV[5])
       return 1
       `,
-      4,
+      6,
       KEYS.players(code),
       KEYS.grace(code, playerId),
       KEYS.graceConnection(code, playerId),
       KEYS.game(code),
+      KEYS.connections(code, playerId),
+      KEYS.graceDeadline(code, playerId),
       playerId,
       connection ?? '',
       ROOM_TTL_SECONDS,

@@ -27,7 +27,7 @@ it('restores an expired grace deadline once, preserving roster and host successi
     .set({ hostPlayerId: players[0]!.id })
     .where(eq(gameSessions.id, session!.id))
   const subscriber = redis.duplicate()
-  const events: Array<{ type: string; playerId?: string }> = []
+  const events: Array<{ type: string; playerId?: string; hostId?: string }> = []
   subscriber.on('message', (_channel, raw) => events.push(JSON.parse(raw)))
   await subscriber.subscribe(KEYS.channel(code))
   try {
@@ -46,8 +46,9 @@ it('restores an expired grace deadline once, preserving roster and host successi
     expect(events.filter((event) => event.type === 'player_left')).toEqual([
       { type: 'player_left', playerId: players[0]!.id },
     ])
-    expect((await state.getPlayer(code, players[2]!.id))?.status).toBe('queued')
-    expect((await state.getPlayer(code, players[1]!.id))?.isHost).toBe(true)
+    expect(events.filter((event) => event.type === 'host_changed')).toEqual([
+      { type: 'host_changed', hostId: players[1]!.id },
+    ])
   } finally {
     const keys = await redis.keys(`game:${code}*`)
     if (keys.length) await redis.del(...keys)
