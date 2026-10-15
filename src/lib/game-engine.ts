@@ -2197,7 +2197,9 @@ async function finishPlayerDrop(
     const [original] = await db
       .select({ id: gameRounds.id })
       .from(gameRounds)
-      .where(eq(gameRounds.id, intent.roundId))
+      .where(
+        and(eq(gameRounds.id, intent.roundId), eq(gameRounds.matchId, session.currentMatchId!)),
+      )
     if (!original) return
     // The atomic void already returned cards and persisted its continuation.
     // Resume even if startRound inserted SQL before the previous process died.
