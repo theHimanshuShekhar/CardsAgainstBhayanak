@@ -7,12 +7,23 @@ A real-time multiplayer Cards Against Humanity clone. Jackbox-style: no accounts
 
 ## Quickstart
 
+Use **Node 22**, **pnpm 10.33.0** (the version in `package.json`), and Docker
+with the Compose plugin (`docker compose`). The initial seed requires access to
+`https://restagainsthumanity.com`. Run these commands from a fresh checkout in
+Bash or Zsh:
+
 ```bash
-# Start Postgres + Redis
-docker compose up -d postgres redis
+# Disposable local credentials, loopback ports, and a separate Compose project
+cp .env.local.example .env.local
+set -a
+source .env.local
+set +a
+
+# Start isolated Postgres + Valkey with ordinary local Docker volumes
+docker compose --env-file .env.local -f docker-compose.dev.yml up -d --wait
 
 # Install dependencies
-pnpm install
+pnpm install --frozen-lockfile
 
 # Apply schema
 pnpm db:migrate
@@ -20,21 +31,55 @@ pnpm db:migrate
 # Seed cards from REST Against Humanity API
 pnpm seed
 
-# Start dev server
-pnpm dev
+# Build and start the combined HTTP + WebSocket server
+pnpm build
+pnpm start
 # → http://localhost:3000
+```
+
+Leave the final command running. Open the URL in three independent browser
+profiles (or separate browsers), create a room, join it with two more players,
+and start the game. Each non-Czar submits the requested cards; the Czar picks a
+winner after the reveal. A point is awarded and the next round starts.
+`curl http://localhost:3000/api/healthz` checks backing-service and recovery
+readiness; the multiplayer round also verifies the WebSocket connection.
+
+The local file is ignored by Git. Its PostgreSQL/Valkey credentials and session
+secret are explicit, disposable examples. `docker-compose.dev.yml` is standalone:
+it has no deployment storage mounts, fixed container names, or app container.
+If a port is occupied, edit `POSTGRES_PORT`, `REDIS_PORT`, or `PORT` in
+`.env.local` **before** sourcing it. For another checkout running concurrently,
+also choose a different `COMPOSE_PROJECT_NAME`; each project owns its own
+network and volumes. The connection URLs derive from those values when sourced.
+Source `.env.local` again in each new terminal before running `pnpm` commands;
+the migration, seed, and production-entry CLIs do not load it automatically.
+
+For page/layout work, `pnpm dev --port 3000` provides Vite HMR, but **does not
+support the game WebSocket**. Use `pnpm build` followed by `pnpm start` for
+multiplayer, and repeat the build after source changes. Stop one server before
+starting another against the same backing services.
+
+Stop the app with Ctrl-C, then stop local backing services while retaining data:
+
+```bash
+docker compose --env-file .env.local -f docker-compose.dev.yml down
+# To discard only this local project's data as well:
+docker compose --env-file .env.local -f docker-compose.dev.yml down --volumes
 ```
 
 ## Environment variables
 
-For the **full Docker stack**, copy `.env.example` to `.env`. `DATABASE_URL`
+The local quickstart uses `.env.local.example` above. For the **deployment
+Docker stack**, copy `.env.example` to `.env`. `DATABASE_URL`
 and `REDIS_URL` are derived inside `docker-compose.yml` — don't set them.
-`compose up` fails fast unless the two required vars are set:
+Configure deployment storage separately (see below). `compose up` fails fast
+unless `POSTGRES_PASSWORD`, `SESSION_SECRET`, and `PUBLIC_SITE_URL` are set:
 
 | Variable                           | Required | Purpose                                                            |
 | ---------------------------------- | -------- | ------------------------------------------------------------------ |
 | `POSTGRES_PASSWORD`                | ✅       | Postgres password; also feeds `DATABASE_URL`                       |
 | `SESSION_SECRET`                   | ✅       | HMAC secret for session tokens (≥32 chars)                         |
+| `PUBLIC_SITE_URL`                  | ✅       | Public HTTPS origin for share previews                             |
 | `PORT`                             |          | Host/container port (default `3000`)                               |
 | `APP_BIND_IP`                      |          | Compose host bind address (default `127.0.0.1`)                    |
 | `CAB_TRUSTED_PROXY_IPS`            |          | Comma-separated immediate Cloudflare ingress IPs; empty by default |
@@ -42,23 +87,20 @@ and `REDIS_URL` are derived inside `docker-compose.yml` — don't set them.
 | `AXIOM_TOKEN` + `AXIOM_DATASET`    |          | Log shipping (prod only)                                           |
 | `POSTHOG_API_KEY` + `POSTHOG_HOST` |          | Product analytics / replay (prod only)                             |
 
-For **local `pnpm dev`** against `docker compose up -d postgres redis`, set
-`DATABASE_URL`, `REDIS_URL`, and `SESSION_SECRET` directly in your shell/`.env`.
-
 ## Commands
 
-| Command           | Purpose                                   |
-| ----------------- | ----------------------------------------- |
-| `pnpm dev`        | Dev server with HMR                       |
-| `pnpm build`      | Production build                          |
-| `pnpm start`      | Run production build                      |
-| `pnpm typecheck`  | TypeScript check                          |
-| `pnpm lint`       | ESLint                                    |
-| `pnpm test`       | Unit tests (Vitest)                       |
-| `pnpm test:e2e`   | E2E tests (Playwright, requires DB+Redis) |
-| `pnpm db:migrate` | Apply reviewed versioned migrations       |
-| `pnpm db:studio`  | Drizzle Studio                            |
-| `pnpm seed`       | Seed card packs                           |
+| Command           | Purpose                                     |
+| ----------------- | ------------------------------------------- |
+| `pnpm dev`        | Page development with HMR (no game sockets) |
+| `pnpm build`      | Production build                            |
+| `pnpm start`      | Run built HTTP + WebSocket server           |
+| `pnpm typecheck`  | TypeScript check                            |
+| `pnpm lint`       | ESLint                                      |
+| `pnpm test`       | Unit tests (Vitest)                         |
+| `pnpm test:e2e`   | E2E tests (Playwright, requires DB+Redis)   |
+| `pnpm db:migrate` | Apply reviewed versioned migrations         |
+| `pnpm db:studio`  | Drizzle Studio                              |
+| `pnpm seed`       | Seed card packs                             |
 
 `pnpm test:integration` runs the real-service game-engine regressions separately
 from unit tests. Set `DATABASE_URL` and `REDIS_URL` to dedicated disposable
@@ -76,8 +118,8 @@ When targeting an already running server with `CAB_E2E_BASE`, start that server 
 
 ## Production
 
-A single `docker-compose.yml` serves dev and prod (no separate prod compose
-file). Provide a `.env` (see above; `SESSION_SECRET` ≥32 chars —
+`docker-compose.yml` is the deployment stack; local development uses the
+standalone `docker-compose.dev.yml` above. Provide a `.env` (see above; `SESSION_SECRET` ≥32 chars —
 `openssl rand -hex 32`), then:
 
 ```bash

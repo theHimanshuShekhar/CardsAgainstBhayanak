@@ -1,0 +1,50 @@
+# Standalone local backing services. Do not combine with docker-compose.yml.
+# Select .env.local explicitly; these project-scoped volumes never use CIFS.
+name: ${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME must be set in .env.local}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: cab_local
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env.local}
+      POSTGRES_DB: cab_local
+    ports:
+      - '127.0.0.1:${POSTGRES_PORT:?POSTGRES_PORT must be set in .env.local}:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # initdb's temporary server accepts Unix sockets before TCP is ready.
+      test: ['CMD-SHELL', 'pg_isready -h 127.0.0.1 -U cab_local -d cab_local']
+      start_period: 120s
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  redis:
+    image: valkey/valkey:8-alpine
+    environment:
+      VALKEY_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env.local}
+    command:
+      - valkey-server
+      - --requirepass
+      - ${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env.local}
+      - --appendonly
+      - 'yes'
+      - --save
+      - '300'
+      - '1'
+    ports:
+      - '127.0.0.1:${REDIS_PORT:?REDIS_PORT must be set in .env.local}:6379'
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD-SHELL', 'valkey-cli --no-auth-warning -a "$$VALKEY_PASSWORD" ping']
+      start_period: 10s
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  postgres_data:
+  redis_data:
