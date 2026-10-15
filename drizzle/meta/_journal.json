@@ -15,6 +15,13 @@
       "when": 1791992509440,
       "tag": "0001_live_handle_reuse",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1792011437072,
+      "tag": "0002_match_history",
+      "breakpoints": true
     }
   ]
 }

@@ -775,7 +775,7 @@ packs          — id, name, slug (unique), card_count, created_at
 black_cards    — id, pack_id (fk), text, pick (CHECK pick IN (1,2,3)), unique(pack_id, text, pick)
 white_cards    — id, pack_id (fk), text,                                unique(pack_id, text)
 
-game_sessions  — id (cuid2), code (CHAR(6), unique — stored without dash, e.g. 'B7K9MV'), status, config JSONB,
+game_sessions  — id (cuid2), current_match_id (nullable), code (CHAR(6), unique — stored without dash, e.g. 'B7K9MV'), status, config JSONB,
                  host_player_id (nullable FK), created_at, last_activity_at, ended_at,
                  winner_player_id (nullable FK), end_mode (nullable; ENUM same as GameOverMode)
                  status ENUM: 'lobby' | 'active' | 'paused' | 'ended' | 'abandoned'
@@ -785,15 +785,20 @@ game_players   — id (cuid2), session_id (fk), username, role, score, status, i
                  discards_used INT DEFAULT 0, posthog_anon_id (text, nullable — PostHog distinct_id), joined_at
                  status ENUM: 'active' | 'queued' | 'spectator' | 'grace' | 'dropped'
                  unique(session_id, username) WHERE status != 'dropped' -- handles unique among live memberships
-                 partial unique(session_id) WHERE is_rando = true     -- at most one Rando per game
+                 partial unique(session_id) WHERE is_rando = true AND status != 'dropped' -- one live Rando
 
-game_rounds    — id, session_id (fk), round_num, black_card_id, czar_player_id (nullable for God Is Dead),
+game_matches   — id (cuid2), session_id (room fk), status, config JSONB,
+                 winner_player_id, end_mode, final_players JSONB,
+                 started_at, ended_at
+                 -- one playthrough; final roster preserves scores and membership IDs
+
+game_rounds    — id, session_id (room fk), match_id (fk), round_num, black_card_id, czar_player_id (nullable for God Is Dead),
                  winner_player_id (nullable FK; for Serious Business = top-ranked player),
                  winning_submission_fills JSONB,
                  ranking JSONB (nullable, only set in Serious Business mode: [{playerId, fills, rank, points}]),
                  vote_tally JSONB (nullable, only set in God Is Dead: {submissionId: count}),
                  played_at
-                 unique(session_id, round_num)
+                 unique(match_id, round_num)
 
 INDEX idx_sessions_last_activity ON game_sessions (last_activity_at) WHERE status IN ('active', 'paused')  -- sweeper job query
 INDEX gin_winning_fills ON game_rounds USING gin (winning_submission_fills)  -- speeds up top-cards stats query
@@ -813,6 +818,8 @@ INDEX gin_winning_fills ON game_rounds USING gin (winning_submission_fills)  -- 
 - URL paths use raw form: `/games/B7K9MV/lobby`
 - Display layer inserts dash for human reading: rendered as `B7K-9MV`
 - Input fields accept either form: `B7K-9MV`, `b7k9mv`, `b7k 9mv` all normalize to `B7K9MV` server-side
+
+Rooms retain their code and memberships across replays. Each start after a completed match allocates a new match; completed match configuration, outcomes, final player scores and rounds remain immutable. Round lookups and completion recovery use match identity plus the original round ID, so a replay's round 1 cannot resolve an earlier match. Rando memberships retire on reset and remain available to historical references. See [ADR 0001](docs/adr/0001-room-and-match-identity.md).
 
 ### Host FK chicken-and-egg resolution
 
@@ -1007,7 +1014,6 @@ Cloudflare Tunnel runs **outside** the Compose stack — user manages it indepen
 ### Database storage operations
 
 PostgreSQL requires durable fsync, reliable locking and exclusive PGDATA ownership. The deployment-specific CIFS volume remains unverified; the opt-in `docker-compose.local-storage.yml` selects a distinct local volume on persistent host block storage. See `docs/operations/database-recovery.md` for the assessment limitations, reversible migration, independent backups, restoration checks and DB-only recovery limits. `pnpm test:storage` exercises disposable local-volume crash recovery and logical restore via the reviewed migration CLI.
-
 
 ### Dockerfile (multi-stage)
 

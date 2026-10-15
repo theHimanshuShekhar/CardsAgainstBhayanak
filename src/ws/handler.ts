@@ -2,7 +2,7 @@ import type { Peer, Message } from 'crossws'
 import { randomUUID } from 'node:crypto'
 import { getClientIp } from '~/lib/client-identity.server'
 import { admitConnection, admitFrame, admitCommand, type ConnectionLease } from './traffic-budget'
-import { eq, inArray, desc } from 'drizzle-orm'
+import { eq, and, inArray, desc } from 'drizzle-orm'
 import { db } from '~/db'
 import { blackCards, whiteCards, gameSessions, gameRounds } from '~/db/schema'
 import { wsLogger } from '~/lib/logger'
@@ -72,7 +72,9 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
   const [roundRow] = await db
     .select()
     .from(gameRounds)
-    .where(eq(gameRounds.sessionId, session.id))
+    .where(
+      and(eq(gameRounds.sessionId, session.id), eq(gameRounds.matchId, session.currentMatchId!)),
+    )
     .orderBy(desc(gameRounds.roundNum))
     .limit(1)
   if (!roundRow) return null
