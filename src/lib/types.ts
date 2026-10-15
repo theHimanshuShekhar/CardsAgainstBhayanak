@@ -107,8 +107,8 @@ export type SessionState = {
   // the button disables at 3, and the engine is authoritative on the cap.
   myDiscardsUsed: number
   // Gambling (base mechanic): the engine flips this when the player wagers
-  // and the round resolves; the rejoin must restore so the player can finish
-  // a gamble across a refresh.
+  // and the round resolves. Snapshots retain the round's wager receipt
+  // through its result pause, then reset it when the next round starts.
   myHasGambled: boolean
   // Private action receipts let reconnects reconcile a lost acknowledgement.
   mySubmissionCount: number
