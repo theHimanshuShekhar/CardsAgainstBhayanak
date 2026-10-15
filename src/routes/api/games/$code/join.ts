@@ -2,6 +2,7 @@ import { createFileRoute } from '@tanstack/react-router'
 import { db } from '~/db'
 import { gameSessions, gamePlayers } from '~/db/schema'
 import { redis, KEYS, ROOM_TTL_SECONDS } from '~/lib/redis'
+import { ROOM_LIFETIME_LUA } from '~/lib/room-lifetime'
 import * as state from '~/lib/game-state'
 import * as engine from '~/lib/game-engine'
 import { signSessionToken } from '~/lib/session-token'
@@ -144,12 +145,11 @@ export const Route = createFileRoute('/api/games/$code/join')({
             // Keep the pending ID on the room itself so it survives exactly
             // as long as the live room. Publish marker and member atomically.
             const added = await redis.eval(
-              `
+              `${ROOM_LIFETIME_LUA}
               if not redis.call('EXISTS', KEYS[1]) then return 0 end
               redis.call('HSET', KEYS[1], ARGV[1], 'pending')
               redis.call('HSET', KEYS[2], ARGV[2], ARGV[3])
-              redis.call('EXPIRE', KEYS[1], ARGV[4])
-              redis.call('EXPIRE', KEYS[2], ARGV[4])
+              renewRoomState(KEYS[1])
               return 1
             `,
               2,

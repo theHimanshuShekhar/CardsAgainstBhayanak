@@ -12,6 +12,7 @@ import { inArray, eq, desc, and } from 'drizzle-orm'
 import { randomInt, shuffle, pick } from './rng'
 import { redis, KEYS, ROOM_TTL_SECONDS } from './redis'
 import * as state from './game-state'
+import { ROOM_LIFETIME_LUA, EXPIRE_ROOM_KEY_LUA, expireRoomStateKeys } from './room-lifetime'
 import { engineLogger } from './logger'
 import { captureServerEvent, distinctIdFor, distinctIdForHost } from './posthog-server'
 import { TIMER_MS, REVEAL_STAGGER, ROUND_RESULT_PAUSE_MS } from './timing'
@@ -34,11 +35,9 @@ export function chooseFirstCzar(activePlayerCount: number): number {
   return randomInt(0, activePlayerCount)
 }
 
-// S1-NEW: gameSessions.last_activity_at heartbeat. Without this the
-// sweeper's 6h filter compares against the row's creation time forever
-// and only the `hlen(players) === 0` safety net keeps live games out of
-// the 'abandoned' bucket. Called from every gameplay anchor that signals
-// real activity; cheap (one HSET + one indexed UPDATE).
+// Record SQL sweeper activity without renewing the Redis idle deadline.
+// Completion/recovery may retry this work; only accepted participant commands
+// renew the durable room state at their atomic Redis commit.
 export async function touchSessionActivity(code: string): Promise<void> {
   const now = Date.now()
   await state.updateLiveRoom(code, { lastActivityAt: String(now) })
@@ -202,6 +201,9 @@ async function startMatch(
           czarStartOffset: String(firstCzarIdx),
         },
         hostPlayerId,
+        [],
+        undefined,
+        true,
       )
       await tx
         .update(gameSessions)
@@ -415,13 +417,14 @@ export async function startRound(
   if (existing && existing.blackCardId !== black.id) throw new Error('round already exists')
   if (existing) czarId = existing.czarPlayerId
   await redis.eval(
-    `
+    `${ROOM_LIFETIME_LUA}
+    if not redis.call('HGET', KEYS[2], 'status') then return end
     if redis.call('HGET', KEYS[1], 'roundId') == ARGV[1] then return end
     redis.call('HDEL', KEYS[1], 'winnerId', 'winningPlayerId', 'winningSubmissionId', 'resolvedSubmissions', 'resolvedRecipients', 'resolvedVoteTally', 'ranking', 'eliminationTurnPlayerId', 'outcomeClaim', 'completionClaim', 'voteEpoch', 'voteClosed', 'voteCandidateIds', 'postResolveResumeAt', 'roundTimerExpiresAt')
     redis.call('HSET', KEYS[1], 'roundId', ARGV[1], 'matchId', ARGV[5], 'czarId', ARGV[2], 'phase', 'picking')
     redis.call('HSET', KEYS[2], 'currentRound', ARGV[3], 'matchId', ARGV[5])
     redis.call('DEL', KEYS[3])
-    redis.call('EXPIRE', KEYS[1], ARGV[4])
+    expireRoomKey(KEYS[1])
   `,
     3,
     KEYS.round(code),
@@ -895,7 +898,7 @@ export async function checkRoundReady(code: string): Promise<void> {
   // Resolve exactly once per round (guards concurrent last submissions).
   const first = await redis.setnx(resolvingKey(code), '1')
   if (first === 0) return
-  await redis.expire(resolvingKey(code), ROOM_TTL_SECONDS)
+  await expireRoomStateKeys(code, [resolvingKey(code)])
 
   // Permute storage keys once; persist so pick/vote/eliminate and the
   // rejoin snapshot all agree on index → submission.
@@ -908,7 +911,11 @@ export async function checkRoundReady(code: string): Promise<void> {
   ]
   const order = shuffle(orderedSubmissionKeys(Object.keys(submissions), participants))
   const orderJson = JSON.stringify(order)
-  await redis.set(subOrderKey(code), orderJson, 'EX', ROOM_TTL_SECONDS)
+  await redis
+    .multi()
+    .set(subOrderKey(code), orderJson)
+    .eval(EXPIRE_ROOM_KEY_LUA, 1, subOrderKey(code))
+    .exec()
 
   const roundId = await currentRoundIdentity(code)
   if (!roundId) return
@@ -1040,7 +1047,7 @@ export async function autoSubmitRando(code: string, pick: number): Promise<void>
   const rando = players.find((p) => p.isRando && p.status === 'active')
   if (!rando) return
   const raw = await redis.eval(
-    `
+    `${ROOM_LIFETIME_LUA}
     local current = redis.call('HGET', KEYS[2], ARGV[1])
     if current then return current end
     local fills = {}
@@ -1051,7 +1058,7 @@ export async function autoSubmitRando(code: string, pick: number): Promise<void>
     end
     local submission = cjson.encode({submissionId=ARGV[3], playerId=ARGV[1], fills=fills})
     redis.call('HSET', KEYS[2], ARGV[1], submission)
-    redis.call('EXPIRE', KEYS[2], ARGV[4])
+    expireRoomKey(KEYS[2])
     return submission
   `,
     2,
@@ -1138,7 +1145,7 @@ export async function pickWinner(
   onOutcome?: (accepted: boolean) => void,
 ): Promise<void> {
   const roundId = await authorizeCzarResolution(code, czarId, 'pick')
-  await resolvePickedWinner(code, czarId, submissionId, roundId, 'judging', onOutcome)
+  await resolvePickedWinner(code, czarId, submissionId, roundId, 'judging', onOutcome, true)
 }
 
 async function resolvePickedWinner(
@@ -1148,6 +1155,7 @@ async function resolvePickedWinner(
   roundId: string,
   phase: 'judging' | 'reveal',
   onOutcome?: (accepted: boolean) => void,
+  renewLifetime = false,
 ): Promise<void> {
   const submissions = await state.getSubmissions(code)
   const winnerKey = await resolveSubmissionKey(code, submissionId)
@@ -1161,14 +1169,20 @@ async function resolvePickedWinner(
     players: await state.getAllPlayers(code),
   })
   if (!decision) throw new Error('winner not found')
-  const claimed = await claimCompletionIntent(code, roundId, phase, {
-    winnerPlayerId,
-    submissionId,
-    submissions,
-    czarId,
-    adjustments: decision.scoreAdjustments,
-    winningFills: decision.winningFills,
-  })
+  const claimed = await claimCompletionIntent(
+    code,
+    roundId,
+    phase,
+    {
+      winnerPlayerId,
+      submissionId,
+      submissions,
+      czarId,
+      adjustments: decision.scoreAdjustments,
+      winningFills: decision.winningFills,
+    },
+    renewLifetime,
+  )
   onOutcome?.(claimed)
   if (claimed) await continueRoundCompletion(code)
 }
@@ -1242,6 +1256,7 @@ async function claimCompletionIntent(
   roundId: string,
   phase: string,
   outcome: Omit<CompletionIntent, 'roundId' | 'roundNumber' | 'matchId'>,
+  renewLifetime = false,
 ): Promise<boolean> {
   // Match identity was installed with the round, before votes/eliminations.
   // No SQL may precede the durable intent after a terminal action is accepted.
@@ -1256,15 +1271,16 @@ async function claimCompletionIntent(
         : 'normal'
   return (
     (await redis.eval(
-      `
+      `${ROOM_LIFETIME_LUA}
     if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1]
       or redis.call('HGET', KEYS[1], 'phase') ~= ARGV[2]
       or redis.call('HEXISTS', KEYS[1], 'outcomeClaim') == 1 then return 0 end
     redis.call('HSET', KEYS[1], 'outcomeClaim', ARGV[1], 'winningPlayerId', ARGV[3], 'winningSubmissionId', ARGV[4], 'phase', 'transition')
     redis.call('HSET', KEYS[2], 'completionIntent', ARGV[5])
     redis.call('HDEL', KEYS[2], 'completionScores', 'completionPublished', 'completionCards', 'completionEndPublished', 'completionResumeAt', 'completionGameEnd', 'completionGameOverPublished')
-    redis.call('EXPIRE', KEYS[1], ARGV[6])
-    redis.call('EXPIRE', KEYS[2], ARGV[6])
+    expireRoomKey(KEYS[1])
+    expireRoomKey(KEYS[2])
+    if ARGV[7] == '1' then renewRoomState(KEYS[2]) end
     return 1`,
       2,
       KEYS.round(code),
@@ -1281,6 +1297,7 @@ async function claimCompletionIntent(
         roundNumber: await state.getCurrentRound(code),
       }),
       ROOM_TTL_SECONDS,
+      renewLifetime ? '1' : '',
     )) === 1
   )
 }
@@ -1534,7 +1551,7 @@ async function completeRoundCards(code: string, roundId: string): Promise<void> 
     () => randomInt(0, 0x7fffffff),
   )
   const activated = await redis.eval(
-    `
+    `${ROOM_LIFETIME_LUA}
     if redis.call('HGET', KEYS[1], 'completionIntent') ~= ARGV[1]
       or redis.call('HEXISTS', KEYS[1], 'completionCards') == 1 then return nil end
     local intent = cjson.decode(ARGV[1])
@@ -1579,11 +1596,11 @@ async function completeRoundCards(code: string, roundId: string): Promise<void> 
         if not id then break end
         redis.call('RPUSH', hand, id)
       end
-      redis.call('EXPIRE', hand, ARGV[5])
+      expireRoomKey(hand)
     end
     redis.call('HSET', KEYS[2], 'resolvedSubmissions', ARGV[2], 'resolvedRecipients', ARGV[8], 'resolvedVoteTally', ARGV[9], 'submissions', '{}', 'phase', 'transition', 'postResolveResumeAt', ARGV[6])
     redis.call('HSET', KEYS[1], 'completionCards', cjson.encode(activated), 'completionResumeAt', ARGV[6])
-    for i=1,#KEYS do redis.call('EXPIRE', KEYS[i], ARGV[5]) end
+    for i=1,#KEYS do expireRoomKey(KEYS[i]) end
     redis.call('DEL', KEYS[7])
     return cjson.encode(activated)
   `,
@@ -1870,6 +1887,7 @@ async function performResetGame(
       ...before.map((p) => KEYS.hand(code, p.id)),
     ],
     'ended',
+    true,
   )
   await redis.hdel(
     KEYS.game(code),
@@ -2004,7 +2022,7 @@ export async function voidRound(
   // Returning cards, clearing the abandoned round, and recording the next
   // step are one operation. A retry cannot return/discard cards twice.
   const returned = (await redis.eval(
-    `
+    `${ROOM_LIFETIME_LUA}
     if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1] then return nil end
     if redis.call('HGET', KEYS[1], 'voidPreparedRoundId') == ARGV[1] then
       return redis.call('HGET', KEYS[1], 'voidReturnedPlayers') or '[]' end
@@ -2017,7 +2035,7 @@ export async function voidRound(
         local hand = ARGV[5] .. pid
         local sub = cjson.decode(submissions[i+1])
         for _,card in ipairs(sub.fills) do redis.call('RPUSH', hand, card.id) end
-        redis.call('EXPIRE', hand, ARGV[4])
+        expireRoomKey(hand)
         table.insert(hands, pid)
       end
     end
@@ -2028,7 +2046,7 @@ export async function voidRound(
       redis.call('HSET', KEYS[2], players[i], cjson.encode(player))
     end
     redis.call('RPUSH', KEYS[4], ARGV[3])
-    redis.call('EXPIRE', KEYS[4], ARGV[4])
+    expireRoomKey(KEYS[4])
     redis.call('HSET', KEYS[1], 'phase', 'transition', 'voidPreparedRoundId', ARGV[1], 'voidReturnedPlayers', cjson.encode(hands))
     redis.call('HDEL', KEYS[1], 'eliminationTurnPlayerId')
     for i=6,#KEYS do redis.call('DEL', KEYS[i]) end
@@ -2580,7 +2598,7 @@ async function finishSurvivalOutcome(
 
 export async function applyRanking(code: string, czarId: string, ranking: string[]): Promise<void> {
   const roundId = await authorizeCzarResolution(code, czarId, 'rank')
-  await resolveRanking(code, ranking, roundId, 'ranking')
+  await resolveRanking(code, ranking, roundId, 'ranking', true)
 }
 
 async function resolveRanking(
@@ -2588,6 +2606,7 @@ async function resolveRanking(
   ranking: string[],
   roundId: string,
   phase: 'ranking' | 'reveal',
+  renewLifetime = false,
 ): Promise<void> {
   const submissions = await state.getSubmissions(code)
   // Validate the entire command before crediting any submission. A stale
@@ -2625,15 +2644,21 @@ async function resolveRanking(
   }
 
   if (
-    await claimCompletionIntent(code, roundId, phase, {
-      winnerPlayerId: topWinnerId!,
-      submissionId: ranking[0]!,
-      submissions,
-      czarId: null,
-      adjustments: Object.entries(scoresDelta).map(([playerId, delta]) => ({ playerId, delta })),
-      winningFills: topFills,
-      ranking: rankedSubmissions,
-    })
+    await claimCompletionIntent(
+      code,
+      roundId,
+      phase,
+      {
+        winnerPlayerId: topWinnerId!,
+        submissionId: ranking[0]!,
+        submissions,
+        czarId: null,
+        adjustments: Object.entries(scoresDelta).map(([playerId, delta]) => ({ playerId, delta })),
+        winningFills: topFills,
+        ranking: rankedSubmissions,
+      },
+      renewLifetime,
+    )
   )
     await continueRoundCompletion(code)
 }
@@ -2777,13 +2802,13 @@ export async function confessDiscard(
 export async function applyPackingHeat(code: string, playerIds: string[]): Promise<void> {
   for (const pid of playerIds) {
     await redis.eval(
-      `
+      `${ROOM_LIFETIME_LUA}
       local round = redis.call('HGET', KEYS[1], 'roundId')
       if not round or redis.call('HGET', KEYS[2], 'packingHeat:' .. ARGV[1]) == round then return end
       local card = redis.call('LPOP', KEYS[3])
       if card then redis.call('RPUSH', KEYS[4], card) end
       redis.call('HSET', KEYS[2], 'packingHeat:' .. ARGV[1], round)
-      redis.call('EXPIRE', KEYS[4], ARGV[2])
+      expireRoomKey(KEYS[4])
     `,
       4,
       KEYS.round(code),
@@ -2837,7 +2862,7 @@ export async function triggerHappyEnding(code: string, playerId: string): Promis
   // it sees the flag, so we don't race the deck LPUSH against the next
   // LPOP (a slow trigger could otherwise land between rounds and pin the
   // Haiku two rounds out).
-  await state.updateLiveRoom(code, { happyEndingArmed: '1' }, playerId)
+  await state.updateLiveRoom(code, { happyEndingArmed: '1' }, playerId, [], undefined, true)
   engineLogger.info({ code, playerId }, 'happy ending armed')
   captureServerEvent(await distinctIdFor(code, playerId), 'cab_rule_triggered', {
     roomCode: code,
