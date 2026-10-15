@@ -137,13 +137,15 @@ test(
       INSERT INTO white_cards(id,pack_id,text) VALUES ('white','pack','Retained answer');
       INSERT INTO game_sessions(id,code,status,config) VALUES ('game','RCVRY1','ended','{"packs":["recovery"]}');
       INSERT INTO game_players(id,session_id,username,score) VALUES ('player','game','Recovered player',3);
-      INSERT INTO game_rounds(id,session_id,round_num,black_card_id,winner_player_id,winning_submission_fills)
-      VALUES ('round','game',1,'black','player','[{"id":"white","text":"Retained answer"}]');`,
+      INSERT INTO game_matches(id,session_id,status,config) VALUES ('match','game','ended','{}');
+      UPDATE game_sessions SET current_match_id='match' WHERE id='game';
+      INSERT INTO game_rounds(id,session_id,match_id,round_num,black_card_id,winner_player_id,winning_submission_fills)
+      VALUES ('round','game','match',1,'black','player','[{"id":"white","text":"Retained answer"}]');`,
       )
       const snapshot = (db) =>
         psql(
           db,
-          `SELECT jsonb_build_object('packs',(SELECT jsonb_agg(p) FROM packs p),'black',(SELECT jsonb_agg(p) FROM black_cards p),'white',(SELECT jsonb_agg(p) FROM white_cards p),'games',(SELECT jsonb_agg(p) FROM game_sessions p),'players',(SELECT jsonb_agg(p) FROM game_players p),'rounds',(SELECT jsonb_agg(p) FROM game_rounds p),'journal',(SELECT jsonb_agg(p) FROM cab_migrations.history p))`,
+          `SELECT jsonb_build_object('packs',(SELECT jsonb_agg(p) FROM packs p),'black',(SELECT jsonb_agg(p) FROM black_cards p),'white',(SELECT jsonb_agg(p) FROM white_cards p),'games',(SELECT jsonb_agg(p) FROM game_sessions p),'matches',(SELECT jsonb_agg(p) FROM game_matches p),'players',(SELECT jsonb_agg(p) FROM game_players p),'rounds',(SELECT jsonb_agg(p) FROM game_rounds p),'journal',(SELECT jsonb_agg(p) FROM cab_migrations.history p))`,
         )
       const expected = snapshot(database)
       run(['kill', '--signal', 'KILL', id])

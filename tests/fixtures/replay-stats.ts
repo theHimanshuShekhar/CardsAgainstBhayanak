@@ -42,10 +42,16 @@ export async function seedReplayStats() {
           ${playerId}, 'normal', now())`
       await tx`INSERT INTO game_players (id, session_id, username, is_host, score)
         VALUES (${playerId}, ${sessionId}, 'Replay fixture winner', true, ${rounds})`
+      await tx`INSERT INTO game_matches (id, session_id, status, config, winner_player_id, end_mode, ended_at, final_players)
+        SELECT id, id, status, config, winner_player_id, end_mode, ended_at,
+          ${tx.json([{ id: playerId, username: 'Replay fixture winner', role: 'player', score: rounds, isRando: false }])}
+        FROM game_sessions WHERE id = ${sessionId}`
+      await tx`UPDATE game_sessions SET current_match_id = ${sessionId} WHERE id = ${sessionId}`
       await tx`INSERT INTO game_rounds ${tx(
         Array.from({ length: rounds }, (_, i) => ({
           id: `replay-round-${id}-${i}`,
           session_id: sessionId,
+          match_id: sessionId,
           round_num: i + 1,
           black_card_id: promptId,
           winner_player_id: playerId,
