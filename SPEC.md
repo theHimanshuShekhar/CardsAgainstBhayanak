@@ -329,6 +329,7 @@ Player list with HOST/YOU badges and a small green presence dot per player (no r
 ### 7. End Game (`/games/$code/end`)
 
 - Final scoreboard with winner callout
+- Recover the current match's frozen final players, winner, end mode and match-scoped round count through the authenticated room snapshot. Fresh tabs and reloads recover the same result; tab-local cached events never establish the result. Server rendering and initial hydration show the same empty result state until authentication completes. Room membership and token revocation apply to results as they do to live room state.
 - "Play again" (creates new lobby with same settings) and "Go home" buttons
 
 ---
@@ -542,6 +543,7 @@ All client messages are scoped to the socket's authenticated `playerId` + `roomC
 { type: "auth_ok" }
 { type: "auth_error",       code: ErrorCode, message }
 { type: "state_snapshot",   state: SessionState }       // sent on rejoin
+{ type: "lobby_snapshot",   players: GamePlayer[], config: GameConfig, gameStatus: SessionStatus, result?: EndedMatchResult }
 { type: "player_joined",    player: GamePlayer }
 { type: "player_left",      playerId }
 { type: "game_started",     firstRound }
@@ -562,6 +564,8 @@ All client messages are scoped to the socket's authenticated `playerId` + `roomC
 { type: "error",            code: ErrorCode, message }
 { type: "pong" }
 ```
+
+An ended room's authenticated `lobby_snapshot.result` contains `{ matchId, finalScores: PlayerScore[], winnerId, mode: GameOverMode, totalRounds }` from its current persisted match. `totalRounds` is the highest match-scoped round number, including voided rounds, matching the live round counter. Other room statuses omit `result`.
 
 `round_end` is the single source of truth for round termination across all modes. Mode-specific events (`round_won`, `round_ranked`) precede `round_end` to describe the outcome. Before `round_end`, each refilled submitter and newly activated player receives their own full hand through recipient-private `hand_update`; clients refresh their hand through that event. `round_end` contains only public activation metadata. This intentionally replaces the former all-player `handsRefilled` map, which exposed opponents' hands to players and spectators.
 

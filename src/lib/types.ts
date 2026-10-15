@@ -148,6 +148,14 @@ export type GameConfig = {
 
 export type GameOverMode = 'normal' | 'happy_ending' | 'rando_won' | 'deck_exhausted' | 'abandoned'
 
+export type EndedMatchResult = {
+  matchId: string
+  finalScores: PlayerScore[]
+  winnerId: string
+  mode: GameOverMode
+  totalRounds: number
+}
+
 // Post-game host action: replay the same room. 'rematch' goes straight
 // into a fresh game; 'lobby' returns everyone to the lobby to reconfigure.
 export type ResetMode = 'rematch' | 'lobby'
@@ -217,7 +225,13 @@ export type ServerMessage =
   | { type: 'auth_ok' }
   | { type: 'auth_error'; code: ErrorCode; message: string }
   | { type: 'state_snapshot'; state: SessionState }
-  | { type: 'lobby_snapshot'; players: GamePlayer[]; config: GameConfig; gameStatus: SessionStatus }
+  | {
+      type: 'lobby_snapshot'
+      players: GamePlayer[]
+      config: GameConfig
+      gameStatus: SessionStatus
+      result?: EndedMatchResult
+    }
   | { type: 'player_joined'; player: GamePlayer }
   | { type: 'player_left'; playerId: string }
   | { type: 'host_changed'; hostId: string | null }

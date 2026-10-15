@@ -438,21 +438,6 @@ function SessionScreen() {
         }
       }
       if (event.type === 'game_over') {
-        // S3-NEW-E: stamp the roomCode so end.tsx can reject a stale
-        // payload from a previous game's tab (sessionStorage survives
-        // navigation, and a direct visit to a different /end without
-        // going through session.tsx would otherwise read someone else's
-        // result).
-        sessionStorage.setItem(
-          'cab_last_game_over',
-          JSON.stringify({
-            code,
-            finalScores: event.finalScores,
-            winnerId: event.winnerId,
-            mode: event.mode,
-            totalRounds: roundRef.current,
-          }),
-        )
         void navigate({ to: '/games/$code/end', params: { code } })
       }
       if (event.type === 'auth_error') {
