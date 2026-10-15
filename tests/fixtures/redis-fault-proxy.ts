@@ -8,12 +8,31 @@ export async function redisFaultProxy(targetUrl: string) {
   const upstreamPort = Number(target.port || 6379)
   const sockets = new Set<Socket>()
   let failDelete: string | undefined
+  let loseEvalReply: string | undefined
   const server = createServer((client) => {
     const upstream = createConnection({ host: upstreamHost, port: upstreamPort })
     sockets.add(client)
     sockets.add(upstream)
     let buffered = Buffer.alloc(0)
-    upstream.pipe(client)
+    let losingReply = false
+    let reply = Buffer.alloc(0)
+    upstream.on('data', (chunk) => {
+      if (!losingReply) {
+        client.write(chunk)
+        return
+      }
+      reply = Buffer.concat([reply, chunk])
+      const header = reply.indexOf('\r\n')
+      if (header < 0) return
+      // The selected script returns a RESP bulk string (its JSON result).
+      const length = Number(reply.subarray(1, header).toString())
+      const end = reply[0] === 36 && length >= 0 ? header + 2 + length + 2 : header + 2
+      if (reply.length < end) return
+      losingReply = false
+      client.write('-ERR injected lost committed Lua acknowledgement\r\n')
+      if (reply.length > end) client.write(reply.subarray(end))
+      reply = Buffer.alloc(0)
+    })
     client.on('error', () => upstream.destroy())
     upstream.on('error', () => client.destroy())
     client.on('close', () => {
@@ -46,7 +65,13 @@ export async function redisFaultProxy(targetUrl: string) {
         if (args[0]?.toUpperCase() === 'HDEL' && args[1] === failDelete) {
           failDelete = undefined
           client.write('-ERR injected pending departure acknowledgement failure\r\n')
-        } else upstream.write(frame)
+        } else {
+          if (args[0]?.toUpperCase() === 'EVAL' && args[3] === loseEvalReply) {
+            loseEvalReply = undefined
+            losingReply = true
+          }
+          upstream.write(frame)
+        }
       }
     })
   })
@@ -59,6 +84,9 @@ export async function redisFaultProxy(targetUrl: string) {
     url: target.toString(),
     failNextHashDelete(key: string) {
       failDelete = key
+    },
+    loseNextEvalReply(key: string) {
+      loseEvalReply = key
     },
     async close() {
       for (const socket of sockets) socket.destroy()

@@ -1921,7 +1921,8 @@ export async function voidRound(
   const returned = (await redis.eval(
     `
     if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1] then return nil end
-    if redis.call('HGET', KEYS[1], 'voidPreparedRoundId') == ARGV[1] then return '[]' end
+    if redis.call('HGET', KEYS[1], 'voidPreparedRoundId') == ARGV[1] then
+      return redis.call('HGET', KEYS[1], 'voidReturnedPlayers') or '[]' end
     local hands = {}
     local submissions = redis.call('HGETALL', KEYS[3])
     for i=1,#submissions,2 do
@@ -1943,7 +1944,7 @@ export async function voidRound(
     end
     redis.call('RPUSH', KEYS[4], ARGV[3])
     redis.call('EXPIRE', KEYS[4], ARGV[4])
-    redis.call('HSET', KEYS[1], 'phase', 'transition', 'voidPreparedRoundId', ARGV[1])
+    redis.call('HSET', KEYS[1], 'phase', 'transition', 'voidPreparedRoundId', ARGV[1], 'voidReturnedPlayers', cjson.encode(hands))
     redis.call('HDEL', KEYS[1], 'eliminationTurnPlayerId')
     for i=6,#KEYS do redis.call('DEL', KEYS[i]) end
     redis.call('DEL', KEYS[3])
@@ -1952,6 +1953,7 @@ export async function voidRound(
       if raw then
         local intent = cjson.decode(raw)
         intent.voidNextRound = tonumber(ARGV[2]) + 1
+        intent.voidReturnedPlayers = hands
         redis.call('HSET', KEYS[5], ARGV[6], cjson.encode(intent))
       end
     end
@@ -1982,7 +1984,9 @@ export async function voidRound(
     JSON.stringify({ type: 'round_voided', round: roundRow.roundNum, reason }),
   )) as string | null
   if (returned === null) return
-  for (const playerId of JSON.parse(returned) as string[]) await publishHandUpdate(code, playerId)
+  const recipients: unknown = JSON.parse(returned)
+  if (Array.isArray(recipients))
+    for (const playerId of recipients as string[]) await publishHandUpdate(code, playerId)
   await startRound(code, roundRow.roundNum + 1)
 }
 
@@ -2148,6 +2152,7 @@ async function continuePlayerDrop(code: string, playerId: string): Promise<void>
       reason: 'grace' | 'leave'
       roundId: string
       voidNextRound?: number
+      voidReturnedPlayers?: string[]
     }
     await finishPlayerDrop(code, playerId, intent)
     // Do not acknowledge until SQL, ownership and original-round effects finish.
@@ -2164,7 +2169,12 @@ async function continuePlayerDrop(code: string, playerId: string): Promise<void>
 async function finishPlayerDrop(
   code: string,
   playerId: string,
-  intent: { reason: 'grace' | 'leave'; roundId: string; voidNextRound?: number },
+  intent: {
+    reason: 'grace' | 'leave'
+    roundId: string
+    voidNextRound?: number
+    voidReturnedPlayers?: string[]
+  },
 ): Promise<void> {
   // Preserve participation and scores while recording the terminal departure.
   await db.update(gamePlayers).set({ status: 'dropped' }).where(eq(gamePlayers.id, playerId))
@@ -2203,8 +2213,13 @@ async function finishPlayerDrop(
     if (!original) return
     // The atomic void already returned cards and persisted its continuation.
     // Resume even if startRound inserted SQL before the previous process died.
-    if ((await state.getCurrentRound(code)) <= intent.voidNextRound)
+    if ((await state.getCurrentRound(code)) <= intent.voidNextRound) {
+      // Recipients are committed with the returned cards. Retry private hand
+      // delivery before successor publication, including a lost Lua reply.
+      if (Array.isArray(intent.voidReturnedPlayers))
+        for (const playerId of intent.voidReturnedPlayers) await publishHandUpdate(code, playerId)
       await startRound(code, intent.voidNextRound)
+    }
     return
   }
 

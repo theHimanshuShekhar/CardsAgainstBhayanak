@@ -47,6 +47,8 @@ it('restores an expired grace deadline once, preserving roster and host successi
     prompt?: { pick: number }
     hand?: Array<{ id: string }>
   }> = []
+  let socketServer: import('srvx').Server | undefined
+  const peers: Array<{ socket: WebSocket; playerId: string; events: typeof events }> = []
   subscriber.on('message', (_channel, raw) => events.push(JSON.parse(raw)))
   await subscriber.subscribe(KEYS.channel(code))
   try {
@@ -59,8 +61,39 @@ it('restores an expired grace deadline once, preserving roster and host successi
       })
     await engine.startGame(code)
     const opening = await engine.startRound(code, 1, players[0]!.id)
-    const openingHand = await state.getHand(code, players[1]!.id)
-    await engine.submitCards(code, players[1]!.id, openingHand.slice(0, opening.prompt.pick))
+    const { serve } = await import('srvx')
+    const { gameWebSocketPlugin } = await import('../../src/ws/server')
+    const { signSessionToken } = await import('../../src/lib/session-token')
+    socketServer = serve({
+      port: 0,
+      hostname: '127.0.0.1',
+      silent: true,
+      plugins: [gameWebSocketPlugin],
+      fetch: () => new Response('Not found', { status: 404 }),
+    })
+    await socketServer.ready()
+    for (const player of players.slice(1, 4)) {
+      const socket = new WebSocket(
+        `${socketServer.url!.replace(/^http/, 'ws')}/api/games/${code}/ws`,
+      )
+      const peer = { socket, playerId: player.id, events: [] as typeof events }
+      peers.push(peer)
+      socket.onmessage = (message) => peer.events.push(JSON.parse(String(message.data)))
+      await new Promise<void>((resolve) => {
+        socket.onopen = () => resolve()
+      })
+      socket.send(
+        JSON.stringify({
+          type: 'auth',
+          sessionToken: await signSessionToken({ playerId: player.id, roomCode: code }),
+        }),
+      )
+      await expect.poll(() => peer.events.some((event) => event.type === 'auth_ok')).toBe(true)
+    }
+    for (const player of players.slice(1, 3)) {
+      const openingHand = await state.getHand(code, player.id)
+      await engine.submitCards(code, player.id, openingHand.slice(0, opening.prompt.pick))
+    }
     await state.disconnectPlayer(code, players[0]!.id, 'crashed-connection', 1)
     await new Promise((resolve) => setTimeout(resolve, 10))
     // A real storage fault after the accepted departure simulates the
@@ -76,6 +109,11 @@ it('restores an expired grace deadline once, preserving roster and host successi
     await expect(engine.restoreDisconnectDeadlines()).rejects.toThrow()
     await db.execute(sql`DROP TRIGGER issue37_drop_fault ON game_players`)
     await db.execute(sql`DROP FUNCTION issue37_drop_fault()`)
+    // Redis commits the void, but its result never reaches the engine. No
+    // returned-hand publication has happened yet on this live event stream.
+    proxy.loseNextEvalReply(KEYS.round(code))
+    await expect(engine.restoreDisconnectDeadlines()).rejects.toThrow()
+    expect(events.filter((event) => event.type === 'hand_update')).toEqual([])
     // Lose the acknowledgement only after SQL, host succession and Czar
     // progression finish. Replay must leave the successor round intact.
     await db.execute(
@@ -87,6 +125,10 @@ it('restores an expired grace deadline once, preserving roster and host successi
       ),
     )
     await expect(engine.restoreDisconnectDeadlines()).rejects.toThrow()
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(
+      events.some((event) => event.type === 'hand_update' && event.playerId === players[1]!.id),
+    ).toBe(true)
     // Only remove the external fault; the transition phase, returned cards,
     // and pending continuation are recovered by the engine itself.
     await db.execute(sql`DROP TRIGGER issue37_void_fault ON game_rounds`)
@@ -102,11 +144,19 @@ it('restores an expired grace deadline once, preserving roster and host successi
     expect(events.filter((event) => event.type === 'host_changed')).toEqual([
       { type: 'host_changed', hostId: players[1]!.id },
     ])
-    const returnedHand = events.find(
+    await expect
+      .poll(() => peers[0]!.events.some((event) => event.type === 'hand_update'))
+      .toBe(true)
+    const returnedHand = peers[0]!.events.find(
       (event) => event.type === 'hand_update' && event.playerId === players[1]!.id,
     )!.hand!
     expect(returnedHand).toHaveLength(10)
     expect(new Set(returnedHand.map((card) => card.id)).size).toBe(10)
+    expect(
+      events.findIndex(
+        (event) => event.type === 'hand_update' && event.playerId === players[1]!.id,
+      ),
+    ).toBeLessThan(events.findIndex((event) => event.type === 'round_started' && event.round === 2))
     expect(events.filter((event) => event.type === 'round_voided')).toHaveLength(1)
     expect(
       events.filter((event) => event.type === 'round_started').map((event) => event.round),
@@ -118,15 +168,43 @@ it('restores an expired grace deadline once, preserving roster and host successi
     )!.czarId!
     for (const player of players.slice(1, 4)) {
       if (player.id === nextCzar) continue
-      const hand = await state.getHand(code, player.id)
+      // Connected submitters use only the returned cards delivered on the
+      // live event stream; no reconnect, snapshot or hand reread repairs it.
+      const delivered = peers
+        .find((peer) => peer.playerId === player.id)!
+        .events.find((event) => event.type === 'hand_update' && event.playerId === player.id)?.hand
+      const hand = delivered
+        ? delivered.map((card) => card.id)
+        : await state.getHand(code, player.id)
       const pick = events.find((event) => event.type === 'round_started' && event.round === 2)!
         .prompt!.pick
       await engine.submitCards(code, player.id, hand.slice(0, pick))
     }
+    for (const peer of peers)
+      expect(
+        peer.events
+          .filter((event) => event.type === 'hand_update')
+          .every((event) => event.playerId === peer.playerId),
+      ).toBe(true)
+    expect(peers[2]!.events.filter((event) => event.type === 'hand_update')).toEqual([])
+    expect(
+      events
+        .filter((event) => event.type === 'round_voided' || event.type === 'round_started')
+        .every((event) => event.hand === undefined),
+    ).toBe(true)
     await engine.pickWinner(code, nextCzar, '0')
     await engine.restoreDisconnectDeadlines()
     expect(events.filter((event) => event.type === 'round_voided')).toHaveLength(1)
   } finally {
+    for (const peer of peers) {
+      const closed = new Promise<void>((resolve) => {
+        peer.socket.onclose = () => resolve()
+      })
+      peer.socket.close()
+      await closed
+    }
+    await socketServer?.close(true)
+    await new Promise((resolve) => setTimeout(resolve, 30))
     await db.execute(sql`DROP TRIGGER IF EXISTS issue37_void_fault ON game_rounds`)
     await db.execute(sql`DROP FUNCTION IF EXISTS issue37_void_fault()`)
     await db.execute(sql`DROP TRIGGER IF EXISTS issue37_drop_fault ON game_players`)
