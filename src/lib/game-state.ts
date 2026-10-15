@@ -1,4 +1,5 @@
 import { redis, KEYS, ROOM_TTL_SECONDS } from './redis'
+import { GRACE_WINDOW_MS, KEEPALIVE_TIMEOUT_MS } from './timing'
 import { GameCommandError } from './game-command-error'
 import type { GameConfig, GamePlayer, GamePhase, Submission, Card } from './types'
 
@@ -713,12 +714,20 @@ export async function setGrace(code: string, playerId: string, ms: number): Prom
 }
 
 export async function clearGrace(code: string, playerId: string): Promise<void> {
-  await redis.del(KEYS.grace(code, playerId), KEYS.graceConnection(code, playerId))
+  await redis.del(
+    KEYS.grace(code, playerId),
+    KEYS.graceConnection(code, playerId),
+    KEYS.graceDeadline(code, playerId),
+  )
 }
 
 // Reconnection must never resurrect a concurrent leave or promote a
 // mid-round joiner. Connectivity never changes participation.
-export async function reconnectPlayer(code: string, playerId: string): Promise<boolean> {
+export async function reconnectPlayer(
+  code: string,
+  playerId: string,
+  connection?: string,
+): Promise<boolean> {
   return Boolean(
     await redis.eval(
       `
@@ -730,19 +739,28 @@ export async function reconnectPlayer(code: string, playerId: string): Promise<b
       if player.status == 'grace' then
         player.status = player.role == 'spectator' and 'spectator' or 'active'
       end
+      if ARGV[3] ~= '' then
+        redis.call('HSET', KEYS[5], ARGV[3], ARGV[4])
+        redis.call('EXPIRE', KEYS[5], ARGV[2])
+      end
+      redis.call('DEL', KEYS[6])
       player.connectionStatus = 'connected'
       redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(player))
       redis.call('DEL', KEYS[2], KEYS[3])
       redis.call('EXPIRE', KEYS[1], ARGV[2])
       return 1
       `,
-      4,
+      6,
       KEYS.players(code),
       KEYS.grace(code, playerId),
       KEYS.graceConnection(code, playerId),
       KEYS.game(code),
+      KEYS.connections(code, playerId),
+      KEYS.graceDeadline(code, playerId),
       playerId,
       ROOM_TTL_SECONDS,
+      connection ?? '',
+      Date.now() + KEEPALIVE_TIMEOUT_MS,
     ),
   )
 }
@@ -757,6 +775,9 @@ export async function disconnectPlayer(
     await redis.eval(
       `
       if not redis.call('HGET', KEYS[4], 'status') then return 0 end
+      for _, expiry in ipairs(redis.call('HVALS', KEYS[5])) do
+        if tonumber(expiry) > tonumber(ARGV[5]) then return 0 end
+      end
       local raw = redis.call('HGET', KEYS[1], ARGV[1])
       if not raw then return 0 end
       local player = cjson.decode(raw)
@@ -765,6 +786,8 @@ export async function disconnectPlayer(
       if player.status == 'grace' then
         player.status = player.role == 'spectator' and 'spectator' or 'active'
       end
+      redis.call('DEL', KEYS[5])
+      redis.call('SET', KEYS[6], ARGV[6], 'EX', ARGV[4])
       player.connectionStatus = 'grace'
       redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(player))
       redis.call('SET', KEYS[2], ARGV[2], 'PX', ARGV[3])
@@ -774,15 +797,19 @@ export async function disconnectPlayer(
       redis.call('EXPIRE', KEYS[1], ARGV[4])
       return 1
       `,
-      4,
+      6,
       KEYS.players(code),
       KEYS.grace(code, playerId),
       KEYS.graceConnection(code, playerId),
       KEYS.game(code),
+      KEYS.connections(code, playerId),
+      KEYS.graceDeadline(code, playerId),
       playerId,
       deadline,
       ms,
       ROOM_TTL_SECONDS,
+      Date.now(),
+      Date.now() + ms,
     ),
   )
 }
@@ -791,6 +818,7 @@ export async function claimPlayerDrop(
   code: string,
   playerId: string,
   connection?: string,
+  reason: 'grace' | 'leave' = 'leave',
 ): Promise<boolean> {
   return Boolean(
     await redis.eval(
@@ -802,23 +830,30 @@ export async function claimPlayerDrop(
       if player.status == 'dropped' then return 0 end
       if ARGV[2] ~= '' and (redis.call('GET', KEYS[3]) ~= ARGV[2]
         or redis.call('EXISTS', KEYS[2]) == 1) then return 0 end
+      redis.call('HSET', KEYS[7], ARGV[1], cjson.encode({reason=ARGV[6], roundId=redis.call('HGET', KEYS[8], 'roundId') or ''}))
+      redis.call('EXPIRE', KEYS[7], ARGV[3])
       player.status = 'dropped'
       redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(player))
-      redis.call('DEL', KEYS[2], KEYS[3])
+      redis.call('DEL', KEYS[2], KEYS[3], KEYS[5], KEYS[6])
       redis.call('EXPIRE', KEYS[1], ARGV[3])
       redis.call('PUBLISH', ARGV[4], ARGV[5])
       return 1
       `,
-      4,
+      8,
       KEYS.players(code),
       KEYS.grace(code, playerId),
       KEYS.graceConnection(code, playerId),
       KEYS.game(code),
+      KEYS.connections(code, playerId),
+      KEYS.graceDeadline(code, playerId),
+      KEYS.drops(code),
+      KEYS.round(code),
       playerId,
       connection ?? '',
       ROOM_TTL_SECONDS,
       KEYS.channel(code),
       JSON.stringify({ type: 'player_left', playerId }),
+      reason,
     ),
   )
 }
@@ -1258,4 +1293,75 @@ export async function commitVote(
     ROOM_TTL_SECONDS,
   )
   return raw ? JSON.parse(raw as string) : null
+}
+
+// Only renew the owning socket. Late work cannot recreate a removed lease.
+export async function renewConnection(
+  code: string,
+  playerId: string,
+  connection: string,
+): Promise<void> {
+  await redis.eval(
+    `if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 1 then
+    redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+    redis.call('EXPIRE', KEYS[1], ARGV[3]) end`,
+    1,
+    KEYS.connections(code, playerId),
+    connection,
+    Date.now() + KEEPALIVE_TIMEOUT_MS,
+    ROOM_TTL_SECONDS,
+  )
+}
+
+export async function releaseConnection(
+  code: string,
+  playerId: string,
+  connection: string,
+): Promise<void> {
+  await redis.hdel(KEYS.connections(code, playerId), connection)
+}
+
+// A dead process cannot close its sockets. Preserve the last heartbeat deadline
+// and start grace there, never at restart (which would extend tolerance).
+export async function reconcileDisconnect(code: string, playerId: string): Promise<string | null> {
+  return (await redis.eval(
+    `
+    local raw = redis.call('HGET', KEYS[1], ARGV[1])
+    if not raw or not redis.call('HGET', KEYS[2], 'status') then return nil end
+    local player = cjson.decode(raw)
+    if player.status == 'dropped' or player.isRando then return nil end
+    local latest = 0
+    for _, expiry in ipairs(redis.call('HVALS', KEYS[3])) do
+      latest = math.max(latest, tonumber(expiry))
+    end
+    if latest > tonumber(ARGV[2]) then return nil end
+    local generation = redis.call('GET', KEYS[5])
+    if not generation and latest > 0 then
+      generation = ARGV[4]
+      local deadline = latest + tonumber(ARGV[3])
+      player.connectionStatus = 'grace'
+      redis.call('HSET', KEYS[1], ARGV[1], cjson.encode(player))
+      redis.call('SET', KEYS[5], generation, 'EX', ARGV[5])
+      redis.call('SET', KEYS[6], deadline, 'EX', ARGV[5])
+      if deadline > tonumber(ARGV[2]) then
+        redis.call('SET', KEYS[4], generation, 'PX', deadline-tonumber(ARGV[2]))
+      end
+      redis.call('DEL', KEYS[3])
+    end
+    if generation and redis.call('EXISTS', KEYS[4]) == 0 then return generation end
+    return nil
+  `,
+    6,
+    KEYS.players(code),
+    KEYS.game(code),
+    KEYS.connections(code, playerId),
+    KEYS.grace(code, playerId),
+    KEYS.graceConnection(code, playerId),
+    KEYS.graceDeadline(code, playerId),
+    playerId,
+    Date.now(),
+    GRACE_WINDOW_MS,
+    crypto.randomUUID(),
+    ROOM_TTL_SECONDS,
+  )) as string | null
 }

@@ -1920,10 +1920,14 @@ async function returnRoundCards(code: string, blackCardId: string): Promise<void
 // round-scoped state — then replay. The dropped Czar is already
 // status=dropped, so startRound's normal rotation skips them: the next
 // active player becomes Czar.
-export async function voidRound(code: string, reason: string): Promise<void> {
+export async function voidRound(
+  code: string,
+  reason: string,
+  expectedRoundId?: string,
+  droppedPlayerId?: string,
+): Promise<void> {
   const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
   if (!session || session.status !== 'active') return
-
   const [roundRow] = await db
     .select()
     .from(gameRounds)
@@ -1932,19 +1936,58 @@ export async function voidRound(code: string, reason: string): Promise<void> {
     )
     .orderBy(desc(gameRounds.roundNum))
     .limit(1)
-  if (!roundRow) return
-  const round = roundRow.roundNum
-  await state.setPhase(code, 'transition')
-  await returnRoundCards(code, roundRow.blackCardId)
-  await state.clearSubmissions(code)
-  await state.clearSkippedPlayers(code)
-  // Voided round never resolves: clear wagers so settleGambles doesn't
-  // debit these players when a *later* round resolves (deferred debit).
-  for (const p of await state.getAllPlayers(code)) {
-    if (p.hasGambled) await state.updatePlayer(code, p.id, { hasGambled: false })
-  }
-  await redis.hdel(KEYS.round(code), 'eliminationTurnPlayerId')
-  await redis.del(
+  if (!roundRow || (expectedRoundId && roundRow.id !== expectedRoundId)) return
+  // Returning cards, clearing the abandoned round, and recording the next
+  // step are one operation. A retry cannot return/discard cards twice.
+  const returned = (await redis.eval(
+    `
+    if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1] then return nil end
+    if redis.call('HGET', KEYS[1], 'voidPreparedRoundId') == ARGV[1] then
+      return redis.call('HGET', KEYS[1], 'voidReturnedPlayers') or '[]' end
+    local hands = {}
+    local submissions = redis.call('HGETALL', KEYS[3])
+    for i=1,#submissions,2 do
+      local pid = string.gsub(submissions[i], ':gamble$', '')
+      local raw = redis.call('HGET', KEYS[2], pid)
+      if raw and not cjson.decode(raw).isRando then
+        local hand = ARGV[5] .. pid
+        local sub = cjson.decode(submissions[i+1])
+        for _,card in ipairs(sub.fills) do redis.call('RPUSH', hand, card.id) end
+        redis.call('EXPIRE', hand, ARGV[4])
+        table.insert(hands, pid)
+      end
+    end
+    local players = redis.call('HGETALL', KEYS[2])
+    for i=1,#players,2 do
+      local player = cjson.decode(players[i+1])
+      player.hasGambled = false
+      redis.call('HSET', KEYS[2], players[i], cjson.encode(player))
+    end
+    redis.call('RPUSH', KEYS[4], ARGV[3])
+    redis.call('EXPIRE', KEYS[4], ARGV[4])
+    redis.call('HSET', KEYS[1], 'phase', 'transition', 'voidPreparedRoundId', ARGV[1], 'voidReturnedPlayers', cjson.encode(hands))
+    redis.call('HDEL', KEYS[1], 'eliminationTurnPlayerId')
+    for i=6,#KEYS do redis.call('DEL', KEYS[i]) end
+    redis.call('DEL', KEYS[3])
+    if ARGV[6] ~= '' then
+      local raw = redis.call('HGET', KEYS[5], ARGV[6])
+      if raw then
+        local intent = cjson.decode(raw)
+        intent.voidNextRound = tonumber(ARGV[2]) + 1
+        intent.voidReturnedPlayers = hands
+        redis.call('HSET', KEYS[5], ARGV[6], cjson.encode(intent))
+      end
+    end
+    redis.call('PUBLISH', ARGV[7], ARGV[8])
+    return cjson.encode(hands)
+  `,
+    13,
+    KEYS.round(code),
+    KEYS.players(code),
+    `${KEYS.round(code)}:submissions`,
+    KEYS.discardBlack(code),
+    KEYS.drops(code),
+    `${KEYS.round(code)}:skipped`,
     subOrderKey(code),
     resolvingKey(code),
     revealedKey(code),
@@ -1952,12 +1995,20 @@ export async function voidRound(code: string, reason: string): Promise<void> {
     tieKeyFor(code),
     votersKeyFor(code),
     voterChoicesKeyFor(code),
-  )
-
-  await state.publishEvent(code, { type: 'round_voided', round, reason })
-  engineLogger.info({ code, round, reason }, 'round voided')
-
-  await startRound(code, round + 1)
+    roundRow.id,
+    roundRow.roundNum,
+    roundRow.blackCardId,
+    ROOM_TTL_SECONDS,
+    `game:${code}:hand:`,
+    droppedPlayerId ?? '',
+    KEYS.channel(code),
+    JSON.stringify({ type: 'round_voided', round: roundRow.roundNum, reason }),
+  )) as string | null
+  if (returned === null) return
+  const recipients: unknown = JSON.parse(returned)
+  if (Array.isArray(recipients))
+    for (const playerId of recipients as string[]) await publishHandUpdate(code, playerId)
+  await startRound(code, roundRow.roundNum + 1)
 }
 
 // Ownership follows the longest-present participating human, including queued
@@ -2105,14 +2156,54 @@ export async function dropPlayer(
   reason: 'grace' | 'leave',
   connection?: string,
 ): Promise<void> {
-  if (!(await state.claimPlayerDrop(code, playerId, connection))) return
+  await state.claimPlayerDrop(code, playerId, connection, reason)
+  await continuePlayerDrop(code, playerId)
+}
+
+const dropTasks = new Map<string, Promise<void>>()
+
+async function continuePlayerDrop(code: string, playerId: string): Promise<void> {
+  const key = `${code}:${playerId}`
+  const existing = dropTasks.get(key)
+  if (existing) return existing
+  const task = (async () => {
+    const raw = await redis.hget(KEYS.drops(code), playerId)
+    if (!raw) return
+    const intent = JSON.parse(raw) as {
+      reason: 'grace' | 'leave'
+      roundId: string
+      voidNextRound?: number
+      voidReturnedPlayers?: string[]
+    }
+    await finishPlayerDrop(code, playerId, intent)
+    // Do not acknowledge until SQL, ownership and original-round effects finish.
+    await redis.hdel(KEYS.drops(code), playerId)
+  })()
+  dropTasks.set(key, task)
+  try {
+    await task
+  } finally {
+    dropTasks.delete(key)
+  }
+}
+
+async function finishPlayerDrop(
+  code: string,
+  playerId: string,
+  intent: {
+    reason: 'grace' | 'leave'
+    roundId: string
+    voidNextRound?: number
+    voidReturnedPlayers?: string[]
+  },
+): Promise<void> {
   // Preserve participation and scores while recording the terminal departure.
   await db.update(gamePlayers).set({ status: 'dropped' }).where(eq(gamePlayers.id, playerId))
   await touchSessionActivity(code)
   captureServerEvent(await distinctIdFor(code, playerId), 'cab_player_dropped', {
     roomCode: code,
     playerId,
-    reason,
+    reason: intent.reason,
   })
 
   const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
@@ -2133,6 +2224,26 @@ export async function dropPlayer(
     return
   }
 
+  if (intent.voidNextRound) {
+    const [original] = await db
+      .select({ id: gameRounds.id })
+      .from(gameRounds)
+      .where(
+        and(eq(gameRounds.id, intent.roundId), eq(gameRounds.matchId, session.currentMatchId!)),
+      )
+    if (!original) return
+    // The atomic void already returned cards and persisted its continuation.
+    // Resume even if startRound inserted SQL before the previous process died.
+    if ((await state.getCurrentRound(code)) <= intent.voidNextRound) {
+      // Recipients are committed with the returned cards. Retry private hand
+      // delivery before successor publication, including a lost Lua reply.
+      if (Array.isArray(intent.voidReturnedPlayers))
+        for (const playerId of intent.voidReturnedPlayers) await publishHandUpdate(code, playerId)
+      await startRound(code, intent.voidNextRound)
+    }
+    return
+  }
+
   // Picking/waiting restarts fairly; a revealed round keeps its answers
   // and resolves by mode. A claimed/completed round is left alone.
   const [roundRow] = await db
@@ -2143,10 +2254,14 @@ export async function dropPlayer(
     )
     .orderBy(desc(gameRounds.roundNum))
     .limit(1)
-  if (roundRow?.czarPlayerId !== playerId) return
+  // A delayed/retried departure belongs only to the round at its claim.
+  // In particular it must never void a successor after progression won.
+  if (!intent.roundId || roundRow?.id !== intent.roundId || roundRow.czarPlayerId !== playerId)
+    return
+  if ((await redis.hget(KEYS.round(code), 'roundId')) !== intent.roundId) return
   const phase = await state.getPhase(code)
   if (phase === 'picking' || phase === 'waiting') {
-    await voidRound(code, 'czar_dropped')
+    await voidRound(code, 'czar_dropped', intent.roundId, playerId)
   } else if (
     phase === 'reveal' ||
     phase === 'judging' ||
@@ -2665,4 +2780,23 @@ export async function triggerHappyEnding(code: string, playerId: string): Promis
     playerId,
     rule: 'happy_ending',
   })
+}
+
+// Repeated reconciliation also retries transient backing-store failures and
+// covers leases which were valid at boot but expire after the process died.
+export async function restoreDisconnectDeadlines(): Promise<void> {
+  let cursor = '0'
+  do {
+    const result = await redis.scan(cursor, 'MATCH', 'game:*:players', 'COUNT', 100)
+    cursor = result[0]
+    for (const key of result[1]) {
+      const code = key.split(':')[1]!
+      for (const playerId of await redis.hkeys(KEYS.drops(code)))
+        await continuePlayerDrop(code, playerId)
+      for (const playerId of await redis.hkeys(key)) {
+        const generation = await state.reconcileDisconnect(code, playerId)
+        if (generation) await dropPlayer(code, playerId, 'grace', generation)
+      }
+    }
+  } while (cursor !== '0')
 }
