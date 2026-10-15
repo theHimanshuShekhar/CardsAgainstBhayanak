@@ -354,8 +354,8 @@ export async function startRound(
     `
     if redis.call('HGET', KEYS[1], 'roundId') == ARGV[1] then return end
     redis.call('HDEL', KEYS[1], 'winnerId', 'winningPlayerId', 'winningSubmissionId', 'resolvedSubmissions', 'ranking', 'eliminationTurnPlayerId', 'outcomeClaim', 'completionClaim', 'voteEpoch', 'voteClosed', 'voteCandidateIds', 'postResolveResumeAt', 'roundTimerExpiresAt')
-    redis.call('HSET', KEYS[1], 'roundId', ARGV[1], 'czarId', ARGV[2], 'phase', 'picking')
-    redis.call('HSET', KEYS[2], 'currentRound', ARGV[3])
+    redis.call('HSET', KEYS[1], 'roundId', ARGV[1], 'matchId', ARGV[5], 'czarId', ARGV[2], 'phase', 'picking')
+    redis.call('HSET', KEYS[2], 'currentRound', ARGV[3], 'matchId', ARGV[5])
     redis.call('DEL', KEYS[3])
     redis.call('EXPIRE', KEYS[1], ARGV[4])
   `,
@@ -367,6 +367,7 @@ export async function startRound(
     czarId ?? '',
     round,
     ROOM_TTL_SECONDS,
+    session.currentMatchId!,
   )
   await touchSessionActivity(code)
 
@@ -1178,12 +1179,10 @@ async function claimCompletionIntent(
   phase: string,
   outcome: Omit<CompletionIntent, 'roundId' | 'roundNumber' | 'matchId'>,
 ): Promise<boolean> {
-  const [round] = await db
-    .select({ matchId: gameRounds.matchId })
-    .from(gameRounds)
-    .where(eq(gameRounds.id, roundId))
-  if (!round) return false
-  const config = JSON.parse((await redis.hget(KEYS.game(code), 'config')) ?? '{}') as GameConfig
+  // Match identity was installed with the round, before votes/eliminations.
+  // No SQL may precede the durable intent after a terminal action is accepted.
+  const [rawConfig, matchId] = await redis.hmget(KEYS.game(code), 'config', 'matchId')
+  const config = JSON.parse(rawConfig ?? '{}') as GameConfig
   const mode = config.rules?.includes('survival')
     ? 'survival'
     : config.rules?.includes('godmode')
@@ -1214,7 +1213,7 @@ async function claimCompletionIntent(
         ...outcome,
         mode,
         roundId,
-        matchId: round.matchId,
+        matchId: matchId ?? undefined,
         roundNumber: await state.getCurrentRound(code),
       }),
       ROOM_TTL_SECONDS,
@@ -1787,7 +1786,13 @@ async function performResetGame(
     ],
     'ended',
   )
-  await redis.hdel(KEYS.game(code), 'czarStartOffset', 'happyEndingArmed', 'happyEndingFinal')
+  await redis.hdel(
+    KEYS.game(code),
+    'matchId',
+    'czarStartOffset',
+    'happyEndingArmed',
+    'happyEndingFinal',
+  )
 
   // Keep prior rounds and their referenced synthetic identities. Only live
   // membership is retired; the next match gets a new Rando identity.

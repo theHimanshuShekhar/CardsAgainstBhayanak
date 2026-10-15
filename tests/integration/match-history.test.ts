@@ -4,7 +4,7 @@ import type { Card, PlayerScore, SessionState } from '../../src/lib/types'
 
 const { db } = await import('../../src/db')
 const { gameSessions, gamePlayers, gameRounds, packs } = await import('../../src/db/schema')
-const { eq } = await import('drizzle-orm')
+const { eq, sql } = await import('drizzle-orm')
 const engine = await import('../../src/lib/game-engine')
 const state = await import('../../src/lib/game-state')
 const { redis, KEYS } = await import('../../src/lib/redis')
@@ -37,7 +37,18 @@ afterAll(async () => {
 
 it('counts both completed matches after rematch and lobby replay in the same room', async () => {
   const code = 'HIS046'
-  const [pack] = await db.select().from(packs).limit(1)
+  const [pack] = await db
+    .select()
+    .from(packs)
+    .where(
+      sql`(SELECT count(*) FROM white_cards WHERE pack_id = ${packs.id}) >= 100 AND (SELECT count(*) FROM black_cards WHERE pack_id = ${packs.id}) >= 3`,
+    )
+    .orderBy(packs.id)
+    .limit(1)
+  if (!pack)
+    throw new Error(
+      'Match history fixture requires a pack with at least 100 white and 3 black cards',
+    )
   const config = {
     maxPlayers: 4,
     roundsToWin: 1,
