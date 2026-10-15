@@ -3,7 +3,8 @@ import { serve } from 'srvx'
 import type { Card, PlayerScore, SessionState } from '../../src/lib/types'
 
 const { db } = await import('../../src/db')
-const { gameSessions, gamePlayers, gameRounds, packs } = await import('../../src/db/schema')
+const { gameSessions, gamePlayers, gameRounds, gameMatches, packs } =
+  await import('../../src/db/schema')
 const { eq, sql } = await import('drizzle-orm')
 const engine = await import('../../src/lib/game-engine')
 const state = await import('../../src/lib/game-state')
@@ -173,7 +174,12 @@ it('counts both completed matches after rematch and lobby replay in the same roo
     await subscriber.quit()
     const keys = await redis.keys(`game:${code}*`)
     if (keys.length) await redis.del(...keys)
+    await db
+      .update(gameSessions)
+      .set({ hostPlayerId: null, winnerPlayerId: null, currentMatchId: null })
+      .where(eq(gameSessions.id, room!.id))
     await db.delete(gameRounds).where(eq(gameRounds.sessionId, room!.id))
+    await db.delete(gameMatches).where(eq(gameMatches.sessionId, room!.id))
     await db.delete(gamePlayers).where(eq(gamePlayers.sessionId, room!.id))
     await db.delete(gameSessions).where(eq(gameSessions.id, room!.id))
   }

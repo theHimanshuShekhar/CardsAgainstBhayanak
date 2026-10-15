@@ -779,7 +779,7 @@ packs          — id, name, slug (unique), card_count, created_at
 black_cards    — id, pack_id (fk), text, pick (CHECK pick IN (1,2,3)), unique(pack_id, text, pick)
 white_cards    — id, pack_id (fk), text,                                unique(pack_id, text)
 
-game_sessions  — id (cuid2), current_match_id (nullable), code (CHAR(6), unique — stored without dash, e.g. 'B7K9MV'), status, config JSONB,
+game_sessions  — id (cuid2), current_match_id (nullable same-room FK), code (CHAR(6), unique — stored without dash, e.g. 'B7K9MV'), status, config JSONB,
                  host_player_id (nullable FK), created_at, last_activity_at, ended_at,
                  winner_player_id (nullable FK), end_mode (nullable; ENUM same as GameOverMode)
                  status ENUM: 'lobby' | 'active' | 'paused' | 'ended' | 'abandoned'
@@ -792,7 +792,7 @@ game_players   — id (cuid2), session_id (fk), username, role, score, status, i
                  partial unique(session_id) WHERE is_rando = true AND status != 'dropped' -- one live Rando
 
 game_matches   — id (cuid2), session_id (room fk), status, config JSONB,
-                 winner_player_id, end_mode, final_players JSONB,
+                 winner_player_id (nullable same-room membership FK), end_mode, final_players JSONB,
                  started_at, ended_at
                  -- one playthrough; final roster preserves scores and membership IDs
 
@@ -825,7 +825,16 @@ INDEX gin_winning_fills ON game_rounds USING gin (winning_submission_fills)  -- 
 
 Rooms retain their code and memberships across replays. Each start after a completed match allocates a new match; completed match configuration, outcomes, final player scores and rounds remain immutable. Round lookups and completion recovery use match identity plus the original round ID, so a replay's round 1 cannot resolve an earlier match. Rando memberships retire on reset and remain available to historical references. See [ADR 0001](docs/adr/0001-room-and-match-identity.md).
 
-### Host FK chicken-and-egg resolution
+### Membership integrity and nullable creation/reset ordering
+
+PostgreSQL owns pointer integrity. Composite foreign keys require room host and
+winner IDs, match winner IDs, and round winner IDs to reference a membership in
+the same room. Current-match pointers and each round's match must also belong to
+that room. A missing, deleted, or cross-room reference is rejected on every write,
+including writes outside the application. Membership and match IDs cannot be
+moved to another room while referenced. These constraints enforce existence and
+room ownership; host eligibility and choosing the match winner remain engine
+rules. Dropped memberships remain valid historical identities.
 
 `game_sessions.host_player_id` is `NULL`-able and unset at row creation. The flow:
 
@@ -833,7 +842,25 @@ Rooms retain their code and memberships across replays. Each start after a compl
 2. `INSERT INTO game_players (session_id, username, role, is_host=true) VALUES (sessionId, ...)` returns `playerId`
 3. `UPDATE game_sessions SET host_player_id = playerId WHERE id = sessionId`
 
-If the host leaves before any other players join, the session is marked `abandoned` and the orphan host row is acceptable.
+The host pointer can return to `NULL` when no eligible human remains. Starting a
+match inserts its row before assigning `current_match_id`; finishing it records
+the room and match outcome in one transaction. Reset clears the room's current
+match and winner pointers while retaining completed matches, frozen final rosters,
+rounds, and dropped human/Rando memberships. No deferred constraints are needed.
+
+Foreign keys use `NO ACTION` for deletion/update: deleting a referenced membership
+must fail rather than erase or reassign a historical winner. Explicit room/history
+deletion first clears room host/winner/current-match pointers, then deletes rounds,
+matches, memberships, and the room, preferably in one transaction. The existing
+room-to-match `ON DELETE CASCADE` remains available when deleting a room whose
+memberships and rounds have already been removed.
+
+Migration `0003_membership_integrity.sql` validates existing pointers before adding
+constraints. An invalid legacy row stops and rolls back the upgrade with its table,
+pointer, row ID and target ID (up to ten examples). Review the original room/match
+history and repair references explicitly before retrying `pnpm db:migrate`; the
+migration never silently rewrites outcomes. Back up and rehearse the upgrade using
+the normal reviewed migration procedure.
 
 ### Rando Cardrissian as a synthetic player
 

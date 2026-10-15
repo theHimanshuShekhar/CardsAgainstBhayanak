@@ -6,7 +6,8 @@ it('restored and ordinary timeouts cannot skip or void a rematch with the same r
   if (!process.env['DATABASE_URL'] || !process.env['REDIS_URL'])
     throw new Error('Dedicated DATABASE_URL and REDIS_URL required for integration tests')
   const { db } = await import('../../src/db')
-  const { gameSessions, gamePlayers, gameRounds, packs } = await import('../../src/db/schema')
+  const { gameSessions, gamePlayers, gameRounds, gameMatches, packs } =
+    await import('../../src/db/schema')
   const { eq } = await import('drizzle-orm')
   const state = await import('../../src/lib/game-state')
   const engine = await import('../../src/lib/game-engine')
@@ -106,7 +107,12 @@ it('restored and ordinary timeouts cannot skip or void a rematch with the same r
     clock.mockRestore()
     const keys = await redis.keys(`game:${code}*`)
     if (keys.length) await redis.del(...keys)
+    await db
+      .update(gameSessions)
+      .set({ hostPlayerId: null, winnerPlayerId: null, currentMatchId: null })
+      .where(eq(gameSessions.id, session!.id))
     await db.delete(gameRounds).where(eq(gameRounds.sessionId, session!.id))
+    await db.delete(gameMatches).where(eq(gameMatches.sessionId, session!.id))
     await db.delete(gamePlayers).where(eq(gamePlayers.sessionId, session!.id))
     await db.delete(gameSessions).where(eq(gameSessions.id, session!.id))
     await subscriber.quit()

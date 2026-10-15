@@ -23,7 +23,8 @@ process.env['POSTHOG_API_KEY'] = 'issue38-local-telemetry-fixture'
 process.env['POSTHOG_HOST'] = `http://127.0.0.1:${telemetryAddress.port}`
 const sql = postgres(process.env['DATABASE_URL']!, { onnotice: () => {} })
 const { db } = await import('../../src/db')
-const { gameSessions, gamePlayers, gameRounds, packs } = await import('../../src/db/schema')
+const { gameSessions, gamePlayers, gameRounds, gameMatches, packs } =
+  await import('../../src/db/schema')
 const { eq, sql: query } = await import('drizzle-orm')
 const state = await import('../../src/lib/game-state')
 const engine = await import('../../src/lib/game-engine')
@@ -446,7 +447,12 @@ it.each(cases)(
       await sql.unsafe('DROP FUNCTION IF EXISTS fail_completion()')
       const keys = await redis.keys(`game:${code}*`)
       if (keys.length) await redis.del(...keys)
+      await db
+        .update(gameSessions)
+        .set({ hostPlayerId: null, winnerPlayerId: null, currentMatchId: null })
+        .where(eq(gameSessions.id, session!.id))
       await db.delete(gameRounds).where(eq(gameRounds.sessionId, session!.id))
+      await db.delete(gameMatches).where(eq(gameMatches.sessionId, session!.id))
       await db.delete(gamePlayers).where(eq(gamePlayers.sessionId, session!.id))
       await db.delete(gameSessions).where(eq(gameSessions.id, session!.id))
       await subscriber.quit()
