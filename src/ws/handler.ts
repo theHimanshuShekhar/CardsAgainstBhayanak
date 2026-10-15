@@ -2,9 +2,9 @@ import type { Peer, Message } from 'crossws'
 import { randomUUID } from 'node:crypto'
 import { getClientIp } from '~/lib/client-identity.server'
 import { admitConnection, admitFrame, admitCommand, type ConnectionLease } from './traffic-budget'
-import { eq, and, inArray, desc } from 'drizzle-orm'
+import { eq, and, inArray, desc, sql } from 'drizzle-orm'
 import { db } from '~/db'
-import { blackCards, whiteCards, gameSessions, gameRounds } from '~/db/schema'
+import { blackCards, whiteCards, gameSessions, gameMatches, gameRounds } from '~/db/schema'
 import { wsLogger } from '~/lib/logger'
 import {
   captureServerException,
@@ -30,6 +30,7 @@ import type {
   Submission,
   PlayerScore,
   GameConfig,
+  EndedMatchResult,
 } from '~/lib/types'
 
 // S2-3: a spectator socket may keep the connection alive and re-sync,
@@ -241,13 +242,39 @@ async function buildLobbySnapshot(code: string): Promise<{
   players: GamePlayer[]
   config: GameConfig
   gameStatus: SessionStatus
+  result?: EndedMatchResult
 } | null> {
-  const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
-  if (!session) return null
+  // Read the room's current match and its frozen result together. Live room
+  // scores/identities may already have changed since the match completed.
+  const [row] = await db
+    .select({
+      session: gameSessions,
+      match: gameMatches,
+      totalRounds: sql<number>`coalesce((SELECT max(${gameRounds.roundNum}) FROM ${gameRounds} WHERE ${gameRounds.matchId} = ${gameMatches.id}), 0)`,
+    })
+    .from(gameSessions)
+    .leftJoin(gameMatches, eq(gameMatches.id, gameSessions.currentMatchId))
+    .where(eq(gameSessions.code, code))
+  if (!row) return null
+  const { session, match } = row
+  const result: EndedMatchResult | undefined =
+    session.status === 'ended' &&
+    match?.status === 'ended' &&
+    Array.isArray(match.finalPlayers) &&
+    match.endMode
+      ? {
+          matchId: match.id,
+          finalScores: engine.toPlayerScores(match.finalPlayers as GamePlayer[], null),
+          winnerId: match.winnerPlayerId ?? '',
+          mode: match.endMode,
+          totalRounds: Number(row.totalRounds),
+        }
+      : undefined
   return {
     players: await state.getAllPlayers(code),
     config: session.config as GameConfig,
     gameStatus: session.status as SessionStatus,
+    ...(result ? { result } : {}),
   }
 }
 
