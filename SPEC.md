@@ -1080,7 +1080,7 @@ PostgreSQL requires durable fsync, reliable locking and exclusive PGDATA ownersh
 
 - App port binding defaults to `127.0.0.1:3000:3000`; `APP_BIND_IP` may override it for an intentionally restricted ingress network. Allowlisting a host/NAT gateway trusts all traffic originating through that peer, so restrict local/network access and require ingress to overwrite `CF-Connecting-IP`.
 - Cloudflare Tunnel natively proxies WebSocket upgrades — no special config needed on the app side.
-- A single `docker-compose.yml` is used for dev and prod; production settings (`restart: unless-stopped`, memory limits — app: 512M, postgres: 1G, redis: 256M — and `NODE_ENV=production`) are applied via environment overrides rather than a separate `docker-compose.prod.yml`
+- `docker-compose.yml` is the deployment stack. Local development uses standalone `docker-compose.dev.yml` with project-scoped local volumes, loopback backing-service ports and explicit disposable settings from `.env.local.example`; see the README quickstart.
 - Health checks: postgres `pg_isready`, redis `redis-cli ping`, app `GET /healthz` (returns 200 with `{ db, redis, activeGames, uptime }` or 503 if any dependency is down)
 - Volumes: `postgres_data`, `redis_data` (both backed up via host volume mount)
 - **DB schema management:** reviewed versioned SQL migrations with a checksummed manifest. Production deployment explicitly runs `pnpm db:migrate` after backup and review. Startup only verifies schema/history compatibility and refuses pending, newer, altered or drifted databases. Existing pre-migration databases require explicit verified `pnpm db:baseline` adoption. See README for migration generation, rehearsal and restore procedures.
@@ -1232,22 +1232,21 @@ PostHog client auto-opts-out on `localhost` to keep dev events out of the prod p
 
 ## Quick Reference
 
-| Command                                    | Purpose                                              |
-| ------------------------------------------ | ---------------------------------------------------- |
-| `pnpm install`                             | Install dependencies                                 |
-| `pnpm dev`                                 | Start dev server with HMR (http://localhost:3000)    |
-| `pnpm build`                               | Production build to `.output/`                       |
-| `pnpm start`                               | Run the production build locally                     |
-| `pnpm db:migrate`                          | Apply reviewed versioned migrations explicitly       |
-| `pnpm db:studio`                           | Open Drizzle Studio (DB browser)                     |
-| `pnpm seed`                                | Manually trigger card pack seeding from REST AH      |
-| `pnpm typecheck`                           | Run TypeScript type check                            |
-| `pnpm lint`                                | Run ESLint                                           |
-| `pnpm test:e2e`                            | Run Playwright E2E suite (requires Postgres + Redis) |
-| `pnpm test:e2e:ui`                         | Playwright UI mode for debugging                     |
-| `docker compose up -d`                     | Start full stack locally                             |
-| `docker compose up -d postgres redis`      | Just deps for local dev                              |
-| `NODE_ENV=production docker compose up -d` | Production deploy (single compose file)              |
+| Command                                                                       | Purpose                                              |
+| ----------------------------------------------------------------------------- | ---------------------------------------------------- |
+| `pnpm install`                                                                | Install dependencies                                 |
+| `pnpm dev`                                                                    | Vite page development with HMR; no game WebSocket    |
+| `pnpm build`                                                                  | Build SSR and browser assets to `dist/`              |
+| `pnpm start`                                                                  | Serve the built pages and game WebSocket together    |
+| `pnpm db:migrate`                                                             | Apply reviewed versioned migrations explicitly       |
+| `pnpm db:studio`                                                              | Open Drizzle Studio (DB browser)                     |
+| `pnpm seed`                                                                   | Manually trigger card pack seeding from REST AH      |
+| `pnpm typecheck`                                                              | Run TypeScript type check                            |
+| `pnpm lint`                                                                   | Run ESLint                                           |
+| `pnpm test:e2e`                                                               | Run Playwright E2E suite (requires Postgres + Redis) |
+| `pnpm test:e2e:ui`                                                            | Playwright UI mode for debugging                     |
+| `docker compose --env-file .env.local -f docker-compose.dev.yml up -d --wait` | Start isolated local backing services                |
+| `NODE_ENV=production docker compose up -d`                                    | Production deploy (single compose file)              |
 
 ---
 
