@@ -1,4 +1,4 @@
-import type { Browser, BrowserContext, Page } from '@playwright/test'
+import { expect, type Browser, type BrowserContext, type Page } from '@playwright/test'
 
 export type PlayerHandle = {
   context: BrowserContext
@@ -233,7 +233,7 @@ export async function playRound(players: PlayerHandle[], pick: number): Promise<
   const czar = await getCzar(players)
   for (const p of players.filter((pl) => pl !== czar)) await submitCards(p, pick)
   await waitForPhase(players, 'judging')
-  await pickWinner(czar, 0)
+  await pickWinner(czar, 0, (players.length - 1) * pick)
 }
 
 // Submit N cards for a non-czar player (selects first N hand cards, submits).
@@ -266,7 +266,16 @@ export async function startReveal(czar: PlayerHandle): Promise<void> {
   }
 }
 
-// Czar picks winner at given index (clicks first visible response card in that submission slot)
-export async function pickWinner(czar: PlayerHandle, index: number): Promise<void> {
+// Reveals arrive incrementally; the server only accepts picks after all
+// submissions reveal. Callers supply the total card count, including wagers.
+export async function pickWinner(
+  czar: PlayerHandle,
+  index: number,
+  expectedCards: number,
+): Promise<void> {
+  await expect(czar.page.locator('.flip-reveal .card-response.card-clickable')).toHaveCount(
+    expectedCards,
+    { timeout: 20_000 },
+  )
   await czar.page.locator('.flip-reveal').nth(index).locator('.card-response').click()
 }

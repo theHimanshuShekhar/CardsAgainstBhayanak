@@ -68,7 +68,7 @@ test('Gambling — winner wagers on round 2, submits twice, round resolves', asy
   await waitForPhase(players, 'judging')
   await startReveal(r1czar)
   await expect(r1czar.page.locator('.flip-reveal .card-response')).toHaveCount(2 * pick1)
-  await pickWinner(r1czar, 0)
+  await pickWinner(r1czar, 0, 2 * pick1)
   await expect.poll(readRound, { timeout: 20_000 }).toBeGreaterThan(1)
 
   let gambler = await findGambler()
@@ -80,7 +80,7 @@ test('Gambling — winner wagers on round 2, submits twice, round resolves', asy
     await waitForPhase(players, 'judging')
     await startReveal(r2czar)
     await expect(r2czar.page.locator('.flip-reveal .card-response')).toHaveCount(2 * pick2round)
-    await pickWinner(r2czar, 0)
+    await pickWinner(r2czar, 0, 2 * pick2round)
     await expect.poll(readRound, { timeout: 20_000 }).toBeGreaterThan(2)
     gambler = await findGambler()
   }
@@ -163,7 +163,7 @@ test('Gambling — winner wagers on round 2, submits twice, round resolves', asy
   // A wager creates three anonymous submissions; wait for every reveal
   // before the Czar sends a command now that judging is phase-gated.
   await expect(curCzar.page.locator('.flip-reveal .card-response')).toHaveCount(3 * pick)
-  await pickWinner(curCzar, 0)
+  await pickWinner(curCzar, 0, 3 * pick)
 
   await expect(gambler!.page.locator('.winner-badge')).toBeVisible()
   receipt = undefined

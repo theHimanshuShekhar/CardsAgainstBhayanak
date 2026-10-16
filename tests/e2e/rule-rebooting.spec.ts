@@ -63,7 +63,7 @@ test('Rebooting the Universe — winner redraws, loses 1 point, refills hand', a
     for (const p of others) await submitCards(p, pick)
     await waitForPhase(players, 'judging')
     await startReveal(czar)
-    await pickWinner(czar, 0)
+    await pickWinner(czar, 0, others.length * pick)
 
     // Wait for the server's next round, including its result pause.
     await expect
