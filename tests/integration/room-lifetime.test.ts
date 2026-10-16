@@ -198,7 +198,9 @@ it('keeps the entire live match through its original lifetime and expires it aft
       submitters.map((submitter) => submitter.hand[0]!.id).sort(),
     )
     await engine.pickWinner(code, firstRound.czarId!, judging.submissions[0]!.submissionId)
-    await expect.poll(async () => (await judge.snapshot()).round).toBe(2)
+    await expect
+      .poll(() => judge.events.some((event) => event.type === 'round_started' && event.round === 2))
+      .toBe(true)
     const secondRound = await judge.snapshot()
     expect(secondRound.prompt.id).not.toBe(firstRound.prompt.id)
     const rotation = players.map((player) => player.id)
@@ -219,7 +221,9 @@ it('keeps the entire live match through its original lifetime and expires it aft
     await engine.restoreDisconnectDeadlines()
     await advance(2 * hour)
     const start = peers[0]!.events.length
-    peers[0]!.send({ type: 'rejoin' })
+    // The compressed clock does not refill the real-time snapshot budget.
+    // A heartbeat still checks participation without consuming that budget.
+    peers[0]!.send({ type: 'ping' })
     await expect
       .poll(() => peers[0]!.events.slice(start).find((event) => event.type === 'auth_error'))
       .toMatchObject({ code: 'invalid_token' })
