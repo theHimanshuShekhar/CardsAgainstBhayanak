@@ -7,6 +7,7 @@ import * as engine from '../../src/lib/game-engine'
 import { signSessionToken } from '../../src/lib/session-token'
 import type {
   EndedMatchResult,
+  GameConfig,
   GameOverMode,
   GamePlayer,
   ServerToClientEvent,
@@ -15,7 +16,6 @@ import type {
 // Real ended matches; storage is only an authentication fixture, never the
 // source of the expected winner or scores.
 async function endedRoom(code: string, mode: GameOverMode = 'normal') {
-  const hostIndex = mode === 'rando_won' ? 1 : 0
   const [pack] = await db
     .select()
     .from(packs)
@@ -25,51 +25,57 @@ async function endedRoom(code: string, mode: GameOverMode = 'normal') {
     .orderBy(packs.id)
     .limit(1)
   if (!pack) throw new Error('End-screen fixture requires 100 white cards and 3 black cards')
-  const config = {
+  const config: GameConfig = {
     maxPlayers: 4,
     roundsToWin: 5,
     timer: 'Off' as const,
     packs: [pack.id],
-    rules: [],
+    rules: mode === 'rando_won' ? ['rando'] : [],
   }
   const [room] = await db.insert(gameSessions).values({ code, config }).returning()
   const rows = await db
     .insert(gamePlayers)
     .values(
-      [mode === 'rando_won' ? 'Rando Cardrissian' : 'WinnerWinner', 'RunnerUp', 'AlsoRan'].map(
-        (username, i) => ({
-          sessionId: room!.id,
-          username,
-          score: [5, 3, 1][i],
-          isHost: i === hostIndex,
-          isRando: mode === 'rando_won' && i === 0,
-        }),
-      ),
+      ['WinnerWinner', 'RunnerUp', 'AlsoRan'].map((username, i) => ({
+        sessionId: room!.id,
+        username,
+        score: [mode === 'rando_won' ? 0 : 5, 3, 1][i],
+        isHost: i === 0,
+      })),
     )
     .returning()
   await db
     .update(gameSessions)
-    .set({ hostPlayerId: rows[hostIndex]!.id })
+    .set({ hostPlayerId: rows[0]!.id })
     .where(eq(gameSessions.id, room!.id))
   const players: GamePlayer[] = rows.map((player) => ({
     ...player,
     joinedAt: player.joinedAt.toISOString(),
     posthogAnonId: undefined,
   }))
-  await state.createGameState(code, players[hostIndex]!.id, config)
+  await state.createGameState(code, players[0]!.id, config)
   for (const player of players) await state.addPlayer(code, player)
   await engine.startGame(code)
+  let winnerId = players[0]!.id
+  if (mode === 'rando_won') {
+    // Start with three humans and let the configured rule create Rando.
+    const rando = (await state.getLivePlayers(code)).find((player) => player.isRando)
+    if (!rando) throw new Error('Rando rule did not create the synthetic participant')
+    await state.updatePlayer(code, rando.id, { score: 5 })
+    winnerId = rando.id
+  }
   await engine.startRound(code, 1)
   // A voided round still counts toward the live screen's round counter.
   await engine.voidRound(code, 'end-result fixture')
-  await engine.endGame(code, mode, players[0]!.id)
+  await engine.endGame(code, mode, winnerId)
   // Room memberships can change after completion. The frozen match result wins.
-  for (const player of players) await state.addPlayer(code, { ...player, score: 0 })
+  for (const player of await state.getAllPlayers(code))
+    await state.updatePlayer(code, player.id, { score: 0 })
   return {
     roomCode: code,
-    playerId: players[hostIndex]!.id,
-    sessionToken: await signSessionToken({ roomCode: code, playerId: players[hostIndex]!.id }),
-    username: players[hostIndex]!.username,
+    playerId: players[0]!.id,
+    sessionToken: await signSessionToken({ roomCode: code, playerId: players[0]!.id }),
+    username: players[0]!.username,
     role: 'player',
     anonId: `end-${code}`,
   }
@@ -209,7 +215,23 @@ for (const [code, mode, heading, flourish] of [
     await page.goto(`/games/${code}/end`)
     await expect(page.getByRole('heading', { name: heading })).toBeVisible()
     await expect(page.locator('.eyebrow')).toHaveText(flourish)
-    await expect(page.locator('.score-chip')).toHaveCount(3)
+    if (mode === 'rando_won') {
+      await expect(page.locator('.score-chip')).toHaveCount(4)
+      await expect(page.locator('.score-chip').first()).toContainText('Rando Cardrissian')
+      for (const [username, points] of [
+        ['Rando Cardrissian', '5 pts'],
+        ['RunnerUp', '3 pts'],
+        ['AlsoRan', '1 pt'],
+        ['WinnerWinner', '0 pts'],
+      ]) {
+        await expect(
+          page.locator('.score-chip').filter({ hasText: username }).locator('.score-meta'),
+        ).toHaveText(points!)
+      }
+      await expect(page.getByText('Decided over 2 rounds.')).toBeVisible()
+    } else {
+      await expect(page.locator('.score-chip')).toHaveCount(3)
+    }
   })
 }
 
