@@ -33,6 +33,11 @@ export const Route = createFileRoute('/api/games/$code/reset')({
           return errorResponse(400, 'internal_error', "mode must be 'rematch' or 'lobby'")
         const { mode } = parsed.data
 
+        // Body parsing can outlive membership. Revalidate before checking
+        // ownership, which may have migrated after the caller departed.
+        if (!(await authenticate(request, code)))
+          return errorResponse(401, 'not_authorized', 'Missing or invalid token')
+
         const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
         if (!session) return errorResponse(404, 'room_not_found', 'Room not found')
         if (session.hostPlayerId !== auth.playerId)
@@ -41,8 +46,6 @@ export const Route = createFileRoute('/api/games/$code/reset')({
         if (session.status !== 'ended')
           return errorResponse(409, 'invalid_state', 'Game is not over')
 
-        if (!(await authenticate(request, code)))
-          return errorResponse(401, 'not_authorized', 'Missing or invalid token')
         try {
           await engine.resetGame(code, mode, auth.playerId)
         } catch (error) {

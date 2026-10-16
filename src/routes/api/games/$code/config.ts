@@ -52,6 +52,10 @@ export const Route = createFileRoute('/api/games/$code/config')({
             .where(eq(gameSessions.code, code))
             .for('update')
           if (!session) return errorResponse(404, 'room_not_found', 'Room not found')
+          // Initial authentication already verified the token and performed
+          // pending recovery. Inside the row lock only recheck membership.
+          if (!(await checkRoomMembership(code, auth.playerId)).ok)
+            return errorResponse(401, 'not_authorized', 'Missing or invalid token')
           if (session.hostPlayerId !== auth.playerId)
             return errorResponse(403, 'host_only', 'Only the host can change the config')
           if (session.status !== 'lobby')
@@ -74,10 +78,6 @@ export const Route = createFileRoute('/api/games/$code/config')({
               { rosterSize, requested: config.maxPlayers },
             )
 
-          // Initial authentication already verified the token and performed
-          // pending recovery. Inside the row lock only recheck membership.
-          if (!(await checkRoomMembership(code, auth.playerId)).ok)
-            return errorResponse(401, 'not_authorized', 'Missing or invalid token')
           await state.updateLiveRoom(code, {}, auth.playerId, [], undefined, true)
           await tx
             .update(gameSessions)
