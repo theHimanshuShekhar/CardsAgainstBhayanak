@@ -70,6 +70,8 @@ test(
     )
     assert.ok(process.env.REDIS_URL?.endsWith('/11'), 'Dedicated issue37 Redis DB required')
     let child
+    let childClosed
+    let spawnError
     let log = ''
     const peers = []
     async function start() {
@@ -80,9 +82,19 @@ test(
       } catch (error) {
         if (error.code === 'ERR_ASSERTION') throw error
       }
+      log = ''
+      spawnError = undefined
       child = spawn(process.execPath, ['--import', 'tsx', 'server.prod.ts'], {
         env: { ...process.env, NODE_ENV: 'test', PORT: '3137', PUBLIC_SITE_URL: base },
         stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      // Observe closure at spawn, including a child that fails before
+      // readiness. Cleanup must never subscribe after its exit was emitted.
+      childClosed = new Promise((resolve) =>
+        child.once('close', (code, signal) => resolve({ code, signal })),
+      )
+      child.once('error', (error) => {
+        spawnError = error
       })
       child.stdout.on('data', (data) => {
         log += data
@@ -92,6 +104,12 @@ test(
       })
       try {
         await until(async () => {
+          if (spawnError || child.exitCode !== null || child.signalCode !== null) {
+            const result = await childClosed
+            throw new Error(
+              `Owned server exited before readiness (code=${result.code}, signal=${result.signal}): ${spawnError?.message ?? ''}\n${log}`,
+            )
+          }
           try {
             return (await fetch(base + '/api/healthz')).ok
           } catch {
@@ -99,14 +117,16 @@ test(
           }
         }, 15000)
       } catch (error) {
-        throw new Error(log, { cause: error })
+        throw new Error(`Owned server failed readiness: ${log}`, { cause: error })
       }
     }
     async function kill() {
-      const exited = once(child, 'exit')
-      child.kill('SIGKILL')
-      await exited
+      const owned = child
+      const closed = childClosed
       child = undefined
+      childClosed = undefined
+      if (owned.exitCode === null && owned.signalCode === null) owned.kill('SIGKILL')
+      await closed
     }
     async function socket(member) {
       const peer = await connect(member)
