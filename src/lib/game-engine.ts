@@ -1327,6 +1327,7 @@ async function claimCompletionIntent(
   return (
     (await redis.eval(
       `${ROOM_LIFETIME_LUA}
+    if not redis.call('HGET', KEYS[2], 'status') then return 0 end
     if redis.call('HGET', KEYS[1], 'roundId') ~= ARGV[1]
       or redis.call('HGET', KEYS[1], 'phase') ~= ARGV[2]
       or redis.call('HEXISTS', KEYS[1], 'outcomeClaim') == 1 then return 0 end
@@ -2323,7 +2324,19 @@ async function continuePlayerDrop(code: string, playerId: string): Promise<void>
       voidNextRound?: number
       voidReturnedPlayers?: string[]
     }
-    await finishPlayerDrop(code, playerId, intent)
+    try {
+      await finishPlayerDrop(code, playerId, intent)
+    } catch (error) {
+      // The drop was accepted and SQL records the permanent departure before
+      // live effects begin. Expiry during a blocked continuation terminates
+      // those effects; it must not turn an accepted leave into a server error.
+      if (
+        !(error instanceof GameCommandError) ||
+        error.code !== 'invalid_token' ||
+        (await redis.hget(KEYS.game(code), 'status')) !== null
+      )
+        throw error
+    }
     // Do not acknowledge until SQL, ownership and original-round effects finish.
     await redis.hdel(KEYS.drops(code), playerId)
   })()
