@@ -115,14 +115,18 @@ test('retry removes unavailable selected packs and preserves available selection
     .filter({ has: page.locator('.check-card-title', { hasText: retained.name }) })
     .click()
   await page.getByRole('button', { name: '← Back' }).click()
-  let attempt = 0
+  // StrictMode may start the mount effect more than once. Keep the public
+  // network unavailable until the player explicitly retries, rather than
+  // treating an incidental second request as recovery.
+  let retryRequested = false
   await page.route('**/api/packs', async (route) => {
-    attempt += 1
-    if (attempt === 1) await route.abort('failed')
+    if (!retryRequested) await route.abort('failed')
     else await route.fulfill({ json: { packs: packs.filter((pack) => pack.id !== removed.id) } })
   })
   await page.getByRole('button', { name: /Create a game/i }).click()
   await expect(page.getByText('Card packs could not be loaded. Please retry.')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Create lobby', exact: true })).toBeDisabled()
+  retryRequested = true
   await page.getByRole('button', { name: 'Retry loading packs' }).click()
   await expect(page.getByRole('button', { name: 'Create lobby', exact: true })).toBeEnabled()
   await expect(
