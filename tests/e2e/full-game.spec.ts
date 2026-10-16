@@ -215,7 +215,7 @@ test('6-player 5-win golden path', async ({ browser }) => {
     const pick = await handPickCount(nonCzars[0]!)
     for (const np of nonCzars) await submitCards(np, pick)
     await waitForPhase(allHandles, 'judging')
-    await pickWinner(czar, 0)
+    await pickWinner(czar, 0, nonCzars.length * pick)
     // Deciding round ⇒ game_over ⇒ every player navigates to /end;
     // otherwise the next round's picking phase begins. Exactly one of
     // these resolves quickly, so the race is unambiguous.

@@ -59,7 +59,7 @@ test('Happy Ending — host triggers forced Haiku final round', async ({ browser
   for (const p of others) await submitCards(p, pick)
   await waitForPhase(players, 'judging')
   await startReveal(czar)
-  await pickWinner(czar, 0)
+  await pickWinner(czar, 0, others.length * pick)
 
   // The next round's prompt reads "Make a Haiku."
   await expect(host.page.locator('.card-prompt')).toContainText('Make a Haiku', { timeout: 30_000 })
