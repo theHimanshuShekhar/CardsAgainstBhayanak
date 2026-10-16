@@ -43,6 +43,7 @@ type Event = {
   round?: number
   scores?: PlayerScore[]
   hand?: Card[]
+  discardsUsed?: number
   playerId?: string
   activatedPlayers?: string[]
   czarId?: string
@@ -66,6 +67,7 @@ const cases = [
   ['normal', 'end_game_sql'],
   ['normal', 'completionGameOverPublished'],
   ['normal', 'completionEndPublished'],
+  ['normal', 'confession_before_completion_publish'],
   ['survival', 'completionEndPublished'],
   ['godmode', 'closed_ballot'],
   ['survival', 'last_elimination'],
@@ -105,10 +107,16 @@ it.each(cases)(
       roundsToWin: finishesGame ? 1 : 10,
       timer: 'Off' as const,
       packs: [pack!.id],
-      rules: mode === 'normal' ? [] : [mode as RuleId],
+      rules:
+        fault === 'confession_before_completion_publish'
+          ? ['never_have_i_ever' as RuleId]
+          : mode === 'normal'
+            ? []
+            : [mode as RuleId],
     }
     const [session] = await db.insert(gameSessions).values({ code, config }).returning()
     let restoreFault = () => {}
+    let confessed: { playerId: string; cardId: string } | undefined
     let snapshotSocket: WebSocket | undefined
     let snapshotServer: import('srvx').Server | undefined
     const originalPause = process.env['CAB_ROUND_RESULT_PAUSE_MS']
@@ -204,7 +212,24 @@ it.each(cases)(
         )
         return
       }
-      if (fault === 'terminal_lookup_sql') {
+      if (fault === 'confession_before_completion_publish') {
+        const realEval = redis.eval.bind(redis)
+        let injected = false
+        const spy = vi
+          .spyOn(redis, 'eval')
+          .mockImplementation(async (...args: Parameters<typeof redis.eval>) => {
+            if (!injected && String(args[0]).includes("'completionEndPublished', '1'")) {
+              injected = true
+              const update = (JSON.parse(String(args[Number(args[1]) + 3])) as Event[])[0]!
+              confessed = { playerId: update.playerId!, cardId: update.hand![0]!.id }
+              await engine.confessDiscard(code, confessed.playerId, confessed.cardId)
+              await realEval(...args)
+              throw new Error('lost completion acknowledgement after concurrent confession')
+            }
+            return realEval(...args)
+          })
+        restoreFault = () => spy.mockRestore()
+      } else if (fault === 'terminal_lookup_sql') {
         // Make SQL unavailable immediately after the terminal outcome is accepted.
         // The real failing query must be inside an automatically retried continuation.
         const realEval = redis.eval.bind(redis)
@@ -373,6 +398,19 @@ it.each(cases)(
           { timeout: 10_000 },
         )
         .toBe(1)
+      if (fault === 'confession_before_completion_publish') {
+        const updates = events.filter(
+          (event) => event.type === 'hand_update' && event.playerId === confessed!.playerId,
+        )
+        expect(updates).toHaveLength(2)
+        for (const update of updates) {
+          expect(update.discardsUsed).toBe(1)
+          expect(update.hand).toHaveLength(10)
+          expect(update.hand!.some((card) => card.id === confessed!.cardId)).toBe(false)
+        }
+        expect(events.filter((event) => event.type === 'round_end')).toHaveLength(1)
+        return
+      }
       const outcomes = events.filter((e) => e.type === 'round_won' || e.type === 'round_ranked')
       expect(outcomes).toHaveLength(1)
       if (fault === 'outcome_sql')
