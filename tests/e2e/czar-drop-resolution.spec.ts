@@ -412,6 +412,7 @@ test('a delayed Survival Czar departure cannot resolve after the live room expir
         ),
     ).toBe(false)
     expect(response.status).toBe(204)
+    expect(await redis.exists(root), 'fallback must not recreate the expired room').toBe(0)
     expect(
       (await post(`/api/games/${game.host.roomCode}/leave`, {}, observer.sessionToken)).status,
     ).toBe(401)

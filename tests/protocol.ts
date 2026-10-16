@@ -93,7 +93,9 @@ export type HappyEndingResult = {
 
 export type CzarDropResult = {
   roundVoided: boolean
-  voidedRound: number
+  winnerCount: number
+  winnerScore: number
+  roundEndCount: number
   round2Started: boolean
   czarRotated: boolean
 }
@@ -482,8 +484,8 @@ export async function playHappyEnding(base: string, handlePrefix = ''): Promise<
 }
 
 // S2-1: the Czar disconnects mid-judging and never returns. After the
-// grace window the round must be voided (cards returned, black discarded)
-// and a fresh round started with a *different* Czar.
+// grace window the revealed round resolves once and starts its successor
+// with a different Czar. Pre-reveal voiding is covered separately.
 export async function playCzarDrop(base: string): Promise<CzarDropResult> {
   const packsJson = (await (await fetch(base + '/api/packs')).json()) as {
     packs: { id: string; name: string }[]
@@ -522,70 +524,59 @@ export async function playCzarDrop(base: string): Promise<CzarDropResult> {
     idByName[name] = joins[i]!.json.playerId
   }
 
-  const s = await post(base, `/api/games/${code}/start`, {}, c.json.sessionToken)
-  if (s.status !== 204) throw new Error(`start ${s.status}`)
-  await sleep(800)
-  for (const p of Object.values(peers)) send(p, { type: 'rejoin' })
-  await sleep(1200)
+  let ka: ReturnType<typeof setInterval> | undefined
+  try {
+    const s = await post(base, `/api/games/${code}/start`, {}, c.json.sessionToken)
+    if (s.status !== 204) throw new Error(`start ${s.status}`)
+    await sleep(800)
+    for (const p of Object.values(peers)) send(p, { type: 'rejoin' })
+    await sleep(1200)
 
-  const snap = Object.values(peers).find((p) => p.snapshot)?.snapshot
-  if (!snap) throw new Error('no snapshot after start')
-  const czarId = snap.czarId as string
-  const pick = snap.prompt.pick as number
+    const snap = Object.values(peers).find((p) => p.snapshot)?.snapshot
+    if (!snap) throw new Error('no snapshot after start')
+    const czarId = snap.czarId as string
+    const pick = snap.prompt.pick as number
 
-  // Non-Czar players submit → the round reaches reveal/judging.
-  for (const [name, id] of Object.entries(idByName)) {
-    if (id === czarId) continue
-    const hand = peers[name]!.snapshot?.hand ?? []
-    send(peers[name]!, { type: 'play', cardIds: hand.slice(0, pick).map((x: any) => x.id) })
-  }
-
-  const czarName = Object.entries(idByName).find(([, id]) => id === czarId)![0]
-  const czar = peers[czarName]!
-  const observer = Object.values(peers).find((p) => idByName[p.name] !== czarId)!
-  await waitFor(czar, 'reveal_start')
-  await sleep(700 * 4 + 500)
-
-  // Czar vanishes mid-judging (never picks); grace expiry voids the round.
-  czar.ws.close()
-  // Keep the observer's socket past the 30s grace + keepalive window.
-  const ka = setInterval(() => {
-    try {
-      send(observer, { type: 'ping' })
-    } catch {
-      /* socket closing */
+    // Non-Czar players submit → the round reaches reveal/judging.
+    for (const [name, id] of Object.entries(idByName)) {
+      if (id === czarId) continue
+      const hand = peers[name]!.snapshot?.hand ?? []
+      send(peers[name]!, { type: 'play', cardIds: hand.slice(0, pick).map((x: any) => x.id) })
     }
-  }, 10_000)
 
-  const voided = await waitFor(observer, 'round_voided', 40_000).then(
-    (e) => e,
-    () => null,
-  )
-  // Must use waitForNth: round 1's round_started is already in observer.events
-  // from the start of the game, so a plain waitFor returns immediately on the
-  // stale event and the synchronous .find(e.round === 2) races the void →
-  // restart gap. waitForNth waits for the second round_started specifically.
-  const r2 = voided
-    ? await waitForNth(observer, 'round_started', 2, 10_000).then(
-        (e) => e,
-        () => null,
-      )
-    : null
-  clearInterval(ka)
+    const czarName = Object.entries(idByName).find(([, id]) => id === czarId)![0]
+    const czar = peers[czarName]!
+    const observer = Object.values(peers).find((p) => idByName[p.name] !== czarId)!
+    await waitFor(czar, 'reveal_start')
+    await sleep(700 * 4 + 500)
 
-  for (const p of Object.values(peers)) {
-    try {
-      p.ws.close()
-    } catch {
-      /* already closed */
+    // Czar vanishes mid-judging; grace expiry picks a winner automatically.
+    czar.ws.close()
+    // Keep the observer's socket past the 30s grace + keepalive window.
+    ka = setInterval(() => {
+      try {
+        send(observer, { type: 'ping' })
+      } catch {
+        /* socket closing */
+      }
+    }, 10_000)
+
+    const outcome = await waitFor(observer, 'round_won', 40_000)
+    await waitFor(observer, 'round_end', 10_000)
+    const r2 = await waitForNth(observer, 'round_started', 2, 10_000)
+    return {
+      roundVoided: observer.events.some((event) => event.type === 'round_voided'),
+      winnerCount: observer.events.filter((event) => event.type === 'round_won').length,
+      winnerScore:
+        outcome.scores.find((score: any) => score.playerId === outcome.winningPlayerId)?.score ??
+        -1,
+      roundEndCount: observer.events.filter((event) => event.type === 'round_end').length,
+      round2Started: !!r2,
+      czarRotated: !!r2 && r2.czarId !== czarId,
     }
-  }
-
-  return {
-    roundVoided: !!voided,
-    voidedRound: voided?.round ?? -1,
-    round2Started: !!r2,
-    czarRotated: !!r2 && r2.czarId !== czarId,
+  } finally {
+    if (ka) clearInterval(ka)
+    for (const peer of Object.values(peers)) peer.ws.close()
   }
 }
 
