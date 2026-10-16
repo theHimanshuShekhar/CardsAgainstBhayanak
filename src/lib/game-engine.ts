@@ -1695,44 +1695,67 @@ async function completeRoundCards(code: string, roundId: string): Promise<void> 
   const recipients = [
     ...new Set([...Object.keys(intent.submissions).map(resolvePlayerId), ...activation]),
   ]
-  const handEvents = []
-  for (const pid of recipients) {
-    const ids = await state.getHand(code, pid)
-    const cards = ids.length
-      ? await db.select().from(whiteCards).where(inArray(whiteCards.id, ids))
-      : []
-    handEvents.push({
-      type: 'hand_update',
-      playerId: pid,
-      hand: ids
-        .map((id) => cards.find((c) => c.id === id)!)
-        .filter(Boolean)
-        .map((c) => ({ id: c.id, text: c.text })),
-    })
-  }
-  await redis.eval(
-    `
+  while (true) {
+    const handEvents = []
+    for (const pid of recipients) {
+      const [ids, player] = await Promise.all([
+        state.getHand(code, pid),
+        state.getPlayer(code, pid),
+      ])
+      if (!player) continue
+      const cards = ids.length
+        ? await db.select().from(whiteCards).where(inArray(whiteCards.id, ids))
+        : []
+      handEvents.push({
+        type: 'hand_update',
+        playerId: pid,
+        discardsUsed: player.discardsUsed,
+        hand: ids
+          .map((id) => cards.find((c) => c.id === id)!)
+          .filter(Boolean)
+          .map((c) => ({ id: c.id, text: c.text })),
+      })
+    }
+    const published = await redis.eval(
+      `
     if redis.call('HGET', KEYS[1], 'completionIntent') ~= ARGV[1]
-      or redis.call('HEXISTS', KEYS[1], 'completionEndPublished') == 1 then return end
+      or redis.call('HEXISTS', KEYS[1], 'completionEndPublished') == 1 then return 1 end
+    local events = cjson.decode(ARGV[2])
+    -- Card hydration awaits SQL. A legal confession/redraw may have changed
+    -- a recipient since the read; validate the whole batch before publication.
+    for _, event in ipairs(events) do
+      local player = cjson.decode(redis.call('HGET', KEYS[10], event.playerId) or '{}')
+      if (player.discardsUsed or 0) ~= event.discardsUsed then return 0 end
+      local current = redis.call('LRANGE', ARGV[4] .. event.playerId, 0, -1)
+      if #current ~= #event.hand then return 0 end
+      for i, id in ipairs(current) do
+        if event.hand[i].id ~= id then return 0 end
+      end
+    end
     for _, event in ipairs(cjson.decode(ARGV[2])) do redis.call('PUBLISH', KEYS[2], cjson.encode(event)) end
     redis.call('PUBLISH', KEYS[2], ARGV[3])
-    for i=3,#KEYS do redis.call('DEL', KEYS[i]) end
+    for i=3,9 do redis.call('DEL', KEYS[i]) end
     redis.call('HSET', KEYS[1], 'completionEndPublished', '1')
+    return 1
   `,
-    9,
-    KEYS.game(code),
-    KEYS.channel(code),
-    subOrderKey(code),
-    resolvingKey(code),
-    revealedKey(code),
-    voteTallyKeyFor(code),
-    tieKeyFor(code),
-    votersKeyFor(code),
-    voterChoicesKeyFor(code),
-    raw,
-    JSON.stringify(handEvents),
-    JSON.stringify({ type: 'round_end', activatedPlayers: activation }),
-  )
+      10,
+      KEYS.game(code),
+      KEYS.channel(code),
+      subOrderKey(code),
+      resolvingKey(code),
+      revealedKey(code),
+      voteTallyKeyFor(code),
+      tieKeyFor(code),
+      votersKeyFor(code),
+      voterChoicesKeyFor(code),
+      KEYS.players(code),
+      raw,
+      JSON.stringify(handEvents),
+      JSON.stringify({ type: 'round_end', activatedPlayers: activation }),
+      `game:${code}:hand:`,
+    )
+    if (published === 1) return
+  }
 }
 
 export async function endRound(
