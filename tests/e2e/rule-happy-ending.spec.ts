@@ -130,10 +130,13 @@ test('Happy Ending — trailing Haiku winner beats the cumulative leader', async
       const czar = await getCzar(players)
       const submitters = players.filter((p) => p !== czar)
       leader ??= submitters[0]!
+      // Cap the leader at two wins: the seeded Czar rotation depends on how
+      // many games earlier specs played, and a leader who only judges in
+      // round 4 would otherwise win all three opening rounds.
       const chosen =
         round === 4
           ? submitters.find((p) => wins.get(p) === 0)!
-          : submitters.includes(leader)
+          : submitters.includes(leader) && wins.get(leader)! < 2
             ? leader
             : submitters.find((p) => p !== leader)!
       if (round === 3) {

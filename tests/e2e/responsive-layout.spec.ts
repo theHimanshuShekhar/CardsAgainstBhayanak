@@ -163,3 +163,64 @@ test('round-1 hand + Submit + prompt render correctly across screen sizes', asyn
 
   await Promise.all(all.map((h) => h.context.close()))
 })
+
+// The round timer used to be absolutely positioned over the top-right of the
+// prompt column, so the centred "The prompt · <czar> is judging" eyebrow ran
+// underneath it on phones (and on desktop with a long czar handle). Every
+// handle is the 20-character maximum so whoever is Czar stresses the eyebrow.
+// The eyebrow must also stay one line tall: a taller head pushes the prompt
+// card down behind the sticky hand dock on phones and tablets.
+test('round timer never overlaps the prompt eyebrow or card', async ({ browser }) => {
+  test.setTimeout(120_000)
+  const names = ['Abcdefghijklmnopqrs1', 'Abcdefghijklmnopqrs2', 'Abcdefghijklmnopqrs3']
+  const { handle: host, roomCode } = await createGame(browser, names[0]!, { roundsToWin: 3 })
+  const p1 = await joinGame(browser, names[1]!, roomCode)
+  const p2 = await joinGame(browser, names[2]!, roomCode)
+  const all = [host, p1, p2]
+
+  await expect(host.page.locator('button:has-text("Start game")')).toBeEnabled({ timeout: 15_000 })
+  await host.page.click('button:has-text("Start game")')
+  await Promise.all(all.map((h) => h.page.waitForURL('**/session', { timeout: 20_000 })))
+  await waitForPhase(all, 'picking')
+
+  const czar = await getCzar(all)
+  const page = all.find((h) => h !== czar)!.page
+  await expect(page.locator('.stage-timer')).toBeVisible({ timeout: 15_000 })
+
+  for (const s of [
+    ...SIZES,
+    { name: 'iphone', w: 390, h: 844 },
+    { name: 'iphone-max', w: 430, h: 932 },
+    { name: 'tablet', w: 768, h: 1024 },
+    { name: 'small-laptop', w: 1024, h: 768 },
+  ]) {
+    await page.setViewportSize({ width: s.w, height: s.h })
+    await page.waitForTimeout(400)
+    const layout = await page.evaluate(() => {
+      const box = (sel: string) => document.querySelector(sel)!.getBoundingClientRect()
+      const timer = box('.stage-timer')
+      const hit = (r: DOMRect) =>
+        timer.left < r.right && r.left < timer.right && timer.top < r.bottom && r.top < timer.bottom
+      const eyebrow = box('.stage-prompt-hero .eyebrow')
+      const lineHeight = parseFloat(
+        getComputedStyle(document.querySelector('.stage-prompt-hero .eyebrow')!).lineHeight,
+      )
+      return {
+        timerOverEyebrow: hit(eyebrow),
+        timerOverPrompt: hit(box('.stage-prompt-hero .card-prompt')),
+        timerOffscreen: timer.left < 0 || timer.right > window.innerWidth,
+        eyebrowWraps: eyebrow.height > (Number.isNaN(lineHeight) ? 20 : lineHeight * 1.5),
+        czarHidden: box('.stage-prompt-czar').width < 30,
+      }
+    })
+    expect(layout, `[${s.name} ${s.w}x${s.h}] prompt head layout`).toEqual({
+      timerOverEyebrow: false,
+      timerOverPrompt: false,
+      timerOffscreen: false,
+      eyebrowWraps: false,
+      czarHidden: false,
+    })
+  }
+
+  await Promise.all(all.map((h) => h.context.close()))
+})
