@@ -1,224 +1,105 @@
 # Cards Against Bhayanak
 
-A real-time multiplayer Cards Against Humanity clone. Jackbox-style: no accounts, 6-char room codes, up to 10 players. Includes all 8 official 2014 CAH house rules.
+**A horrible card game for horrible friends.**
 
-**Canonical spec:** [`SPEC.md`](SPEC.md)  
-**Agent guidance:** [`CLAUDE.md`](CLAUDE.md)
+One person reads a black card. Everyone else plays the worst white card they're holding. The Card Czar picks a favourite, someone gets an Awesome Point, and your group chat never looks at you the same way again.
 
-## Quickstart
+No downloads. No accounts. No "wait, which app is it?" Make a room, share the six-character code, and start ruining friendships in under a minute.
 
-Use **Node 22**, **pnpm 10.33.0** (the version in `package.json`), and Docker
-with the Compose plugin (`docker compose`). The initial seed requires access to
-`https://restagainsthumanity.com`. Run these commands from a fresh checkout in
-Bash or Zsh:
+👉 **[Deal a hand at cards.bhayanak.net](https://cards.bhayanak.net)**
 
-```bash
-# Disposable local credentials, loopback ports, and a separate Compose project
-cp .env.local.example .env.local
-set -a
-source .env.local
-set +a
+![The Card Czar reveals five answers to "What will I bring back in time to convince people that I am a powerful wizard?" and awards the point to Fancy Feast](docs/screenshots/judging.jpg)
 
-# Start isolated Postgres + Valkey with ordinary local Docker volumes
-docker compose --env-file .env.local -f docker-compose.dev.yml up -d --wait
+---
 
-# Install dependencies
-pnpm install --frozen-lockfile
+## Why Cards Against Bhayanak?
 
-# Apply schema
-pnpm db:migrate
+### 🃏 The real deck. All of it.
 
-# Seed cards from REST Against Humanity API
-pnpm seed
+More than **70 packs and over 5,000 cards**, including the base set, the expansions, the holiday packs, and a few you'll be sorry you turned on. Mix and match whatever packs you like. The dealer will happily serve "Dead parents." to your mum.
 
-# Build and start the combined HTTP + WebSocket server
-pnpm build
-pnpm start
-# → http://localhost:3000
-```
+### 🚪 Get in like it's Jackbox
 
-Leave the final command running. Open the URL in three independent browser
-profiles (or separate browsers), create a room, join it with two more players,
-and start the game. Each non-Czar submits the requested cards; the Czar picks a
-winner after the reveal. A point is awarded and the next round starts.
-`curl http://localhost:3000/api/healthz` checks backing-service and recovery
-readiness; the multiplayer round also verifies the WebSocket connection.
+The host makes a room and reads out a code like `H2U-J3X`. Everyone else types it in, picks a handle, and they're in. Nobody makes a password. Nobody verifies an email. Nobody downloads anything "just for tonight".
 
-The local file is ignored by Git. Its PostgreSQL/Valkey credentials and session
-secret are explicit, disposable examples. `docker-compose.dev.yml` is standalone:
-it has no deployment storage mounts, fixed container names, or app container.
-If a port is occupied, edit `POSTGRES_PORT`, `REDIS_PORT`, or `PORT` in
-`.env.local` **before** sourcing it. For another checkout running concurrently,
-also choose a different `COMPOSE_PROJECT_NAME`; each project owns its own
-network and volumes. The connection URLs derive from those values when sourced.
-Source `.env.local` again in each new terminal before running `pnpm` commands;
-the migration, seed, and production-entry CLIs do not load it automatically.
+![The lobby with room code H2U-J3X, five players waiting, and game options for max players, rounds to win and the round timer](docs/screenshots/lobby.jpg)
 
-For page/layout work, `pnpm dev --port 3000` provides Vite HMR, but **does not
-support the game WebSocket**. Use `pnpm build` followed by `pnpm start` for
-multiplayer, and repeat the build after source changes. Stop one server before
-starting another against the same backing services.
+### 🖐️ A hand you'll want to hide from your boss
 
-Stop the app with Ctrl-C, then stop local backing services while retaining data:
+You hold ten cards. Tap the one that hurts, or two or three of them in order when the prompt asks for more, and hit submit. Everyone plays in secret. The answers flip face up one at a time, without names, so the Czar can't play favourites. They'll still play favourites.
 
-```bash
-docker compose --env-file .env.local -f docker-compose.dev.yml down
-# To discard only this local project's data as well:
-docker compose --env-file .env.local -f docker-compose.dev.yml down --volumes
-```
+![A player's hand of ten white cards under the prompt "BILLY MAYS HERE FOR ____." with one card picked and a 56-second timer running](docs/screenshots/hand.jpg)
 
-## Environment variables
+### 📜 Every official house rule, already printed out
 
-The local quickstart uses `.env.local.example` above. For the **deployment
-Docker stack**, copy `.env.example` to `.env`. `DATABASE_URL`
-and `REDIS_URL` are derived inside `docker-compose.yml` — don't set them.
-Configure deployment storage separately (see below). `compose up` fails fast
-unless `POSTGRES_PASSWORD`, `SESSION_SECRET`, and `PUBLIC_SITE_URL` are set:
+All eight house rules from the official rulebook are built in, so nobody has to remember them and nobody gets to make up "it's my house" rules halfway through.
 
-| Variable                           | Required | Purpose                                                            |
-| ---------------------------------- | -------- | ------------------------------------------------------------------ |
-| `POSTGRES_PASSWORD`                | ✅       | Postgres password; also feeds `DATABASE_URL`                       |
-| `SESSION_SECRET`                   | ✅       | HMAC secret for session tokens (≥32 chars)                         |
-| `PUBLIC_SITE_URL`                  | ✅       | Public HTTPS origin for share previews                             |
-| `PORT`                             |          | Host/container port (default `3000`)                               |
-| `APP_BIND_IP`                      |          | Compose host bind address (default `127.0.0.1`)                    |
-| `CAB_TRUSTED_PROXY_IPS`            |          | Comma-separated immediate Cloudflare ingress IPs; empty by default |
-| `NODE_ENV`                         |          | Default `production` (enforces rate limiting)                      |
-| `AXIOM_TOKEN` + `AXIOM_DATASET`    |          | Log shipping (prod only)                                           |
-| `POSTHOG_API_KEY` + `POSTHOG_HOST` |          | Product analytics / replay (prod only)                             |
+- **Rebooting the Universe:** pay a point to throw out your whole hand and draw a new one.
+- **Packing Heat:** draw an extra card when the prompt says pick two.
+- **Rando Cardrissian:** an imaginary player who plays random cards every round. If Rando wins, everybody goes home in a state of everlasting shame.
+- **God Is Dead:** there is no Czar. The table votes.
+- **Survival of the Fittest:** take turns killing off answers until only one is left.
+- **Serious Business:** the Czar ranks the top three for 3, 2 and 1 points.
+- **Never Have I Ever:** throw away a card you don't understand, three times a game. Confessing your ignorance out loud is on the honour system.
+- **Happy Ending:** the host calls last orders and everyone plays one final "Make a haiku."
 
-## Commands
+Mix the extras freely. The Czar-replacing ones (God Is Dead, Survival, Serious Business) don't mix, because chaos needs _some_ structure.
 
-| Command           | Purpose                                     |
-| ----------------- | ------------------------------------------- |
-| `pnpm dev`        | Page development with HMR (no game sockets) |
-| `pnpm build`      | Production build                            |
-| `pnpm start`      | Run built HTTP + WebSocket server           |
-| `pnpm typecheck`  | TypeScript check                            |
-| `pnpm lint`       | ESLint                                      |
-| `pnpm test`       | Unit tests (Vitest)                         |
-| `pnpm test:e2e`   | E2E tests (Playwright, requires DB+Redis)   |
-| `pnpm db:migrate` | Apply reviewed versioned migrations         |
-| `pnpm db:studio`  | Drizzle Studio                              |
-| `pnpm seed`       | Seed card packs                             |
+![The create-game screen with Packing Heat and Rando Cardrissian switched on and the other house rules listed](docs/screenshots/house-rules.jpg)
 
-`pnpm test:integration` runs the real-service game-engine regressions separately
-from unit tests. Set `DATABASE_URL` and `REDIS_URL` to dedicated disposable
-PostgreSQL/Redis databases, apply `pnpm db:migrate`, and seed the card catalog
-with `pnpm seed` before running it. A seeded pre-migration test database must
-first use `pnpm db:baseline`. Missing services or cards fail this command;
-these tests are never silently skipped. The timer regression controls only
-wall-clock time and scheduled round callbacks, preserving monotonic rate-limit
-clocks and real service IO. It observes the engine event stream delivered to
-WebSocket clients and removes its own room fixtures afterward.
+### 🎲 Gamble on your own terrible taste
 
-E2E tests use disposable PostgreSQL and Redis databases: global teardown removes game data and flushes the selected Redis database. The automatic Playwright server uses a 2000ms round-result pause so browser tests can reload while the winning cards remain visible. Production keeps its 4000ms pause.
+Not sure your answer will land? Bet one Awesome Point to play a second one. If either wins, you keep the point. If both bomb, the point goes to whoever beat you.
 
-When targeting an already running server with `CAB_E2E_BASE`, start that server with `CAB_ROUND_RESULT_PAUSE_MS=2000` (or the production 4000ms pause), and use the same isolated database and Redis settings for the test runner. A 150ms result pause is too short for the winner refresh assertions.
+### ⏱️ A timer for that one friend
 
-## Production
+Give everyone 30, 60 or 90 seconds to play a card, or switch the timer off if your crew enjoys watching someone agonise. Whoever runs out of time sits the round out. First to 3, or as many as 20, Awesome Points wins.
 
-`docker-compose.yml` is the deployment stack; local development uses the
-standalone `docker-compose.dev.yml` above. Provide a `.env` (see above; `SESSION_SECRET` ≥32 chars —
-`openssl rand -hex 32`), then:
+### 📶 Drops don't kill the round
 
-```bash
-docker compose up -d
-```
+Phone died? Tab closed? Wi-Fi gave up? You have 30 seconds to come back, and you'll get the same seat and the same hand. Showed up late? Join halfway through and you'll be dealt in next round. Want to just watch? Come in as a spectator and judge silently, like you always do.
 
-`NODE_ENV` defaults to `production` (rate limiting enforced). All three
-services have healthchecks; the app is `build: .` — rebuild with
-`docker compose build app && docker compose up -d app` after source changes.
+### 🏆 Somebody wins. Everybody loses.
 
-Cloudflare Tunnel is managed externally — see `SPEC.md § Deployment` for details.
+Crown a winner, then hit **Rematch** to run it back with the same people or **Back to lobby** to change the settings. The public stats page keeps count of every game, every round and every Rando victory, so the shame lasts.
 
-Run one app process with its own PostgreSQL database and dedicated Redis database.
-The production entry refuses a competing owner before starting engines or jobs;
-ownership loss stops the process and requires a supervisor restart. Stop the old
-app before starting a replacement. See [runtime ownership and future scaling](docs/operations/runtime-ownership.md)
-for the storage/proxy constraints, recovery behavior and deployment regression.
+![Game over: Kabir wins with 4 points, ahead of Himanshu, Priya, Arjun, Rando Cardrissian and Zoya, with Rematch, Back to lobby, New room and Go home buttons](docs/screenshots/end.jpg)
 
-### Trusted ingress and rate-limit identity
+### 🖤 Black and white, like the box
 
-The production server uses the TCP socket's remote IP for create/join budgets.
-`CAB_TRUSTED_PROXY_IPS` is an explicit allowlist of literal IPv4/IPv6 addresses
-of immediate Cloudflare Tunnel peers. It defaults to empty, including for
-loopback. Only an allowlisted peer may supply a valid `CF-Connecting-IP`.
-Missing or invalid values fall back to that peer's socket IP. IPv6 spellings
-and IPv4-mapped IPv6 are canonicalized; `X-Forwarded-For` and `Forwarded` are
-ignored. Hostnames, CIDRs, and wildcards are not supported; invalid allowlist
-entries prevent the production server from starting.
+Strict black-and-white design, big chunky type, and cards that look like cards. It's built for a laptop on a coffee table or a phone in a sweaty hand.
 
-Compose publishes the app on `127.0.0.1:${PORT:-3000}`, preserving the external
-host `cloudflared` tunnel's `http://localhost:3000` origin. Set
-`CAB_TRUSTED_PROXY_IPS` to the actual peer address seen inside the app container;
-Docker NAT often presents the bridge gateway for host-originated connections.
-Inspect your Docker network's gateway and verify the peer in your own topology
-before configuring it. Until configured, tunnel visitors share the tunnel
-peer's budget. A separately managed tunnel container can use the app's Docker
-network address with a stable, explicitly allowlisted tunnel address. There is
-no tunnel service in this Compose stack.
+### 🔗 Links that look good in Discord
 
-Trusted ingress must overwrite the visitor's `CF-Connecting-IP`, and access to
-the origin through trusted peers must be restricted to that ingress. Processes
-on an allowlisted host, or other traffic NATed to the same allowlisted gateway,
-are inside this trust boundary and can assert client identity. Loopback binding
-limits host port exposure; it does not authenticate local processes or isolate
-containers on a shared network. Keep that network restricted. `APP_BIND_IP`
-can select another host interface when an external tunnel requires it; restrict
-access to that interface before enabling header trust.
+Paste a room link into Discord, WhatsApp, Slack or X and it unfurls into a proper invite card. The preview never shows your room code or anyone's handle, so posting a link doesn't leak who's playing.
 
-For local `pnpm start`, the allowlist is empty unless explicitly configured.
-Local `pnpm dev` may lack socket context, in which case identity falls back to
-`unknown`; it still ignores forwarding headers. Rate enforcement remains
-enabled only with `NODE_ENV=production`. Production HTTP identity regression
-tests start their own production entry server and real reverse proxy, with
-temporary PostgreSQL/Valkey containers owned by the fixture (Docker required):
+---
 
-```bash
-pnpm build
-pnpm exec playwright test tests/e2e/http-client-identity.spec.ts
-```
+## Plays on whatever you're holding
 
-### Seeded replay regression
+Desktop browser, tablet, phone: if it has a browser, it can deal. On a phone, your hand scrolls along the bottom of the screen, so you can play from the couch, the bus, or a family dinner you should really be paying attention to.
 
-`tests/e2e/seeded-tiebreak.spec.ts` requires a working Docker daemon and the
-`postgres:17-alpine` and `valkey/valkey:8-alpine` images. It creates temporary
-containers on random loopback ports, applies the canonical schema, and copies
-only the test suite's seeded card catalog. The replay preload blocks the upstream
-card API so background seeding cannot change that catalog. Its two production server replays
-own this storage, so their boot recovery cannot race the main browser suite.
-The fixture removes its containers after success or setup/server failure;
-unavailable Docker produces an actionable failure rather than skipping coverage.
+<p align="center">
+  <img src="docs/screenshots/mobile-home.jpg" alt="The home page on a phone: A horrible card game for horrible friends." width="260">
+  &nbsp;&nbsp;
+  <img src="docs/screenshots/mobile-hand.jpg" alt="Playing a round on a phone, with the prompt above and a scrollable hand below" width="260">
+</p>
 
-Docker commands have bounded deadlines (30 seconds for creation, 10 seconds
-for port lookup and cleanup). Cleanup errors name the exact owned containers
-for a later retry; the fixture kills pending CLI processes when its worker exits.
-Disposable PostgreSQL data uses tmpfs to reduce disk contention.
+---
 
-## Reviewed schema deployment
+## How it works
 
-Ordinary app startup checks migration history and schema compatibility, then listens. It never applies DDL. An empty, pending, altered, newer or drifted database fails startup. `db:push` remains available for throwaway local experiments only.
+1. **Create a game.** Pick your packs, house rules, timer, and how many points it takes to win.
+2. **Share the code.** Up to 10 people can join. You need at least 3, and friends are optional.
+3. **Be awful.** Play cards, judge cards, regret cards.
 
-Before deployment, review the SQL and manifest in `drizzle/`, stop app writers (including background jobs), and create a database backup with `pg_dump`. Test restoring that backup into a separate database before proceeding. Build the intended image, then run the explicit step:
+That's the whole game. The rest is on you.
 
-```sh
-docker compose build app
-docker compose run --rm --no-deps app pnpm db:migrate
-docker compose run --rm --no-deps app pnpm db:check
-docker compose up -d app
-```
+---
 
-For an existing database created with `db:push`, run `pnpm db:baseline` from the intended image before the migration step. Adoption verifies the entire public schema against the reviewed baseline before recording it; it preserves existing data and refuses drift. Do not bypass a mismatch: investigate the diff against a restored disposable copy and review a reconciliation before trying again. A clean install uses `db:migrate`. Existing versioned installs use `db:migrate` too.
+<p align="center">
+  <b>Ready to find out who your friends really are?</b><br>
+  <a href="https://cards.bhayanak.net">cards.bhayanak.net</a>
+</p>
 
-Each deployment applies all pending SQL and journal entries in one transaction under a PostgreSQL advisory lock. Failure rolls back both schema/data changes and journal entries. Migrations must be transaction-compatible SQL (no concurrent index creation or explicit transaction control). Do not assume an old image can run against a new schema: checks require an exact version. For recovery, keep writers stopped, restore the verified pre-deploy dump into a fresh database with `psql -v ON_ERROR_STOP=1`, point the previous image at the restored database, run its `db:check`, and resume it. Keep the failed database for diagnosis.
-
-To add a migration, edit `src/db/schema.ts`, run `pnpm db:generate --name <change>`, and review the generated SQL and Drizzle snapshot. Restore the current version into a disposable database and apply the candidate SQL there. Run `pnpm db:signature` against that database to obtain its resulting catalog signature, and append `{ "file": "<generated>.sql", "sha256": "<sha256sum of SQL>", "schema": "<signature>" }` to `drizzle/manifest.json`. Never edit previously released SQL or manifest entries. Rehearse clean install, upgrade with retained data, and failure/restore, then commit SQL, snapshots and manifest together. The manifest is the runtime authority; Drizzle metadata supports subsequent generation. Signatures cover public table columns/defaults/nullability, constraints, indexes and enum values; migrations own that schema.
-
-The disposable integration drill runs with `CAB_MIGRATION_TEST_URL=postgres://cab_test:cab_test_only@127.0.0.1:55432/cab_audit_issue52_clean pnpm test:migrations`. It requires the dedicated audit PostgreSQL container and destroys only the explicitly named test database's schema.
-
-## Database storage and disaster recovery
-
-The checked-in PostgreSQL volume uses deployment-specific SMB/CIFS storage; its durability is unverified. See [storage assessment, supported local-volume configuration, reversible cutover and recovery drill](docs/operations/database-recovery.md) before changing volumes. Run `pnpm test:storage` for the isolated Docker crash/backup/restore drill.
-
-Rich previews and public HTTPS origin configuration: [share preview deployment guide](docs/operations/share-previews.md).
+<sub>Card text comes from <a href="https://www.cardsagainsthumanity.com/">Cards Against Humanity</a>, released under <a href="https://creativecommons.org/licenses/by-nc-sa/2.0/">CC BY-NC-SA 2.0</a> and served through <a href="https://restagainsthumanity.com/">REST Against Humanity</a>. Cards Against Bhayanak is a free, non-commercial fan project and isn't affiliated with or endorsed by Cards Against Humanity LLC. Running it yourself? See <a href="docs/development.md">development and operations</a>.</sub>

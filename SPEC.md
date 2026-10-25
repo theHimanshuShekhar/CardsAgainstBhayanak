@@ -85,7 +85,7 @@ Client clears `cab_session` on **explicit Leave button**, on **"Go home" from th
 - **CSRF:** Not required. `sessionToken` lives in `localStorage` and is sent via `Authorization: Bearer` header (not cookies). Same-origin policy + bearer token = no CSRF attack surface.
 - **Token replay (accepted risk):** Tokens are HMAC-bound to `playerId` for 24h. If leaked (e.g. shared screenshot, browser extension), an attacker can impersonate that player until the room expires. This is acceptable for a party game's threat model; not worth adding rotation or IP-binding which would break mobile users on flaky networks.
 - **Rate limiting:** HTTP uses per-IP Redis sliding-window limits: `10 join attempts/min/IP`, `5 game-create attempts/hour/IP`. Exceeding returns HTTP 429. WebSocket ingress/work limits below apply in every environment, before parsing or database/snapshot work. Cloudflare's WAF provides upstream DDoS protection; app-level limits handle abuse from legitimate clients.
-  - HTTP and WebSocket upgrade client identity use the socket peer. Only immediate peers explicitly listed in `CAB_TRUSTED_PROXY_IPS` may supply a validated `CF-Connecting-IP`; the allowlist defaults to empty. Missing/invalid CF identity falls back to the socket peer. Equivalent IPv6/IPv4-mapped spellings share budgets. `X-Forwarded-For` and `Forwarded` are ignored. Trusted ingress must overwrite incoming CF identity and restrict access through trusted peers; see README for the host/Docker NAT trust boundary.
+  - HTTP and WebSocket upgrade client identity use the socket peer. Only immediate peers explicitly listed in `CAB_TRUSTED_PROXY_IPS` may supply a validated `CF-Connecting-IP`; the allowlist defaults to empty. Missing/invalid CF identity falls back to the socket peer. Equivalent IPv6/IPv4-mapped spellings share budgets. `X-Forwarded-For` and `Forwarded` are ignored. Trusted ingress must overwrite incoming CF identity and restrict access through trusted peers; see `docs/development.md` for the host/Docker NAT trust boundary.
 
 ### WebSocket traffic limits
 
@@ -1091,10 +1091,10 @@ PostgreSQL requires durable fsync, reliable locking and exclusive PGDATA ownersh
 
 - App port binding defaults to `127.0.0.1:3000:3000`; `APP_BIND_IP` may override it for an intentionally restricted ingress network. Allowlisting a host/NAT gateway trusts all traffic originating through that peer, so restrict local/network access and require ingress to overwrite `CF-Connecting-IP`.
 - Cloudflare Tunnel natively proxies WebSocket upgrades — no special config needed on the app side.
-- `docker-compose.yml` is the deployment stack. Local development uses standalone `docker-compose.dev.yml` with project-scoped local volumes, loopback backing-service ports and explicit disposable settings from `.env.local.example`; see the README quickstart.
+- `docker-compose.yml` is the deployment stack. Local development uses standalone `docker-compose.dev.yml` with project-scoped local volumes, loopback backing-service ports and explicit disposable settings from `.env.local.example`; see the `docs/development.md` quickstart.
 - Health checks: postgres `pg_isready`, redis `redis-cli ping`, app `GET /healthz` (returns 200 with `{ db, redis, activeGames, uptime }` or 503 if any dependency is down)
 - Volumes: `postgres_data`, `redis_data` (both backed up via host volume mount)
-- **DB schema management:** reviewed versioned SQL migrations with a checksummed manifest. Production deployment explicitly runs `pnpm db:migrate` after backup and review. Startup only verifies schema/history compatibility and refuses pending, newer, altered or drifted databases. Existing pre-migration databases require explicit verified `pnpm db:baseline` adoption. See README for migration generation, rehearsal and restore procedures.
+- **DB schema management:** reviewed versioned SQL migrations with a checksummed manifest. Production deployment explicitly runs `pnpm db:migrate` after backup and review. Startup only verifies schema/history compatibility and refuses pending, newer, altered or drifted databases. Existing pre-migration databases require explicit verified `pnpm db:baseline` adoption. See `docs/development.md` for migration generation, rehearsal and restore procedures.
 
 ---
 
