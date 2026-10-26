@@ -23,6 +23,16 @@ export function getSubscriber(channel: string): Redis {
   return sub
 }
 
+// A room's final socket releases its connection and all attached listeners.
+// Delete first so a concurrent new authentication acquires a fresh owner.
+export function releaseSubscriber(channel: string): void {
+  const sub = subscribers.get(channel)
+  if (!sub) return
+  subscribers.delete(channel)
+  sub.removeAllListeners('message')
+  sub.disconnect()
+}
+
 export const KEYS = {
   game: (code: string) => `game:${code}`,
   players: (code: string) => `game:${code}:players`,
@@ -34,6 +44,10 @@ export const KEYS = {
   discardWhite: (code: string) => `game:${code}:discard:white`,
   hand: (code: string, playerId: string) => `game:${code}:hand:${playerId}`,
   grace: (code: string, playerId: string) => `game:${code}:grace:${playerId}`,
+  graceConnection: (code: string, playerId: string) => `game:${code}:grace:${playerId}:connection`,
+  drops: (code: string) => `game:${code}:drops`,
+  connections: (code: string, playerId: string) => `game:${code}:connections:${playerId}`,
+  graceDeadline: (code: string, playerId: string) => `game:${code}:grace:${playerId}:deadline`,
   channel: (code: string) => `game:${code}:channel`,
 } as const
 

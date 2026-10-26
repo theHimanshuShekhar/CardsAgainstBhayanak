@@ -6,12 +6,8 @@ import * as state from '~/lib/game-state'
 import { generateRoomCode } from '~/lib/code-gen.server'
 import { signSessionToken } from '~/lib/session-token'
 import { enforceRateLimit } from '~/lib/rate-limit'
-import {
-  CreateGameSchema,
-  conflictingModalRules,
-  errorResponse,
-  getClientIp,
-} from '~/lib/api-helpers'
+import { CreateGameSchema, conflictingModalRules, errorResponse } from '~/lib/api-helpers'
+import { getClientIp } from '~/lib/client-identity.server'
 import { captureServerEvent } from '~/lib/posthog-server'
 import { apiLogger } from '~/lib/logger'
 import { eq, count } from 'drizzle-orm'

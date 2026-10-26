@@ -56,20 +56,3 @@ test('topbar leave button is focusable and labeled', async ({ browser }) => {
 
   await context.close()
 })
-
-test('card text elements carry data-ph-no-capture', async ({ browser }) => {
-  // Verify PostHog masking attributes are present on card elements
-  // We can't render real cards without a game, but check the static DOM for any card-text
-  const context = await browser.newContext()
-  const page = await context.newPage()
-
-  // Navigate to stats page which may have card-text elements in static data
-  await page.goto('/stats')
-  const cardTexts = page.locator('[data-ph-no-capture]')
-  // If any card-text elements exist, they must all have the attribute
-  const count = await cardTexts.count()
-  // This is a structural check — at least the attribute is used somewhere if cards render
-  expect(count).toBeGreaterThanOrEqual(0)
-
-  await context.close()
-})

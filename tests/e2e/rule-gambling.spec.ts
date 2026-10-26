@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test'
+import type { SessionState } from '../../src/lib/types'
 import {
   createGame,
   joinGame,
@@ -56,12 +57,19 @@ test('Gambling — winner wagers on round 2, submits twice, round resolves', asy
     return null
   }
 
+  async function readRound(): Promise<number> {
+    const t = (await host.page.locator('.pill').first().textContent()) ?? ''
+    const m = /Round (\d+)/.exec(t)
+    return m ? parseInt(m[1]!, 10) : 0
+  }
+
   const pick1 = await handPickCount(r1others[0]!)
   for (const p of r1others) await submitCards(p, pick1)
   await waitForPhase(players, 'judging')
   await startReveal(r1czar)
-  await pickWinner(r1czar, 0)
-  await host.page.waitForTimeout(800)
+  await expect(r1czar.page.locator('.flip-reveal .card-response')).toHaveCount(2 * pick1)
+  await pickWinner(r1czar, 0, 2 * pick1)
+  await expect.poll(readRound, { timeout: 20_000 }).toBeGreaterThan(1)
 
   let gambler = await findGambler()
   if (!gambler) {
@@ -71,8 +79,9 @@ test('Gambling — winner wagers on round 2, submits twice, round resolves', asy
     for (const p of r2others) await submitCards(p, pick2round)
     await waitForPhase(players, 'judging')
     await startReveal(r2czar)
-    await pickWinner(r2czar, 0)
-    await host.page.waitForTimeout(800)
+    await expect(r2czar.page.locator('.flip-reveal .card-response')).toHaveCount(2 * pick2round)
+    await pickWinner(r2czar, 0, 2 * pick2round)
+    await expect.poll(readRound, { timeout: 20_000 }).toBeGreaterThan(2)
     gambler = await findGambler()
   }
   expect(gambler, 'expected a non-czar with ≥1 pt to hold the Wager button').toBeTruthy()
@@ -83,11 +92,6 @@ test('Gambling — winner wagers on round 2, submits twice, round resolves', asy
   // Snapshot the round number on host's page before the wager round —
   // we'll assert the game advances past it without depending on the
   // exact starting value (could be 2 or 3 depending on r1 dynamics).
-  async function readRound(): Promise<number> {
-    const t = (await host.page.locator('.pill').first().textContent()) ?? ''
-    const m = /Round (\d+)/.exec(t)
-    return m ? parseInt(m[1]!, 10) : 0
-  }
   const roundBefore = await readRound()
 
   // Snapshot pre-wager hand size — should be exactly 10.
@@ -100,13 +104,55 @@ test('Gambling — winner wagers on round 2, submits twice, round resolves', asy
   // Button vanishes — hasGambled now true.
   await expect(gambler!.page.locator('[data-testid="wager-btn"]')).toBeHidden({ timeout: 5_000 })
 
+  // Rejoin after the wager must preserve the extra hand and the disabled
+  // wager action before either submission has been sent.
+  let receipt: SessionState | undefined
+  gambler!.page.on('websocket', (socket) =>
+    socket.on('framereceived', (frame) => {
+      const event = JSON.parse(String(frame.payload))
+      if (event.type === 'state_snapshot') receipt = event.state
+    }),
+  )
+  const wagerHand = await gambler!.page.locator('.hand-card-wrap .card-text').allTextContents()
+  await gambler!.page.reload()
+  await expect(gambler!.page.locator('.hand-card-wrap')).toHaveCount(10 + pick)
+  expect(receipt).toMatchObject({ myHasGambled: true, mySubmissionCount: 0 })
+  expect(await gambler!.page.locator('.hand-card-wrap .card-text').allTextContents()).toEqual(
+    wagerHand,
+  )
+  await expect(gambler!.page.getByTestId('wager-btn')).toBeHidden()
+
   // First play: submit the first `pick` cards. UI must stay in
   // `picking` (hand dock still visible, no waiting screen).
+  const primaryTexts = (
+    await gambler!.page.locator('.hand-card-wrap .card-text').allTextContents()
+  ).slice(0, pick)
   await submitCards(gambler!, pick)
   await expect(gambler!.page.locator('.hand-dock')).toBeVisible({ timeout: 5_000 })
+  await expect(gambler!.page.locator('.hand-card-wrap')).toHaveCount(10)
+  const remainingTexts = await gambler!.page.locator('.hand-card-wrap .card-text').allTextContents()
+  for (const text of primaryTexts) expect(remainingTexts).not.toContain(text)
+
+  // The first accepted answer is a private receipt: a fresh page must
+  // still let this gambler send the second answer, without returning cards.
+  await gambler!.page.reload()
+  await expect(gambler!.page.locator('.hand-dock')).toBeVisible()
+  await expect(gambler!.page.locator('.hand-card-wrap')).toHaveCount(10)
+  expect(receipt).toMatchObject({ myHasGambled: true, mySubmissionCount: 1 })
+  expect(await gambler!.page.locator('.hand-card-wrap .card-text').allTextContents()).toEqual(
+    remainingTexts,
+  )
+  await expect(gambler!.page.getByTestId('wager-btn')).toBeHidden()
 
   // Second play: submit the next `pick` cards. Now we move to waiting.
   await submitCards(gambler!, pick)
+
+  await expect(gambler!.page.locator('.hand-dock')).toBeHidden()
+  await gambler!.page.reload()
+  await expect(gambler!.page.locator('.card-prompt')).toBeVisible()
+  await expect(gambler!.page.locator('.hand-dock')).toBeHidden()
+
+  expect(receipt).toMatchObject({ myHasGambled: true, mySubmissionCount: 2 })
 
   // The other non-czar still has to submit for the round to resolve.
   const other = players.find((p) => p !== curCzar && p !== gambler) as PlayerHandle
@@ -114,7 +160,16 @@ test('Gambling — winner wagers on round 2, submits twice, round resolves', asy
 
   await waitForPhase(players, 'judging')
   await startReveal(curCzar)
-  await pickWinner(curCzar, 0)
+  // A wager creates three anonymous submissions; wait for every reveal
+  // before the Czar sends a command now that judging is phase-gated.
+  await expect(curCzar.page.locator('.flip-reveal .card-response')).toHaveCount(3 * pick)
+  await pickWinner(curCzar, 0, 3 * pick)
+
+  await expect(gambler!.page.locator('.winner-badge')).toBeVisible()
+  receipt = undefined
+  await gambler!.page.reload()
+  await expect(gambler!.page.locator('.winner-badge')).toBeVisible()
+  expect(receipt).toMatchObject({ myHasGambled: true, mySubmissionCount: 2 })
 
   // Round resolved — the next round starts after ROUND_RESULT_PAUSE_MS.
   // hasGambled resets via round_started. We only assert the game moved

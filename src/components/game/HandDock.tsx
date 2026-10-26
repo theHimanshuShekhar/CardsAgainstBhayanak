@@ -7,9 +7,10 @@ type Props = {
   blanks: number
   onToggle: (cardId: string) => void
   onSubmit: () => void
+  pending?: boolean
 }
 
-export function HandDock({ hand, selected, blanks, onToggle, onSubmit }: Props) {
+export function HandDock({ hand, selected, blanks, onToggle, onSubmit, pending = false }: Props) {
   return (
     <div className="hand-dock">
       <div className="hand-dock-hd">
@@ -18,16 +19,18 @@ export function HandDock({ hand, selected, blanks, onToggle, onSubmit }: Props) 
         </div>
         <button
           className="btn btn-primary btn-sm"
-          disabled={selected.length < blanks}
+          disabled={pending || selected.length < blanks}
           onClick={onSubmit}
         >
-          {selected.length < blanks
-            ? blanks > 1
-              ? `Pick ${blanks - selected.length} more`
-              : 'Pick a card'
-            : blanks > 1
-              ? 'Submit cards →'
-              : 'Submit card →'}
+          {pending
+            ? 'Sending…'
+            : selected.length < blanks
+              ? blanks > 1
+                ? `Pick ${blanks - selected.length} more`
+                : 'Pick a card'
+              : blanks > 1
+                ? 'Submit cards →'
+                : 'Submit card →'}
         </button>
       </div>
       <div className="hand">
@@ -45,7 +48,7 @@ export function HandDock({ hand, selected, blanks, onToggle, onSubmit }: Props) 
                 size="md"
                 selected={isSelected}
                 pickOrder={blanks > 1 && isSelected ? pickIdx + 1 : undefined}
-                onClick={() => onToggle(card.id)}
+                onClick={pending ? undefined : () => onToggle(card.id)}
               />
             </div>
           )

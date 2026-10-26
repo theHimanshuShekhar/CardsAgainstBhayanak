@@ -6,8 +6,8 @@ import * as engine from '~/lib/game-engine'
 export const Route = createFileRoute('/api/games/$code/leave')({
   server: {
     handlers: {
-      POST: async ({ request }) => {
-        const auth = await authenticate(request)
+      POST: async ({ request, params }) => {
+        const auth = await authenticate(request, params.code.toUpperCase())
         if (!auth) return errorResponse(401, 'not_authorized', 'Missing or invalid token')
         // S2-6: explicit leave outside the WS (sendBeacon on unload).
         // Run the same immediate drop path as the WS `leave` message;

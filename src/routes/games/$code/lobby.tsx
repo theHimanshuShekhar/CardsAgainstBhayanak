@@ -1,10 +1,12 @@
+import { ErrorNotice } from '~/components/ui/ErrorNotice'
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Topbar } from '~/components/ui/Topbar'
 import { Avatar } from '~/components/ui/Avatar'
 import { GameConfigEditor } from '~/components/game/GameConfigEditor'
 import { formatRoomCode } from '~/lib/code-gen'
 import { useSession } from '~/hooks/useSession'
+import { useLeaveGame } from '~/hooks/useLeaveGame'
 import { useGameSocket } from '~/hooks/useGameSocket'
 import { captureEvent } from '~/lib/posthog-client'
 import type { GameConfig, GamePlayer, Pack } from '~/lib/types'
@@ -16,8 +18,18 @@ export const Route = createFileRoute('/games/$code/lobby')({
 function LobbyScreen() {
   const navigate = useNavigate()
   const { code } = Route.useParams()
-  const { session, setSession } = useSession()
+  const { session, setSession, ready } = useSession()
+  const { leaveGame, leaving, leaveError } = useLeaveGame()
   const formatted = formatRoomCode(code)
+
+  const checkedSavedSession = useRef(false)
+  useEffect(() => {
+    if (!ready || checkedSavedSession.current) return
+    checkedSavedSession.current = true
+    // Recover an absent/invalid saved session on arrival. Later session
+    // clearing (auth rejection or Leave) already chooses its destination.
+    if (!session) void navigate({ to: '/games/join' })
+  }, [ready, session, navigate])
 
   const [players, setPlayers] = useState<GamePlayer[]>([])
   const [config, setConfig] = useState<GameConfig | null>(null)
@@ -64,6 +76,9 @@ function LobbyScreen() {
       }
       if (event.type === 'game_started') {
         void navigate({ to: '/games/$code/session', params: { code } })
+      }
+      if (event.type === 'host_changed') {
+        setPlayers((prev) => prev.map((p) => ({ ...p, isHost: p.id === event.hostId })))
       }
       if (event.type === 'auth_error') {
         setSession(null)
@@ -145,11 +160,6 @@ function LobbyScreen() {
     captureEvent('cab_room_code_copied', { roomCode: code, format: 'link' })
   }
 
-  async function handleLeave() {
-    setSession(null)
-    void navigate({ to: '/' })
-  }
-
   return (
     <div className="scene">
       <Topbar
@@ -159,13 +169,18 @@ function LobbyScreen() {
               <span className="dot live" />
               Lobby
             </div>
-            <button className="btn btn-ghost btn-sm" onClick={() => void handleLeave()}>
-              Leave
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={() => void leaveGame()}
+              disabled={leaving || !session}
+            >
+              {leaving ? 'Leaving…' : 'Leave'}
             </button>
           </>
         }
       />
       <div className="lobby-wrap fade-in">
+        {leaveError && <ErrorNotice>{leaveError}</ErrorNotice>}
         <div className="lobby-hd">
           <div>
             <div className="eyebrow">Waiting for players</div>
@@ -225,11 +240,7 @@ function LobbyScreen() {
                   onChange={(c) => void updateConfig(c)}
                   packs={packs}
                 />
-                {configError && (
-                  <div className="muted" style={{ fontSize: 13, color: 'red' }}>
-                    {configError}
-                  </div>
-                )}
+                {configError && <ErrorNotice>{configError}</ErrorNotice>}
               </>
             ) : (
               <div className="sheet">
@@ -250,11 +261,7 @@ function LobbyScreen() {
                 </div>
               </div>
             )}
-            {startError && (
-              <div className="muted" style={{ fontSize: 13, color: 'red' }}>
-                {startError}
-              </div>
-            )}
+            {startError && <ErrorNotice>{startError}</ErrorNotice>}
             {isHost ? (
               <button
                 className="btn btn-primary btn-block btn-lg"

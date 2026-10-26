@@ -1,11 +1,22 @@
 import type { Peer, Message } from 'crossws'
-import { eq, inArray, desc } from 'drizzle-orm'
+import { randomUUID } from 'node:crypto'
+import { getClientIp } from '~/lib/client-identity.server'
+import { admitConnection, admitFrame, admitCommand, type ConnectionLease } from './traffic-budget'
+import { eq, and, inArray, desc, sql } from 'drizzle-orm'
 import { db } from '~/db'
-import { blackCards, whiteCards, gameSessions, gameRounds } from '~/db/schema'
+import { blackCards, whiteCards, gameSessions, gameMatches, gameRounds } from '~/db/schema'
 import { wsLogger } from '~/lib/logger'
+import {
+  captureServerException,
+  distinctIdFor,
+  sanitizeServerException,
+} from '~/lib/posthog-server'
 import { authenticateSocket } from './auth'
-import { redis, getSubscriber, KEYS } from '~/lib/redis'
+import { ClientMessageSchema } from './client-message'
+import { redis, getSubscriber, releaseSubscriber, KEYS } from '~/lib/redis'
 import * as engine from '~/lib/game-engine'
+import { GameCommandError } from '~/lib/game-command-error'
+import { getRoomParticipation } from '~/lib/room-session'
 import * as state from '~/lib/game-state'
 import { TIMING } from '~/lib/timing'
 import type {
@@ -19,12 +30,12 @@ import type {
   Submission,
   PlayerScore,
   GameConfig,
-  Role,
+  EndedMatchResult,
 } from '~/lib/types'
 
 // S2-3: a spectator socket may keep the connection alive and re-sync,
 // but never drive the game.
-const SPECTATOR_BLOCKED = new Set<ClientToServerEvent['type']>([
+const GAME_ACTIONS = new Set<ClientToServerEvent['type']>([
   'play',
   'gamble',
   'pick',
@@ -33,14 +44,20 @@ const SPECTATOR_BLOCKED = new Set<ClientToServerEvent['type']>([
   'eliminate',
   'redraw',
   'confess_discard',
+  'happy_ending',
 ])
 
 type PeerCtx = {
   code: string
+  connection: string
+  lease: ConnectionLease
+  frameBucket: { tokens: number; updatedAt: number }
   playerId?: string
   anonId?: string
-  role?: Role
   lastPing: number
+  leaving?: boolean
+  authenticating?: boolean
+  authSetup?: Promise<boolean>
 }
 
 async function buildSnapshot(code: string, playerId: string): Promise<SessionState | null> {
@@ -56,7 +73,9 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
   const [roundRow] = await db
     .select()
     .from(gameRounds)
-    .where(eq(gameRounds.sessionId, session.id))
+    .where(
+      and(eq(gameRounds.sessionId, session.id), eq(gameRounds.matchId, session.currentMatchId!)),
+    )
     .orderBy(desc(gameRounds.roundNum))
     .limit(1)
   if (!roundRow) return null
@@ -71,15 +90,12 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
 
   const scores: PlayerScore[] = engine.toPlayerScores(players, czarId)
 
-  // The public submissionId is the index into the server-persisted
-  // permuted order so a reconnecting client agrees with everyone else.
+  // No public IDs exist until the engine persists its shuffled order.
+  // Picking reconnects use progress and the recipient's private receipt
+  // instead of exposing submission arrival order.
   const rawSubs = await state.getSubmissions(code)
   const subOrder: string[] = JSON.parse((await redis.get(`${KEYS.round(code)}:order`)) ?? '[]')
-  const submissions: Submission[] =
-    subOrder.length > 0
-      ? subOrder.map((k, i) => ({ submissionId: String(i), fills: rawSubs[k]?.fills ?? [] }))
-      : Object.values(rawSubs).map((s, i) => ({ submissionId: String(i), fills: s.fills }))
-  const revealIndex = Number((await redis.get(`${KEYS.round(code)}:revealed`)) ?? 0)
+  const persistedRevealIndex = Number((await redis.get(`${KEYS.round(code)}:revealed`)) ?? 0)
 
   const handIds = await state.getHand(code, playerId)
   let hand: Hand | undefined
@@ -91,7 +107,7 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
     })
   }
 
-  const activePlayers = players.filter((p) => p.status === 'active')
+  const activePlayers = players.filter((p) => p.status === 'active' && p.role === 'player')
   const expectedSubmitters = activePlayers.filter((p) => p.id !== czarId && !p.isRando)
   const skippedPlayers = await state.getSkippedPlayers(code)
 
@@ -99,12 +115,13 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
   // transition (state.setPhase). Trust it so a reconnect during
   // reveal/judging/transition resumes correctly; the submission-count
   // heuristic is only a defensive fallback for a room with no phase yet.
-  let phase: GamePhase | null = await state.getPhase(code)
+  const persistedPhase = await state.getPhase(code)
+  let phase: GamePhase | null = persistedPhase
   if (!phase) {
     phase = 'picking'
     if (
-      submissions.length > 0 &&
-      submissions.length + skippedPlayers.length >= expectedSubmitters.length
+      Object.keys(rawSubs).length > 0 &&
+      Object.keys(rawSubs).length + skippedPlayers.length >= expectedSubmitters.length
     ) {
       if (config.rules.includes('godmode')) phase = 'waiting'
       else if (config.rules.includes('survival')) phase = 'eliminating'
@@ -112,6 +129,32 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
       else phase = 'judging'
     }
   }
+
+  // Completed phases also cover boot recovery's reveal fast-forward,
+  // which advances the phase without replaying individual reveal frames.
+  const completedReveal =
+    persistedPhase === 'judging' ||
+    persistedPhase === 'eliminating' ||
+    persistedPhase === 'ranking' ||
+    persistedPhase === 'transition' ||
+    (persistedPhase === 'waiting' && config.rules.includes('godmode'))
+  const revealIndex = completedReveal
+    ? subOrder.length
+    : Math.max(0, Math.min(subOrder.length, persistedRevealIndex))
+
+  // All recipients, including the submitter and Czar, see only answers
+  // whose scheduled reveal has happened. Empty fills retain stable slots
+  // without transmitting a hidden card ID, text, or submitter identity.
+  let submissions: Submission[] =
+    phase === 'picking'
+      ? []
+      : subOrder.map((key, index) => ({
+          submissionId: String(index),
+          fills: index < revealIndex ? (rawSubs[key]?.fills ?? []) : [],
+          // Elimination is public once announced; keep it across rejoin
+          // without exposing the stored submission's player attribution.
+          eliminated: rawSubs[key]?.eliminated,
+        }))
 
   let voteTally: Record<string, number> | undefined
   if (config.rules.includes('godmode')) {
@@ -128,7 +171,22 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
   // being lost. clearRoundResolution wipes these at the next startRound.
   const { submitted, expected } = await engine.submissionProgress(code)
   const roundTimerExpiresAt = await state.getRoundTimerExpiresAt(code)
-  const winnerId = await state.getRoundWinner(code)
+  const outcome = await state.getRoundOutcome(code)
+  if (phase === 'transition') {
+    // Card cleanup commits the result board before deleting shuffled slots.
+    // Prefer it even while those slots still exist with cleared live fills.
+    const resolved = await redis.hget(KEYS.round(code), 'resolvedSubmissions')
+    if (resolved) submissions = JSON.parse(resolved)
+  }
+  const resolvedReceipt: Partial<SessionState> =
+    phase === 'transition'
+      ? (JSON.parse((await redis.hget(KEYS.round(code), 'resolvedRecipients')) ?? '{}')[playerId] ??
+        {})
+      : {}
+  if (phase === 'transition' && config.rules.includes('godmode')) {
+    const resolvedTally = await redis.hget(KEYS.round(code), 'resolvedVoteTally')
+    if (resolvedTally) voteTally = JSON.parse(resolvedTally)
+  }
   const eliminationTurnPlayerId = config.rules.includes('survival')
     ? ((await state.getEliminationTurn(code)) ?? undefined)
     : undefined
@@ -146,13 +204,31 @@ async function buildSnapshot(code: string, playerId: string): Promise<SessionSta
     hand,
     submissions,
     scores,
-    revealIndex,
-    winnerId,
+    revealIndex: phase === 'transition' ? submissions.length : revealIndex,
+    winnerId: outcome.winningPlayerId,
+    ...outcome,
     submitted,
     expected,
     roundTimerExpiresAt,
     myDiscardsUsed: me?.discardsUsed ?? 0,
     myHasGambled: me?.hasGambled ?? false,
+    mySubmissionCount: Number(!!rawSubs[playerId]) + Number(!!rawSubs[`${playerId}:gamble`]),
+    mySubmissionIds: config.rules.includes('godmode')
+      ? subOrder.flatMap((key, index) => (key === playerId ? [String(index)] : []))
+      : [],
+    myVotedSubmissionId: await redis.hget(`${KEYS.round(code)}:voterchoices`, playerId),
+    voteCandidateIds:
+      JSON.parse((await redis.hget(KEYS.round(code), 'voteCandidateIds')) ?? 'null') ?? undefined,
+    ...(resolvedReceipt.myHasGambled !== undefined
+      ? {
+          myHasGambled: resolvedReceipt.myHasGambled,
+          mySubmissionCount: resolvedReceipt.mySubmissionCount ?? 0,
+          mySubmissionIds: config.rules.includes('godmode')
+            ? (resolvedReceipt.mySubmissionIds ?? [])
+            : [],
+          myVotedSubmissionId: resolvedReceipt.myVotedSubmissionId ?? null,
+        }
+      : {}),
     ...(voteTally ? { voteTally } : {}),
     ...(eliminationTurnPlayerId ? { eliminationTurnPlayerId } : {}),
     ...(ranking ? { ranking } : {}),
@@ -167,29 +243,65 @@ async function buildLobbySnapshot(code: string): Promise<{
   players: GamePlayer[]
   config: GameConfig
   gameStatus: SessionStatus
+  result?: EndedMatchResult
 } | null> {
-  const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
-  if (!session) return null
+  // Read the room's current match and its frozen result together. Live room
+  // scores/identities may already have changed since the match completed.
+  const [row] = await db
+    .select({
+      session: gameSessions,
+      match: gameMatches,
+      totalRounds: sql<number>`coalesce((SELECT max(${gameRounds.roundNum}) FROM ${gameRounds} WHERE ${gameRounds.matchId} = ${gameMatches.id}), 0)`,
+    })
+    .from(gameSessions)
+    .leftJoin(gameMatches, eq(gameMatches.id, gameSessions.currentMatchId))
+    .where(eq(gameSessions.code, code))
+  if (!row) return null
+  const { session, match } = row
+  const result: EndedMatchResult | undefined =
+    session.status === 'ended' &&
+    match?.status === 'ended' &&
+    Array.isArray(match.finalPlayers) &&
+    match.endMode
+      ? {
+          matchId: match.id,
+          finalScores: engine.toPlayerScores(match.finalPlayers as GamePlayer[], null),
+          winnerId: match.winnerPlayerId ?? '',
+          mode: match.endMode,
+          totalRounds: Number(row.totalRounds),
+        }
+      : undefined
   return {
     players: await state.getAllPlayers(code),
     config: session.config as GameConfig,
     gameStatus: session.status as SessionStatus,
+    ...(result ? { result } : {}),
   }
 }
 
 const peerContext = new WeakMap<Peer, PeerCtx>()
+// Pending sockets need keepalive enforcement but must never receive room events.
+const openPeers = new Set<Peer>()
 const roomPeers = new Map<string, Set<Peer>>()
+
+function removeRoomPeer(code: string, peer: Peer): void {
+  const peers = roomPeers.get(code)
+  if (!peers) return
+  peers.delete(peer)
+  if (peers.size === 0) {
+    roomPeers.delete(code)
+    releaseSubscriber(KEYS.channel(code))
+  }
+}
 
 export function startKeepaliveEnforcer(): void {
   setInterval(() => {
     const now = Date.now()
-    for (const peers of roomPeers.values()) {
-      for (const peer of peers) {
-        const ctx = peerContext.get(peer)
-        if (ctx && now - ctx.lastPing > TIMING.KEEPALIVE_TIMEOUT_MS) {
-          wsLogger.warn({ code: ctx.code, playerId: ctx.playerId }, 'keepalive timeout, closing')
-          peer.close(1001, 'keepalive timeout')
-        }
+    for (const peer of openPeers) {
+      const ctx = peerContext.get(peer)
+      if (ctx && now - ctx.lastPing > TIMING.KEEPALIVE_TIMEOUT_MS) {
+        wsLogger.warn({ code: ctx.code, playerId: ctx.playerId }, 'keepalive timeout, closing')
+        peer.close(1001, 'keepalive timeout')
       }
     }
   }, TIMING.KEEPALIVE_INTERVAL_MS)
@@ -213,7 +325,26 @@ function send(peer: Peer, event: ServerToClientEvent): void {
 function broadcast(code: string, event: ServerToClientEvent): void {
   const peers = roomPeers.get(code)
   if (!peers) return
-  for (const peer of peers) send(peer, event)
+  for (const peer of peers) {
+    if (!peerContext.get(peer)?.authenticating) send(peer, event)
+  }
+}
+
+function revokePlayerSockets(
+  code: string,
+  playerId: string,
+  errorCode: 'player_dropped' | 'invalid_token' = 'player_dropped',
+): void {
+  for (const peer of roomPeers.get(code) ?? []) {
+    if (peerContext.get(peer)?.playerId !== playerId) continue
+    peerContext.get(peer)?.lease.release()
+    removeRoomPeer(code, peer)
+    openPeers.delete(peer)
+    peerContext.delete(peer)
+    const message = errorCode === 'player_dropped' ? 'player dropped' : 'invalid token'
+    send(peer, { type: 'auth_error', code: errorCode, message })
+    peer.close(1008, message)
+  }
 }
 
 async function ensureSubscriber(code: string): Promise<void> {
@@ -236,12 +367,16 @@ async function ensureSubscriber(code: string): Promise<void> {
   sub.on('message', (_ch, msg) => {
     try {
       const event = JSON.parse(msg) as ServerToClientEvent
-      // hand_update is private — route only to its owner, never broadcast.
-      if (event.type === 'hand_update') {
+      // Every drop path publishes this event, including HTTP leave and
+      // grace expiry. Revoke all connections before any more room fanout.
+      if (event.type === 'player_left') revokePlayerSockets(code, event.playerId)
+      // Hands and own-answer eligibility are private; route only to their owner.
+      if (event.type === 'hand_update' || event.type === 'my_submission_ids') {
         const peers = roomPeers.get(code)
         if (peers) {
           for (const peer of peers) {
-            if (peerContext.get(peer)?.playerId === event.playerId) send(peer, event)
+            const ctx = peerContext.get(peer)
+            if (ctx?.playerId === event.playerId && !ctx.authenticating) send(peer, event)
           }
         }
         return
@@ -255,16 +390,47 @@ async function ensureSubscriber(code: string): Promise<void> {
 }
 
 export const wsHooks = {
+  upgrade(request: Request) {
+    if (!extractCode(request.url)) return new Response('Invalid room', { status: 404 })
+    const admission = admitConnection(getClientIp(request))
+    if (!admission.lease)
+      return Response.json(
+        {
+          code: 'rate_limited',
+          message: 'Too many connections. Retry later.',
+          retryAfterMs: admission.retryAfterMs,
+        },
+        {
+          status: 429,
+          headers: { 'retry-after': String(Math.ceil(admission.retryAfterMs / 1000)) },
+        },
+      )
+    return { context: { trafficLease: admission.lease } }
+  },
   async open(peer: Peer) {
     const code = extractCode(peer.request.url)
     if (!code) {
       peer.close(1008, 'invalid room')
       return
     }
-    peerContext.set(peer, { code, lastPing: Date.now() })
-    if (!roomPeers.has(code)) roomPeers.set(code, new Set())
-    roomPeers.get(code)!.add(peer)
-    await ensureSubscriber(code)
+    const lease = peer.context.trafficLease as ConnectionLease | undefined
+    if (!lease) {
+      peer.close(1008, 'connection admission required')
+      return
+    }
+    peerContext.set(peer, {
+      code,
+      connection: randomUUID(),
+      lease,
+      frameBucket: { tokens: 120, updatedAt: performance.now() },
+      lastPing: Date.now(),
+    })
+    openPeers.add(peer)
+    lease.attach(() => {
+      // Invalidate a slow authentication before it can acknowledge a timed-out socket.
+      void wsHooks.close(peer)
+      peer.close(1008, 'authentication timeout')
+    })
     wsLogger.info({ code }, 'peer opened')
   },
 
@@ -272,128 +438,319 @@ export const wsHooks = {
     const ctx = peerContext.get(peer)
     if (!ctx) return
 
-    let parsed: ClientToServerEvent
+    let eventType: ClientToServerEvent['type'] | undefined
+    let commandId: string | undefined
+    let accepted = false
+    let releaseCommand: (() => void) | undefined
+    const accept = (ok: boolean) => {
+      accepted = ok
+      if (!commandId) return
+      send(
+        peer,
+        ok
+          ? { type: 'command_accepted', commandId }
+          : {
+              type: 'error',
+              code: 'invalid_state',
+              message: 'Action was not accepted. Try again.',
+              commandId,
+            },
+      )
+    }
     try {
-      parsed = JSON.parse(msg.text())
-    } catch {
-      return send(peer, { type: 'error', code: 'internal_error', message: 'bad JSON' })
-    }
-
-    // Auth handshake — must be the first message
-    if (!ctx.playerId) {
-      if (parsed.type !== 'auth')
-        return send(peer, { type: 'error', code: 'not_authorized', message: 'auth first' })
-      const auth = await authenticateSocket(ctx.code, parsed)
-      if (!auth.ok)
-        return send(peer, {
-          type: 'auth_error',
-          code: auth.code,
-          message: auth.code === 'player_dropped' ? 'player dropped' : 'invalid token',
+      const frameRetry = ctx.lease.frame() || admitFrame(ctx.code, ctx.playerId, ctx.frameBucket)
+      if (frameRetry) {
+        send(peer, {
+          type: 'error',
+          code: 'rate_limited',
+          message: 'Too many frames. Retry later.',
+          retryAfterMs: frameRetry,
         })
-      ctx.playerId = auth.playerId
-      ctx.anonId = auth.anonId
-      // Bind role + clear grace BEFORE acking. The client fires its next
-      // message (e.g. `play`) the instant it sees auth_ok; acking first
-      // left a window where ctx.role was still undefined and the
-      // spectator action guard below was skipped (S2-3).
-      const player = await state.getPlayer(ctx.code, auth.playerId)
-      ctx.role = player?.role
-      if (player?.status === 'grace') {
-        await state.updatePlayer(ctx.code, auth.playerId, { status: 'active' })
-        await state.clearGrace(ctx.code, auth.playerId)
+        ctx.lease.release()
+        peer.close(1008, 'frame rate limit')
+        return
       }
-      send(peer, { type: 'auth_ok' })
-      return
-    }
+      if (ctx.authenticating)
+        return send(peer, { type: 'error', code: 'not_authorized', message: 'auth first' })
+      let input: unknown
+      try {
+        input = JSON.parse(msg.text())
+      } catch {
+        return send(peer, { type: 'error', code: 'invalid_state', message: 'Invalid command' })
+      }
 
-    ctx.lastPing = Date.now()
+      const result = ClientMessageSchema.safeParse(input)
+      if (!result.success) {
+        const id =
+          typeof input === 'object' && input !== null && 'commandId' in input
+            ? input.commandId
+            : undefined
+        return send(peer, {
+          type: 'error',
+          code: 'invalid_state',
+          message: 'Invalid command',
+          ...(typeof id === 'string' && id.length > 0 && id.length <= 256 ? { commandId: id } : {}),
+        })
+      }
+      const parsed = result.data
+      commandId = 'commandId' in parsed ? parsed.commandId : undefined
+      eventType = parsed.type
 
-    // S2-3: spectators may ping / rejoin / leave, never act on the game.
-    if (ctx.role === 'spectator' && SPECTATOR_BLOCKED.has(parsed.type)) {
-      return send(peer, {
-        type: 'error',
-        code: 'spectator_action',
-        message: 'spectators cannot perform game actions',
-      })
-    }
-
-    switch (parsed.type) {
-      case 'ping':
-        return send(peer, { type: 'pong' })
-      case 'rejoin': {
-        const snapshot = await buildSnapshot(ctx.code, ctx.playerId)
-        if (snapshot) {
-          send(peer, { type: 'state_snapshot', state: snapshot })
+      // Auth handshake — must be the first message
+      if (!ctx.playerId) {
+        if (parsed.type !== 'auth')
+          return send(peer, {
+            type: 'error',
+            code: 'not_authorized',
+            message: 'auth first',
+            ...(commandId ? { commandId } : {}),
+          })
+        const authRetry = ctx.lease.authenticate()
+        if (authRetry) {
+          send(peer, {
+            type: 'error',
+            code: 'rate_limited',
+            message: 'Too many authentication attempts. Retry later.',
+            retryAfterMs: authRetry,
+          })
+          ctx.lease.release()
+          peer.close(1008, 'authentication rate limit')
           return
         }
-        const lobby = await buildLobbySnapshot(ctx.code)
-        if (lobby) send(peer, { type: 'lobby_snapshot', ...lobby })
+        ctx.authenticating = true
+        const auth = await authenticateSocket(ctx.code, parsed)
+        if (peerContext.get(peer) !== ctx) return
+        if (!auth.ok) {
+          send(peer, {
+            type: 'auth_error',
+            code: auth.code,
+            message: auth.code === 'player_dropped' ? 'player dropped' : 'invalid token',
+          })
+          ctx.lease.release()
+          removeRoomPeer(ctx.code, peer)
+          openPeers.delete(peer)
+          peerContext.delete(peer)
+          peer.close(1008, 'authentication failed')
+          return
+        }
+        const expired = await state.reconcileDisconnect(ctx.code, auth.playerId)
+        if (expired) await engine.dropPlayer(ctx.code, auth.playerId, 'grace', expired)
+        const participation = await getRoomParticipation(ctx.code, auth.playerId)
+        if (peerContext.get(peer) !== ctx) return
+        if (!participation.ok) {
+          send(peer, {
+            type: 'auth_error',
+            code: participation.code,
+            message: participation.code === 'player_dropped' ? 'player dropped' : 'invalid token',
+          })
+          ctx.lease.release()
+          openPeers.delete(peer)
+          peerContext.delete(peer)
+          peer.close(1008, 'authentication failed')
+          return
+        }
+        ctx.playerId = auth.playerId
+        ctx.anonId = auth.anonId
+        // Track the binding before the atomic restore so a concurrent drop
+        // revokes setup too. Pending setup receives no room broadcasts.
+        if (!roomPeers.has(ctx.code)) roomPeers.set(ctx.code, new Set())
+        roomPeers.get(ctx.code)!.add(peer)
+        // Own the subscriber during setup too: close, drop or failed setup
+        // can now release it even while SUBSCRIBE is still in flight.
+        await ensureSubscriber(ctx.code)
+        if (peerContext.get(peer) !== ctx) return
+        ctx.authSetup = state.reconnectPlayer(ctx.code, auth.playerId, ctx.connection)
+        const restored = await ctx.authSetup
+        if (peerContext.get(peer) !== ctx) return
+        if (!restored) {
+          const current = await getRoomParticipation(ctx.code, auth.playerId)
+          revokePlayerSockets(ctx.code, auth.playerId, current.ok ? 'invalid_token' : current.code)
+          return
+        }
+        ctx.lastPing = Date.now()
+        ctx.authenticating = false
+        ctx.lease.authenticated()
+        send(peer, { type: 'auth_ok' })
         return
       }
-      case 'play':
-        await engine.submitCards(ctx.code, ctx.playerId, parsed.cardIds)
+
+      const admission = admitCommand(ctx.code, ctx.playerId, parsed.type)
+      if (admission.retryAfterMs)
+        return send(peer, {
+          type: 'error',
+          code: 'rate_limited',
+          message: 'Too many commands. Retry later.',
+          retryAfterMs: admission.retryAfterMs,
+          ...(commandId ? { commandId } : {}),
+        })
+      releaseCommand = admission.release
+      ctx.lastPing = Date.now()
+      await state.renewConnection(ctx.code, ctx.playerId, ctx.connection)
+
+      // A socket authenticates identity, not permanent participation.
+      // HTTP leave, activation and another connection can change it.
+      if (ctx.leaving) return
+      const participation = await getRoomParticipation(ctx.code, ctx.playerId)
+      if (peerContext.get(peer) !== ctx) return
+      if (ctx.leaving) return
+      if (!participation.ok) {
+        revokePlayerSockets(ctx.code, ctx.playerId, participation.code)
         return
-      case 'gamble':
-        await engine.gamble(ctx.code, ctx.playerId)
+      }
+      const currentPlayer = participation.player
+      if (GAME_ACTIONS.has(parsed.type)) {
+        if (currentPlayer.role === 'spectator') {
+          return send(peer, {
+            type: 'error',
+            code: 'spectator_action',
+            message: 'spectators cannot perform game actions',
+            ...(commandId ? { commandId } : {}),
+          })
+        }
+        if (currentPlayer.status !== 'active' || currentPlayer.isRando) {
+          return send(peer, {
+            type: 'error',
+            code: 'not_authorized',
+            message: 'Only active players can perform game actions',
+            ...(commandId ? { commandId } : {}),
+          })
+        }
+      }
+
+      switch (parsed.type) {
+        case 'ping':
+          return send(peer, { type: 'pong' })
+        case 'rejoin': {
+          const snapshot = await buildSnapshot(ctx.code, ctx.playerId)
+          if (snapshot) {
+            send(peer, { type: 'state_snapshot', state: snapshot })
+            return
+          }
+          const lobby = await buildLobbySnapshot(ctx.code)
+          if (lobby) send(peer, { type: 'lobby_snapshot', ...lobby })
+          return
+        }
+        case 'play':
+          await engine.submitCards(ctx.code, ctx.playerId, parsed.cardIds, accept)
+          return
+        case 'gamble':
+          await engine.gamble(ctx.code, ctx.playerId)
+          return
+        case 'pick':
+          await engine.pickWinner(ctx.code, ctx.playerId, parsed.submissionId, accept)
+          return
+        case 'vote':
+          await engine.castVote(ctx.code, ctx.playerId, parsed.submissionId, accept)
+          return
+        case 'eliminate':
+          await engine.eliminateSubmission(ctx.code, ctx.playerId, parsed.submissionId)
+          return
+        case 'rank':
+          await engine.applyRanking(ctx.code, ctx.playerId, parsed.ranking)
+          return
+        case 'redraw':
+          await engine.redraw(ctx.code, ctx.playerId)
+          return
+        case 'confess_discard':
+          await engine.confessDiscard(ctx.code, ctx.playerId, parsed.cardId)
+          return
+        case 'happy_ending':
+          await engine.triggerHappyEnding(ctx.code, ctx.playerId)
+          return
+        case 'leave':
+          // The drop event revokes every socket bound to this identity.
+          ctx.leaving = true
+          await engine.dropPlayer(ctx.code, ctx.playerId, 'leave')
+          revokePlayerSockets(ctx.code, ctx.playerId)
+          return
+      }
+    } catch (err) {
+      if (eventType === 'leave') ctx.leaving = false
+      if (err instanceof GameCommandError) {
+        if (!accepted)
+          send(peer, {
+            type: 'error',
+            code: err.code,
+            message: err.message,
+            ...(commandId ? { commandId } : {}),
+          })
         return
-      case 'pick':
-        await engine.pickWinner(ctx.code, ctx.playerId, parsed.submissionId)
-        return
-      case 'vote':
-        await engine.castVote(ctx.code, ctx.playerId, parsed.submissionId)
-        return
-      case 'eliminate':
-        await engine.eliminateSubmission(ctx.code, ctx.playerId, parsed.submissionId)
-        return
-      case 'rank':
-        await engine.applyRanking(ctx.code, ctx.playerId, parsed.ranking)
-        return
-      case 'redraw':
-        await engine.redraw(ctx.code, ctx.playerId)
-        return
-      case 'confess_discard':
-        await engine.confessDiscard(ctx.code, ctx.playerId, parsed.cardId)
-        return
-      case 'happy_ending':
-        await engine.triggerHappyEnding(ctx.code, ctx.playerId)
-        return
-      case 'leave':
-        // S2-5: explicit leave is immediate — no 30s grace. Stop
-        // broadcasting to this peer and run the full drop path now;
-        // the subsequent socket `close` no-ops (already 'dropped').
-        roomPeers.get(ctx.code)?.delete(peer)
-        await engine.dropPlayer(ctx.code, ctx.playerId, 'leave')
-        return
+      }
+      // Exceptions can contain card IDs, hands, tokens or database values.
+      // Preserve verified source locations, never the frame or raw exception.
+      const safeError = sanitizeServerException(err)
+      wsLogger.error(
+        { err: safeError, roomCode: ctx.code, playerId: ctx.playerId, eventType },
+        'WebSocket command failed',
+      )
+      if (!accepted)
+        send(peer, {
+          type: 'error',
+          code: 'internal_error',
+          message: 'Command failed',
+          ...(commandId ? { commandId } : {}),
+        })
+      if (ctx.authenticating) {
+        // Setup may have bound the identity before a grace write failed.
+        // Keep commands blocked until close restores grace for that identity.
+        removeRoomPeer(ctx.code, peer)
+        openPeers.delete(peer)
+        peer.close(1011, 'authentication setup failed')
+      }
+      captureServerException(
+        ctx.playerId ? await distinctIdFor(ctx.code, ctx.playerId) : ctx.code,
+        safeError,
+        {
+          roomCode: ctx.code,
+          eventType,
+        },
+      )
+    } finally {
+      releaseCommand?.()
     }
   },
 
   async close(peer: Peer) {
+    openPeers.delete(peer)
     const ctx = peerContext.get(peer)
     if (!ctx) return
-    roomPeers.get(ctx.code)?.delete(peer)
+    ctx.lease.release()
+    removeRoomPeer(ctx.code, peer)
     peerContext.delete(peer)
 
     if (!ctx.playerId) return
+    // The command handler reports setup failures. They must not prevent
+    // close from restoring grace and releasing the connection.
+    await ctx.authSetup?.catch(() => {})
     const playerId = ctx.playerId
     const code = ctx.code
 
     // S2-5: an explicit `leave` already dropped this player. Don't
     // resurrect them into 'grace' or schedule a duplicate drop.
-    const existing = await state.getPlayer(code, playerId)
-    if (!existing || existing.status === 'dropped') {
-      wsLogger.info({ code, playerId }, 'peer closed (already dropped)')
+    const hasOtherSocket = () =>
+      [...(roomPeers.get(code) ?? [])].some(
+        (other) => peerContext.get(other)?.playerId === playerId,
+      )
+    await state.releaseConnection(code, playerId, ctx.connection)
+    if (hasOtherSocket()) return
+    const deadline = randomUUID()
+    if (!(await state.disconnectPlayer(code, playerId, deadline, TIMING.GRACE_WINDOW_MS))) return
+    // An authentication may finish while the disconnect write is in flight.
+    if (hasOtherSocket()) {
+      await state.reconnectPlayer(code, playerId)
       return
     }
 
-    await state.updatePlayer(code, playerId, { status: 'grace' })
-    await state.setGrace(code, playerId, TIMING.GRACE_WINDOW_MS)
-
-    // Grace window: drop only if the player never reconnected (auth
-    // flips 'grace' → 'active'). dropPlayer runs the void/migrate/pause
-    // path and is idempotent.
-    setTimeout(async () => {
-      const player = await state.getPlayer(code, playerId)
-      if (player?.status === 'grace') await engine.dropPlayer(code, playerId, 'grace')
+    // Grace window: reconnect clears the connection's grace keys without
+    // changing participation. dropPlayer checks the connection generation
+    // before running the idempotent void/migrate/pause path.
+    setTimeout(() => {
+      if (!hasOtherSocket()) {
+        void engine.dropPlayer(code, playerId, 'grace', deadline).catch((err) => {
+          if (err instanceof GameCommandError && err.code === 'invalid_token') return
+          wsLogger.error({ err: sanitizeServerException(err), code, playerId }, 'grace drop failed')
+        })
+      }
     }, TIMING.GRACE_WINDOW_MS + 100)
 
     wsLogger.info({ code, playerId }, 'peer closed')

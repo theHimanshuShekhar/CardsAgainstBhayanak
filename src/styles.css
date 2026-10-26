@@ -1507,18 +1507,63 @@ button {
   margin: 0 auto;
   position: relative;
 }
-/* Absolutely positioned so the prompt card keeps its original resting Y
-   (a taller flex column would push it down behind the sticky hand dock —
-   see responsive-layout.spec). Anchored top-right, clear of the centred
-   eyebrow text and the prompt's centre line. */
+/* Eyebrow and timer share one row. The equal side tracks keep the eyebrow
+   centred while reserving the timer's width, so the countdown never sits on
+   top of the eyebrow text. Neither may make the row taller than the eyebrow
+   alone: the prompt card's resting Y is tight against the sticky hand dock
+   on phones and tablets (see responsive-layout.spec). */
+.stage-prompt-head {
+  display: grid;
+  grid-template-columns: 1fr minmax(0, auto) 1fr;
+  width: 100%;
+  margin-bottom: 12px;
+}
+.stage-prompt-head .eyebrow {
+  grid-column: 2;
+}
+/* With a timer beside it the eyebrow stays on one line, and an over-long
+   czar handle truncates instead of wrapping onto a second line. The full
+   handle is on the highlighted scoreboard pill just above. */
+.stage-prompt-head.has-timer .eyebrow {
+  display: flex;
+  justify-content: center;
+  white-space: pre;
+}
+.stage-prompt-head.has-timer .stage-prompt-czar {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* The narrowest phones can't fit the prefix, the timer and a handle on one
+   line. Drop the prefix so the handle keeps the room. */
+@media (max-width: 420px) {
+  .stage-prompt-head.has-timer .stage-prompt-label {
+    display: none;
+  }
+}
+/* Negative block margins cancel the timer's height in the row. On wide
+   screens the 40px digits hang beside the prompt card; narrow screens have
+   no gutter beside the card, so the digits shrink to sit within the
+   eyebrow's line and the 12px gap above the card. */
 .stage-timer {
-  position: absolute;
-  top: -6px;
-  right: 0;
+  grid-column: 3;
+  align-self: start;
+  justify-self: end;
+  /* Spacing lives on the timer, not the grid, so a timer-less head (reveal,
+     judging) gives the eyebrow its full width. */
+  padding-left: 12px;
+  margin: -6px 0 -34px;
   font: 800 40px/1 var(--font-mono);
   letter-spacing: 0.04em;
   color: var(--white);
   font-variant-numeric: tabular-nums;
+}
+@media (max-width: 860px) {
+  .stage-timer {
+    align-self: center;
+    margin: -5px 0;
+    font-size: 24px;
+  }
 }
 .stage-timer-urgent {
   animation: blink 1s steps(1, end) infinite;
@@ -1636,6 +1681,13 @@ button {
   background: var(--white);
   color: var(--black);
   border-color: var(--white);
+}
+/* Action strips follow the full-height response card. Reserve their height
+   in the grid row so the next row cannot cover voting/ranking/elimination. */
+.sub-card:has(.vote-strip),
+.sub-card:has(.elim-strip),
+.sub-card:has(.rank-strip) {
+  margin-bottom: 42px;
 }
 .sub-card.is-eliminated {
   opacity: 0.35;
@@ -2504,4 +2556,27 @@ button {
   .chart-bar-row:has(.chart-bar-key-wide) {
     grid-template-columns: 120px 1fr 50px;
   }
+}
+
+/* Shared error feedback stays legible without colour accents. */
+.error-notice {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-block: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--hairline-3);
+  border-left: 3px solid var(--white);
+  border-radius: var(--radius-sm);
+  background: var(--black-3);
+  color: var(--white);
+  font-size: 13px;
+  line-height: 1.5;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.error-notice-label {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
 }

@@ -4,16 +4,17 @@ import { gameSessions, gamePlayers, packs } from '~/db/schema'
 import { authenticate } from '~/lib/api-auth'
 import { errorResponse } from '~/lib/api-helpers'
 import { apiLogger } from '~/lib/logger'
-import { eq, and, sql, count } from 'drizzle-orm'
+import { eq, and, count } from 'drizzle-orm'
 import * as engine from '~/lib/game-engine'
 import * as state from '~/lib/game-state'
 import { captureServerEvent } from '~/lib/posthog-server'
+import { GameCommandError } from '~/lib/game-command-error'
 
 export const Route = createFileRoute('/api/games/$code/start')({
   server: {
     handlers: {
       POST: async ({ request, params }) => {
-        const auth = await authenticate(request)
+        const auth = await authenticate(request, params.code.toUpperCase())
         if (!auth) return errorResponse(401, 'not_authorized', 'Missing or invalid token')
 
         // S3-1: room codes are stored raw-uppercase; normalize the URL param
@@ -27,18 +28,11 @@ export const Route = createFileRoute('/api/games/$code/start')({
         if (session.status !== 'lobby')
           return errorResponse(409, 'invalid_state', 'Game already started')
 
-        const [row] = await db
-          .select({ cnt: sql<number>`count(*)` })
-          .from(gamePlayers)
-          .where(
-            and(
-              eq(gamePlayers.sessionId, session.id),
-              eq(gamePlayers.role, 'player'),
-              eq(gamePlayers.status, 'active'),
-            ),
-          )
-        if (Number(row?.cnt ?? 0) < 3)
-          return errorResponse(409, 'invalid_state', 'Need at least 3 players')
+        const livePlayers = await state.getLivePlayers(code)
+        const playerCount = livePlayers.filter(
+          (player) => player.role === 'player' && player.status === 'active' && !player.isRando,
+        ).length
+        if (playerCount < 3) return errorResponse(409, 'invalid_state', 'Need at least 3 players')
 
         // S3: refuse to start with no seeded card data — empty decks are
         // unplayable.
@@ -46,7 +40,22 @@ export const Route = createFileRoute('/api/games/$code/start')({
         if (Number(packCount?.cnt ?? 0) === 0)
           return errorResponse(503, 'internal_error', 'No card data available')
 
-        await engine.startGame(code)
+        try {
+          await engine.startGame(code, auth.playerId)
+        } catch (error) {
+          if (error instanceof GameCommandError) {
+            const status =
+              error.code === 'invalid_state'
+                ? 409
+                : error.code === 'host_only'
+                  ? 403
+                  : error.code === 'room_not_found'
+                    ? 404
+                    : 401
+            return errorResponse(status, error.code, error.message)
+          }
+          throw error
+        }
 
         // N-1: the engine is the sole emitter of `round_started`
         // (inside startRound). Emit `game_started` first so clients see
@@ -55,10 +64,7 @@ export const Route = createFileRoute('/api/games/$code/start')({
         await state.publishEvent(code, { type: 'game_started', firstRound: round })
         await engine.startRound(code, round)
 
-        const [spectators] = await db
-          .select({ cnt: count() })
-          .from(gamePlayers)
-          .where(and(eq(gamePlayers.sessionId, session.id), eq(gamePlayers.role, 'spectator')))
+        const spectatorCount = livePlayers.filter((player) => player.role === 'spectator').length
 
         const hostPlayer = await db
           .select({ posthogAnonId: gamePlayers.posthogAnonId })
@@ -69,8 +75,8 @@ export const Route = createFileRoute('/api/games/$code/start')({
         if (hostPlayer?.posthogAnonId) {
           captureServerEvent(hostPlayer.posthogAnonId, 'cab_game_started', {
             roomCode: code,
-            playerCount: Number(row?.cnt ?? 0),
-            spectatorCount: Number(spectators?.cnt ?? 0),
+            playerCount: playerCount,
+            spectatorCount: spectatorCount,
             durationLobbyMs: Date.now() - session.createdAt.getTime(),
           })
         }

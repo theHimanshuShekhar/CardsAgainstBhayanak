@@ -80,12 +80,14 @@ test('Happy Ending: host forces a Haiku final round (protocol)', async () => {
   expect(r.mode, 'game_over carries happy_ending mode').toBe('happy_ending')
 })
 
-test('S2-1: Czar drop mid-judging voids the round and rotates Czar (protocol)', async () => {
+test('S2-1: Czar drop mid-judging resolves the round once and rotates Czar (protocol)', async () => {
   test.setTimeout(70_000)
   const r = await playCzarDrop(BASE)
-  expect(r.roundVoided, 'grace expiry voids the abandoned round').toBe(true)
-  expect(r.voidedRound, 'round 1 is the one voided').toBe(1)
-  expect(r.round2Started, 'a fresh round starts after the void').toBe(true)
+  expect(r.roundVoided, 'revealed answers are preserved').toBe(false)
+  expect(r.winnerCount, 'grace expiry chooses exactly one winner').toBe(1)
+  expect(r.winnerScore, 'the chosen winner earns one point').toBe(1)
+  expect(r.roundEndCount, 'the round finishes once').toBe(1)
+  expect(r.round2Started, 'a successor round starts').toBe(true)
   expect(r.czarRotated, 'the dropped Czar is not the new Czar').toBe(true)
 })
 
@@ -213,7 +215,7 @@ test('6-player 5-win golden path', async ({ browser }) => {
     const pick = await handPickCount(nonCzars[0]!)
     for (const np of nonCzars) await submitCards(np, pick)
     await waitForPhase(allHandles, 'judging')
-    await pickWinner(czar, 0)
+    await pickWinner(czar, 0, nonCzars.length * pick)
     // Deciding round ⇒ game_over ⇒ every player navigates to /end;
     // otherwise the next round's picking phase begins. Exactly one of
     // these resolves quickly, so the race is unambiguous.

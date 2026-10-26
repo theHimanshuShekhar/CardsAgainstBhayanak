@@ -1,0 +1,5 @@
+# Keep room identity across independently recorded matches
+
+A room owns its join code and stable memberships; each playthrough is a separate match with its own rounds, configuration, outcome and final player snapshot. We retain the existing room and human membership IDs through rematches so signed sessions and reconnects continue to work, rather than replacing memberships or treating each replay as a new room. A new match ID scopes round numbering and recovery, while retired Rando memberships remain available to historical round references and a new Rando identity joins each replay.
+
+Final player snapshots preserve scores before live room memberships reset. The migration can retain the first match still represented by each existing room and its durable scores, but cannot recover rounds deleted by earlier resets or final scores that existed only in Redis and were never durably recorded; pre-migration active rooms keep their existing round IDs and pending completion intents remain fenced by those IDs.

@@ -1,19 +1,15 @@
-import { db } from '~/db'
-import { gamePlayers } from '~/db/schema'
-import { verifySessionToken } from './session-token'
-import { eq } from 'drizzle-orm'
+import { authenticateRoomSession } from './room-session'
 
 export async function authenticate(
   request: Request,
+  code: string,
 ): Promise<{ playerId: string; roomCode: string } | null> {
   const auth = request.headers.get('authorization')
   if (!auth?.startsWith('Bearer ')) return null
   const token = auth.slice(7)
   try {
-    const payload = await verifySessionToken(token)
-    const [player] = await db.select().from(gamePlayers).where(eq(gamePlayers.id, payload.playerId))
-    if (!player || player.status === 'dropped') return null
-    return { playerId: payload.playerId, roomCode: payload.roomCode }
+    const result = await authenticateRoomSession(token, code)
+    return result.ok ? { playerId: result.playerId, roomCode: result.roomCode } : null
   } catch {
     return null
   }

@@ -1,5 +1,4 @@
-import { verifySessionToken } from '~/lib/session-token'
-import { getPlayer } from '~/lib/game-state'
+import { authenticateRoomSession } from '~/lib/room-session'
 import type { ErrorCode } from '~/lib/types'
 
 // S2-4: distinguish "dropped player" (grace expired — client must clear
@@ -15,12 +14,10 @@ export async function authenticateSocket(
 ): Promise<AuthResult> {
   if (message.type !== 'auth' || !message.sessionToken) return { ok: false, code: 'invalid_token' }
   try {
-    const payload = await verifySessionToken(message.sessionToken)
-    if (payload.roomCode !== code) return { ok: false, code: 'invalid_token' }
-    const player = await getPlayer(code, payload.playerId)
-    if (!player) return { ok: false, code: 'invalid_token' }
-    if (player.status === 'dropped') return { ok: false, code: 'player_dropped' }
-    return { ok: true, playerId: payload.playerId, anonId: message.anonId ?? '' }
+    const result = await authenticateRoomSession(message.sessionToken, code)
+    return result.ok
+      ? { ok: true, playerId: result.playerId, anonId: message.anonId ?? '' }
+      : result
   } catch {
     return { ok: false, code: 'invalid_token' }
   }

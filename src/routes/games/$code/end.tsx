@@ -1,3 +1,4 @@
+import { ErrorNotice } from '~/components/ui/ErrorNotice'
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { Topbar } from '~/components/ui/Topbar'
@@ -6,55 +7,23 @@ import { Scoreboard } from '~/components/game/Scoreboard'
 import { useSession } from '~/hooks/useSession'
 import { useGameSocket } from '~/hooks/useGameSocket'
 import { captureEvent } from '~/lib/posthog-client'
-import type { GameOverMode, GamePlayer, PlayerScore, ResetMode } from '~/lib/types'
+import type { EndedMatchResult, GamePlayer, ResetMode } from '~/lib/types'
 
 export const Route = createFileRoute('/games/$code/end')({
   component: EndScreen,
 })
 
-type LastGameOver = {
-  code: string
-  finalScores: PlayerScore[]
-  winnerId: string
-  mode: GameOverMode
-  totalRounds: number
-}
-
-// S3-NEW-E: reject (and clear) a payload whose roomCode doesn't match the
-// /end route — sessionStorage outlives navigation, so a stale entry from
-// a previous game would otherwise leak into a different room's end screen.
-function readLastGameOver(code: string): LastGameOver | null {
-  if (typeof window === 'undefined') return null
-  try {
-    const raw = sessionStorage.getItem('cab_last_game_over')
-    if (!raw) return null
-    const parsed = JSON.parse(raw) as Partial<LastGameOver>
-    if (!Array.isArray(parsed.finalScores) || parsed.code !== code) {
-      sessionStorage.removeItem('cab_last_game_over')
-      return null
-    }
-    return parsed as LastGameOver
-  } catch {
-    return null
-  }
-}
-
-function clearLastGameOver(): void {
-  if (typeof window === 'undefined') return
-  try {
-    sessionStorage.removeItem('cab_last_game_over')
-  } catch {
-    // sessionStorage write-disabled (private mode quirks); not fatal.
-  }
-}
-
 function EndScreen() {
   const navigate = useNavigate()
   const { code } = Route.useParams()
   const { session, setSession } = useSession()
-  const [result] = useState<LastGameOver | null>(() => readLastGameOver(code))
+  // SSR and the first browser render share this empty state. Only the
+  // authenticated current-match snapshot can supply a result; old tab-local
+  // game_over events cannot establish which match this room now represents.
+  const [ended, setEnded] = useState<{ code: string; result: EndedMatchResult } | null>(null)
+  const result = ended?.code === code ? ended.result : null
 
-  // #3: the end screen joins the room socket purely as a redirect hub —
+  // The end screen recovers the result and follows host resets over the room socket —
   // when the host resets, every client (host included) routes through
   // the lobby, which already forwards to /session once a rematch starts.
   const [players, setPlayers] = useState<GamePlayer[]>([])
@@ -65,40 +34,44 @@ function EndScreen() {
   useEffect(() => {
     return on((event) => {
       if (event.type === 'game_reset') {
-        // S3-NEW-E: rematch/back-to-lobby leaves /end — the cached result
-        // is now stale for the next game in the same tab.
-        clearLastGameOver()
+        setEnded(null)
         void navigate({ to: '/games/$code/lobby', params: { code } })
         return
       }
       if (event.type === 'state_snapshot') {
         // A rematch was already live by the time this socket connected.
-        clearLastGameOver()
+        setEnded(null)
         void navigate({ to: '/games/$code/session', params: { code } })
         return
       }
       if (event.type === 'lobby_snapshot') {
         if (event.gameStatus === 'active' || event.gameStatus === 'paused') {
-          clearLastGameOver()
+          setEnded(null)
           void navigate({ to: '/games/$code/session', params: { code } })
           return
         }
         if (event.gameStatus === 'lobby') {
-          clearLastGameOver()
+          setEnded(null)
           void navigate({ to: '/games/$code/lobby', params: { code } })
           return
         }
         if (event.gameStatus === 'abandoned') {
-          clearLastGameOver()
+          setEnded(null)
           setSession(null)
           void navigate({ to: '/' })
           return
         }
-        // Still 'ended' — only the roster matters here (host detection).
         setPlayers(event.players)
+        setEnded(event.result ? { code, result: event.result } : null)
+      }
+      if (event.type === 'host_changed') {
+        setPlayers((prev) => prev.map((p) => ({ ...p, isHost: p.id === event.hostId })))
+      }
+      if (event.type === 'player_left') {
+        setPlayers((prev) => prev.filter((p) => p.id !== event.playerId))
       }
       if (event.type === 'auth_error') {
-        clearLastGameOver()
+        setEnded(null)
         setSession(null)
         void navigate({ to: '/' })
       }
@@ -136,14 +109,14 @@ function EndScreen() {
 
   const handleGoHome = () => {
     captureEvent('cab_go_home_clicked', { previousRoomCode: code })
-    clearLastGameOver()
+    setEnded(null)
     setSession(null)
     void navigate({ to: '/' })
   }
 
   const handlePlayAgain = () => {
     captureEvent('cab_play_again_clicked', { previousRoomCode: code })
-    clearLastGameOver()
+    setEnded(null)
     void navigate({ to: '/games/create' })
   }
 
@@ -236,11 +209,7 @@ function EndScreen() {
           </div>
         )}
 
-        {resetError && (
-          <div className="muted" style={{ fontSize: 13, color: 'red', marginTop: 12 }}>
-            {resetError}
-          </div>
-        )}
+        {resetError && <ErrorNotice>{resetError}</ErrorNotice>}
 
         <div style={{ display: 'flex', gap: 12, justifyContent: 'center', marginTop: 16 }}>
           <button className="btn btn-ghost" onClick={handlePlayAgain}>

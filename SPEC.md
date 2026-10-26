@@ -12,7 +12,7 @@ A real-time multiplayer card game in the Cards Against Humanity genre. Players j
 
 - **Framework:** TanStack Start (React 19, SSR, file-based routing via `@tanstack/react-router`, Vinxi/h3 bundler)
 - **Styling:** Tailwind CSS v4 — configured via `src/styles.css` (`@theme` block), no `tailwind.config.ts`
-- **Database:** PostgreSQL via Drizzle ORM (`pnpm db:push`, no migrations)
+- **Database:** PostgreSQL via Drizzle ORM (reviewed versioned migrations; explicit `pnpm db:migrate`)
 - **Cache / pub-sub:** Redis (Valkey image in Docker)
 - **Real-time:** Native WebSocket via Vinxi/h3 (`crossws`), attached to the same port as the HTTP server — no separate WS process
 - **Testing:** Playwright E2E (multi-context, real DB + Redis, no mocks)
@@ -78,13 +78,36 @@ Step 3 starts immediately on WS close event — no waiting for keepalive timeout
 
 ### Logout / leave
 
-Client clears `cab_session` on **explicit Leave button**, on **"Go home" from the end screen**, or on **`auth_error`**. The session **persists through `game_over` and the end screen** so the "Play again" button can reuse the handle and `anonId`. Server removes player from Redis on `leave` message.
+Client clears `cab_session` on **explicit Leave button**, on **"Go home" from the end screen**, or on **`auth_error`**. The session **persists through `game_over` and the end screen** so the "Play again" button can reuse the handle and `anonId`. Server marks the player `dropped` on explicit leave or grace expiry. Redis's player roster is the authoritative live membership: dropped entries are retained as token-revocation tombstones and excluded from admission capacity, lobby configuration limits, start validation, hand dealing, and play. Player-role members in grace or queued status still occupy seats; only active players are eligible for initial dealing and start validation. PostgreSQL participation rows and scores are retained for history, with terminal departure recorded as `dropped`; their status is not used to determine live membership. Handles are case-sensitive and reserved by live memberships (including grace and queued). After terminal departure, anyone may reuse the handle by joining as a new membership with a fresh player ID, token, score and hand. A handle or anonymous analytics ID never authenticates a prior membership; departed tokens remain revoked, and historical scores, submissions and outcomes remain attached to the original player ID. Concurrent claims serialize on the room row: one succeeds and later claims return `duplicate_username`.
 
 ### Security notes
 
 - **CSRF:** Not required. `sessionToken` lives in `localStorage` and is sent via `Authorization: Bearer` header (not cookies). Same-origin policy + bearer token = no CSRF attack surface.
 - **Token replay (accepted risk):** Tokens are HMAC-bound to `playerId` for 24h. If leaked (e.g. shared screenshot, browser extension), an attacker can impersonate that player until the room expires. This is acceptable for a party game's threat model; not worth adding rotation or IP-binding which would break mobile users on flaky networks.
-- **Rate limiting:** Per-IP sliding-window limits using Redis: `10 join attempts/min/IP`, `5 game-create attempts/hour/IP`, `60 WS messages/min/connection`. Exceeding returns HTTP 429 / WS `error` with code `rate_limited`. Cloudflare's WAF provides upstream DDoS protection; app-level limits handle abuse from legitimate clients.
+- **Rate limiting:** HTTP uses per-IP Redis sliding-window limits: `10 join attempts/min/IP`, `5 game-create attempts/hour/IP`. Exceeding returns HTTP 429. WebSocket ingress/work limits below apply in every environment, before parsing or database/snapshot work. Cloudflare's WAF provides upstream DDoS protection; app-level limits handle abuse from legitimate clients.
+  - HTTP and WebSocket upgrade client identity use the socket peer. Only immediate peers explicitly listed in `CAB_TRUSTED_PROXY_IPS` may supply a validated `CF-Connecting-IP`; the allowlist defaults to empty. Missing/invalid CF identity falls back to the socket peer. Equivalent IPv6/IPv4-mapped spellings share budgets. `X-Forwarded-For` and `Forwarded` are ignored. Trusted ingress must overwrite incoming CF identity and restrict access through trusted peers; see `docs/development.md` for the host/Docker NAT trust boundary.
+
+### WebSocket traffic limits
+
+Limits are process-local token buckets with the listed initial burst and continuous refill over the listed interval. Refill and idle pruning measure elapsed monotonic process time, independently of wall-clock adjustments. They are shared by all rooms/sockets for the same transport IP, or by all sockets for the same verified room/player identity. Reconnecting cannot reset those shared budgets.
+
+| Boundary                                              | Limit                                                            |
+| ----------------------------------------------------- | ---------------------------------------------------------------- |
+| Upgrade attempts                                      | 120/min/IP                                                       |
+| Open connections                                      | 64/IP, 1,024/server                                              |
+| Pending authentication                                | 16/IP, 256/server; 15-second deadline from upgrade admission     |
+| Authentication attempts                               | 60/min/IP, checked before token verification/participant lookups |
+| Incoming frame assembly                               | 8,192 bytes, including binary and fragmented messages            |
+| Incoming frames, including malformed frames and pings | 120/min/socket, 120/min/verified player, 600/min/IP              |
+| Validated commands, excluding pings                   | 60/min/verified player                                           |
+| Rejoin snapshots                                      | 6/10 seconds/verified player, also charged to the command budget |
+| Concurrent commands                                   | 2/verified player across sockets                                 |
+
+Upgrade rejection returns HTTP 429 with `Retry-After` seconds and JSON `{ code: "rate_limited", message, retryAfterMs }`; browsers cannot read upgrade responses and use the existing capped reconnect backoff. Authentication/frame-budget rejection sends WS `error` with `code: "rate_limited"`, `message`, and positive `retryAfterMs`, then closes with 1008. These temporary errors preserve the client's session token. An authentication deadline closes with 1008; an oversized message closes with 1009 without parsing or echoing the payload. Command/snapshot/concurrency rejection sends the same `error`, preserves a validated `commandId` when present, and leaves the socket open. The rejected command has no effect; retry after the stated delay. An unsynchronized browser automatically retries its snapshot on the same socket, with one pending retry timer and at most eight attempts before reconnecting. Successful synchronization, socket closure and navigation cancel pending retries. Pings continue to use the frame budgets without consuming the gameplay allowance. A retry delay indicates when that budget may admit a request; another shared-budget user or connection occupancy may require a further retry.
+
+Connection reservations are released on close, authentication failure, and participation revocation. Failed/abandoned native upgrades expire at the authentication deadline. Bucket memory is capped at 4,096 IP/player identities; admission fails closed when full. Idle identities without open connections or running commands expire after two minutes and are pruned on subsequent admission at most once per ten seconds. Closing a socket does not clear its shared IP/player bucket. Multiple server processes each enforce their own ingress/work limits; these are not a distributed fleet budget.
+
+Traffic-limit protocol tests run against real isolated PostgreSQL/Redis services with the production WebSocket entry, including under `NODE_ENV=test`. Redis teardown does not reset process-local buckets. Start focused `ws-traffic.spec.ts` checks against a freshly started application process when verifying initial burst capacities. The deliberate abuse file waits one full refill interval before completing so subsequent files do not inherit exhausted shared localhost IP budgets. Ordinary protocol test clients retry snapshot requests only after explicit `rate_limited` replies, with bounded attempts honoring `retryAfterMs`; unexpected errors still fail. Build once and reuse the compiled build for owned application restarts. Keep PostgreSQL/Redis setup and teardown serial for each isolated database. Do not disable traffic admission in tests or point these cleanup hooks at production services.
 
 ---
 
@@ -94,12 +117,12 @@ All endpoints under `/api`. JSON request and response bodies. `Authorization: Be
 
 ### Public endpoints
 
-| Method | Path          | Body | Returns                                                             | Notes                                                                                                      |
-| ------ | ------------- | ---- | ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| GET    | `/healthz`    | —    | `200 { db: "ok", redis: "ok", activeGames: N, uptime: T }` or `503` | Used by Docker healthcheck. Returns 503 if DB or Redis is unreachable.                                     |
-| GET    | `/api/packs`  | —    | `200 { packs: Pack[] }`                                             | List of available card packs from DB. Cached 5 min.                                                        |
-| GET    | `/api/stats`  | —    | `200 { ...StatsResponse }`                                          | Aggregated stats for `/stats` page. Cached 5 min.                                                          |
-| GET    | `/api/config` | —    | `200 { posthogKey, posthogHost }`                                   | Client bootstraps PostHog by fetching its key here. Avoids exposing the key via Vite build env. Cached 1h. |
+| Method | Path          | Body | Returns                                                                       | Notes                                                                                                                                                                                              |
+| ------ | ------------- | ---- | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/healthz`    | —    | `200 { db: "ok", redis: "ok", activeGames: N, uptime: T, recovery }` or `503` | Used by Docker healthcheck. Returns 503 if DB or Redis is unreachable or boot recovery is incomplete. Recovery stage/progress is separate from backing-store health; see `docs/round-recovery.md`. |
+| GET    | `/api/packs`  | —    | `200 { packs: Pack[] }`                                                       | List of available card packs from DB. Cached 5 min.                                                                                                                                                |
+| GET    | `/api/stats`  | —    | `200 { ...StatsResponse }`                                                    | Aggregated stats for `/stats` page. Cached 5 min.                                                                                                                                                  |
+| GET    | `/api/config` | —    | `200 { posthogKey, posthogHost }`                                             | Client bootstraps PostHog by fetching its key here. Avoids exposing the key via Vite build env. Cached 1h.                                                                                         |
 
 ### Game lifecycle endpoints
 
@@ -306,6 +329,7 @@ Player list with HOST/YOU badges and a small green presence dot per player (no r
 ### 7. End Game (`/games/$code/end`)
 
 - Final scoreboard with winner callout
+- Recover the current match's frozen final players, winner, end mode and match-scoped round count through the authenticated room snapshot. Fresh tabs and reloads recover the same result; tab-local cached events never establish the result. Server rendering and initial hydration show the same empty result state until authentication completes. Room membership and token revocation apply to results as they do to live room state.
 - "Play again" (creates new lobby with same settings) and "Go home" buttons
 
 ---
@@ -342,14 +366,15 @@ type PlayerStatus =
   | 'active' // in the game, taking turns
   | 'queued' // mid-game joiner; activates next round
   | 'spectator' // watching only
-  | 'grace' // disconnected, within GRACE_WINDOW_MS, still recoverable
+  | 'grace' // legacy room value; reconnect normalizes by role
   | 'dropped' // permanently removed (grace expired or explicit leave)
 
 type GamePlayer = {
   id: string
   username: string
   role: Role
-  status: PlayerStatus
+  status: PlayerStatus // participation, independent of connectivity
+  connectionStatus?: 'connected' | 'grace' // omitted means connected
   score: number
   isHost: boolean
   isRando: boolean // synthetic Rando Cardrissian player
@@ -403,7 +428,9 @@ type SessionState = {
   submissions: Submission[] // server pre-shuffles between players
   scores: PlayerScore[]
   revealIndex: number
-  winnerId: string | null
+  winningPlayerId: string | null // attribution / scoreboard identity
+  winningSubmissionId: string | null // opaque answer slot for highlighting
+  winnerId: string | null // deprecated player-only compatibility alias
   eliminationTurnPlayerId?: string // Survival of the Fittest current turn
   voteTally?: Record<string, number> // God Is Dead live votes
   ranking?: Submission[] // Serious Business top-3 (rank+points filled)
@@ -516,6 +543,7 @@ All client messages are scoped to the socket's authenticated `playerId` + `roomC
 { type: "auth_ok" }
 { type: "auth_error",       code: ErrorCode, message }
 { type: "state_snapshot",   state: SessionState }       // sent on rejoin
+{ type: "lobby_snapshot",   players: GamePlayer[], config: GameConfig, gameStatus: SessionStatus, result?: EndedMatchResult }
 { type: "player_joined",    player: GamePlayer }
 { type: "player_left",      playerId }
 { type: "game_started",     firstRound }
@@ -525,18 +553,23 @@ All client messages are scoped to the socket's authenticated `playerId` + `roomC
 { type: "player_skipped",   playerId, round }           // timer expired before submission
 { type: "reveal_start" }
 { type: "card_revealed",    submissionIndex, fills: Card[] }
-{ type: "round_won",        winnerId, submissionId, scores: PlayerScore[] }      // normal & God-Is-Dead resolution
-{ type: "round_ranked",     ranking: Submission[], scoresDelta: Record<playerId, number> } // Serious Business
+{ type: "round_won",        winningPlayerId, winningSubmissionId, winnerId, submissionId, scores: PlayerScore[] }      // normal & God-Is-Dead resolution
+{ type: "round_ranked",     winningPlayerId, winningSubmissionId, ranking: Submission[], scoresDelta: Record<playerId, number> } // Serious Business
 { type: "elimination_turn", playerId }                  // Survival: whose turn to eliminate
 { type: "card_eliminated",  submissionId, byPlayerId }  // Survival
 { type: "vote_tally",       votes: Record<submissionId, number> } // God Is Dead live
-{ type: "round_end",        activatedPlayers: string[], handsRefilled: Record<playerId, Hand> } // every mode ends with this
+{ type: "hand_update",      playerId, hand: Hand, discardsUsed?: number } // private, only to the owning player
+{ type: "round_end",        activatedPlayers: string[] } // public; every mode ends with this
 { type: "game_over",        finalScores: PlayerScore[], winnerId, mode: GameOverMode }
 { type: "error",            code: ErrorCode, message }
 { type: "pong" }
 ```
 
-`round_end` is the single source of truth for round termination across all modes. It always carries `handsRefilled` (each submitter's new full hand) so clients update their hand UI uniformly. Mode-specific events (`round_won`, `round_ranked`) precede `round_end` to describe the outcome; `round_end` finalizes scores and refills.
+An ended room's authenticated `lobby_snapshot.result` contains `{ matchId, finalScores: PlayerScore[], winnerId, mode: GameOverMode, totalRounds }` from its current persisted match. `totalRounds` is the highest match-scoped round number, including voided rounds, matching the live round counter. Other room statuses omit `result`.
+
+`round_end` is the single source of truth for round termination across all modes. Mode-specific events (`round_won`, `round_ranked`) precede `round_end` to describe the outcome. Before `round_end`, each refilled submitter and newly activated player receives their own full hand through recipient-private `hand_update`; clients refresh their hand through that event. `round_end` contains only public activation metadata. This intentionally replaces the former all-player `handsRefilled` map, which exposed opponents' hands to players and spectators.
+
+`round_won.winnerId` and `round_won.submissionId` remain compatibility aliases for `winningPlayerId` and `winningSubmissionId`. Clients use the explicit identities. Completed-round snapshots retain the public response board until the next round, so winner attribution and highlighting survive reconnect without mapping a player ID into a submission slot.
 
 ### Submission ordering
 
@@ -550,7 +583,7 @@ Each player's submission writes to a single Redis hash field: `HSET game:{code}:
 
 ### Submission deduplication
 
-If a player sends `play` twice for the same round (network glitch, double-click), the server treats the second as a no-op (responds with same `player_played` ack, doesn't update Redis). Client UI uses optimistic local state to prevent UI confusion.
+If a player sends `play` twice for the same round (network glitch, double-click), the server treats the second as a no-op (responds with same `player_played` ack, doesn't update Redis). For `play`, `vote`, and `pick`, clients may include a bounded `commandId`. The server sends a private `command_accepted(commandId)` at the accepted mutation, or an `error` carrying the same ID on rejection, including ignored votes and winner claims. Clients keep controls pending until the matching receipt, preserve selections on failure, and use outcome events for winner display. A missing receipt triggers reconnect and an authoritative snapshot before retrying; commands are never automatically replayed. Rejoin snapshots include the requesting player's `mySubmissionCount` and `myVotedSubmissionId` so a lost receipt cannot offer a duplicate action. Vote receipts reset when a tie starts a new ballot.
 
 ### Reconnect flow
 
@@ -560,7 +593,8 @@ If a player sends `play` twice for the same round (network glitch, double-click)
    - **Valid HMAC but player dropped past grace window** → responds with `auth_error: "player_dropped"`. Client clears `localStorage.cab_session` and redirects to `/` with a toast: "You were disconnected too long."
    - **Invalid HMAC / expired** → responds with `auth_error: "invalid_token"`. Client clears localStorage, redirects to `/`.
 3. Client shows "Reconnecting…" overlay (debounced by `RECONNECT_TOAST` ms to avoid flash on fast reconnects) while awaiting snapshot. On `state_snapshot` arrival, client hydrates SessionState and dismisses the overlay.
-4. Server grace window: `GRACE_WINDOW_MS` before treating disconnect as permanent drop
+4. Server grace window: `GRACE_WINDOW_MS` before treating disconnect as permanent drop. Disconnect changes `connectionStatus` to `grace`; reconnect changes it to `connected`. Participation remains `active`, `queued`, or `spectator`. Submission and voting quorums include only active player-role participants (excluding Rando for human actions).
+5. Lobby reset and rematch preserve participation and connectivity, including pending grace deadlines. Queued players acquire a hand and a Czar-order slot only at round-end activation; spectators never acquire either. Reset clears scores and per-game flags without promoting participants or reconnecting them.
 
 ### Client-side reconnect backoff
 
@@ -583,6 +617,12 @@ When the WebSocket drops unexpectedly, client retries with exponential backoff: 
 
 Client sends `ping` every 15s; server responds `pong`. After 45s of silence, server treats client as disconnected (starts grace window).
 
+Host succession applies in lobby, active, paused and ended rooms after explicit leave or grace expiry. The longest-present non-dropped human player inherits ownership, including queued players and players still within reconnect grace; spectators and Rando are ineligible. Equal join timestamps use player ID as a stable tie-breaker. Persisted session ownership, persisted/live host flags and live `hostId` change together before `host_changed` is broadcast. Lobby and end screens update their host controls immediately; reconnect snapshots preserve the new ownership. Departed hosts cannot start, configure, reset or end the game.
+
+If no eligible human remains, clear ownership and all host flags (`host_changed.hostId = null`). Active games pause as usual. The next human player to join claims vacant ownership; spectator joins leave it vacant.
+
+SQL ownership commits before live host flags and `hostId` are published atomically. A room-scoped pending succession intent survives failed or uncertain commits and live-store outages. Succession retries once immediately; the next authenticated HTTP/WebSocket action or join reconciles any remaining intent from committed SQL ownership before proceeding.
+
 ---
 
 ## Game Rules Engine — ✅ DONE
@@ -597,7 +637,7 @@ Client sends `ping` every 15s; server responds `pong`. After 45s of silence, ser
    - **Normal / God Is Dead:** Czar picks (or vote-majority resolves) → winner gets the black card as 1 Awesome Point. Server emits `round_won`.
    - **Survival of the Fittest:** Players eliminate cards until 1 remains → that submitter wins 1 point. Server emits `round_won`.
    - **Serious Business:** Czar ranks top 3 → +3/+2/+1 points to the respective players. Server emits `round_ranked`.
-6. **Round termination & hand replenishment (uniform across modes):** Server emits `round_end` containing `handsRefilled: Record<playerId, Hand>` — every submitter's hand topped back up to 10 from `deck:white`. Discards (winners + losers) moved to `discard:white`. Black card moved to `discard:black`. `round_end` also carries `activatedPlayers[]` if any mid-game joiners are now active.
+6. **Round termination & hand replenishment (uniform across modes):** Every submitter's hand is topped back up to 10 from `deck:white` and delivered only to its owner through `hand_update`. Server then emits public `round_end` uniformly across modes. Discards (winners + losers) moved to `discard:white`. Black card moved to `discard:black`. `round_end` also carries `activatedPlayers[]` if any mid-game joiners are now active.
 7. First to `roundsToWin` Awesome Points wins → `game_over`
 
 ### Gambling (base mechanic, available except in modal house-rule games and on round 1)
@@ -624,7 +664,7 @@ Tests seed the RNG via `CAB_RNG_SEED` env var so the entire Czar sequence is det
 
 ### Randomness (seedable PRNG)
 
-All non-cryptographic randomness goes through `src/lib/rng.ts`, which wraps the [`seedrandom`](https://www.npmjs.com/package/seedrandom) library. Exposes:
+All non-cryptographic game randomness goes through `src/lib/rng.ts`, which wraps the [`seedrandom`](https://www.npmjs.com/package/seedrandom) library. Exposes:
 
 ```ts
 export function randomInt(min: number, max: number): number // inclusive min, exclusive max
@@ -634,7 +674,9 @@ export function pick<T>(array: T[]): T // single random element
 
 - In production, the PRNG is seeded once at boot from `crypto.randomBytes(16)`. No determinism.
 - In tests, `CAB_RNG_SEED` env var is the seed → fully reproducible outcomes (first Czar, deck shuffle, Rando card picks, modal-rule random choices).
-- Crypto-strength randomness (room codes, sessionToken HMAC nonces) uses `crypto` directly — never goes through this wrapper.
+- Crypto-strength randomness (room codes, sessionToken HMAC nonces) uses `crypto` directly — never goes through this wrapper. Rate-limit entry nonces use `crypto.randomUUID()` for infrastructure uniqueness, independently of the game PRNG; rate-limit traffic must not change seeded game outcomes.
+- Submission shuffles start from the persisted Czar roster order, with Rando last and a player’s gambled answer after their primary answer. Redis hash traversal order must not affect seeded outcomes.
+- Final tied ballots sort tied candidates by numeric public submission order before the seeded draw, so tally iteration order cannot change the winner.
 
 ### Card pool
 
@@ -647,7 +689,7 @@ export function pick<T>(array: T[]): T // single random element
 
 - **Discard policy:** When a round ends (winner picked), all submitted white cards — winning and losing — move from `game:{code}:round.submissions` to `game:{code}:discard:white`. Submitters' hands replenish by drawing fresh cards from `deck:white`. The black card just played also moves to a `discard:black` list (informational; black discards never reshuffle).
 - **White cards run low:** When `LLEN game:{code}:deck:white < activePlayers * 3`, server shuffles `discard:white` back into `deck:white`, clears the discard list. Deal continues seamlessly.
-- **Black cards exhausted:** Game ends naturally — server emits `game_over` with the current leader as winner. Edge note: a fresh setup loading all CAH packs has thousands of black cards; this is practically rare.
+- **Black cards exhausted:** Game ends naturally — server persists and emits the same winner with mode `deck_exhausted`. The highest-scoring eligible player wins: active or grace players (including Rando) qualify; dropped players, queued players and spectators do not. Ties favor human players in stable `czarOrder` seat order (initial join order, with activated mid-game players appended), then Rando. A player missing from that order sorts after seated humans; IDs break any remaining tie deterministically. A Rando leader still uses `deck_exhausted`, preserving the reason the game ended. If no eligible player remains, pause the deserted game instead of persisting or broadcasting a terminal result without a winner. Edge note: a fresh setup loading all CAH packs has thousands of black cards; this is practically rare.
 
 ### Round timer expiration
 
@@ -737,7 +779,7 @@ packs          — id, name, slug (unique), card_count, created_at
 black_cards    — id, pack_id (fk), text, pick (CHECK pick IN (1,2,3)), unique(pack_id, text, pick)
 white_cards    — id, pack_id (fk), text,                                unique(pack_id, text)
 
-game_sessions  — id (cuid2), code (CHAR(6), unique — stored without dash, e.g. 'B7K9MV'), status, config JSONB,
+game_sessions  — id (cuid2), current_match_id (nullable same-room FK), code (CHAR(6), unique — stored without dash, e.g. 'B7K9MV'), status, config JSONB,
                  host_player_id (nullable FK), created_at, last_activity_at, ended_at,
                  winner_player_id (nullable FK), end_mode (nullable; ENUM same as GameOverMode)
                  status ENUM: 'lobby' | 'active' | 'paused' | 'ended' | 'abandoned'
@@ -746,16 +788,21 @@ game_sessions  — id (cuid2), code (CHAR(6), unique — stored without dash, e.
 game_players   — id (cuid2), session_id (fk), username, role, score, status, is_host, is_rando,
                  discards_used INT DEFAULT 0, posthog_anon_id (text, nullable — PostHog distinct_id), joined_at
                  status ENUM: 'active' | 'queued' | 'spectator' | 'grace' | 'dropped'
-                 unique(session_id, username)                          -- handles unique per room
-                 partial unique(session_id) WHERE is_rando = true     -- at most one Rando per game
+                 unique(session_id, username) WHERE status != 'dropped' -- handles unique among live memberships
+                 partial unique(session_id) WHERE is_rando = true AND status != 'dropped' -- one live Rando
 
-game_rounds    — id, session_id (fk), round_num, black_card_id, czar_player_id (nullable for God Is Dead),
+game_matches   — id (cuid2), session_id (room fk), status, config JSONB,
+                 winner_player_id (nullable same-room membership FK), end_mode, final_players JSONB,
+                 started_at, ended_at
+                 -- one playthrough; final roster preserves scores and membership IDs
+
+game_rounds    — id, session_id (room fk), match_id (fk), round_num, black_card_id, czar_player_id (nullable for God Is Dead),
                  winner_player_id (nullable FK; for Serious Business = top-ranked player),
                  winning_submission_fills JSONB,
                  ranking JSONB (nullable, only set in Serious Business mode: [{playerId, fills, rank, points}]),
                  vote_tally JSONB (nullable, only set in God Is Dead: {submissionId: count}),
                  played_at
-                 unique(session_id, round_num)
+                 unique(match_id, round_num)
 
 INDEX idx_sessions_last_activity ON game_sessions (last_activity_at) WHERE status IN ('active', 'paused')  -- sweeper job query
 INDEX gin_winning_fills ON game_rounds USING gin (winning_submission_fills)  -- speeds up top-cards stats query
@@ -763,7 +810,7 @@ INDEX gin_winning_fills ON game_rounds USING gin (winning_submission_fills)  -- 
 
 ### `last_activity_at` and stale-game sweeper
 
-`last_activity_at` is updated on every WS message and HTTP API call for the session. A background job (`src/lib/sweeper.ts`) runs via [`node-cron`](https://github.com/node-cron/node-cron) scheduled at `*/30 * * * *` (every 30 min). Scheduled at process boot from the server entry point. Sweep query:
+`last_activity_at` records gameplay and membership lifecycle activity for the SQL sweeper. It does not control or renew the Redis room deadline; the idle lifetime policy below does. A background job (`src/lib/sweeper.ts`) runs via [`node-cron`](https://github.com/node-cron/node-cron) scheduled at `*/30 * * * *` (every 30 min). Scheduled at process boot from the server entry point. Sweep query:
 
 - Find sessions with `status IN ('active', 'paused')` AND `last_activity_at < now() - INTERVAL '6 hours'` AND zero present players in Redis
 - Mark these as `status='abandoned'`, `end_mode='abandoned'`, set `ended_at = now()`
@@ -776,7 +823,18 @@ INDEX gin_winning_fills ON game_rounds USING gin (winning_submission_fills)  -- 
 - Display layer inserts dash for human reading: rendered as `B7K-9MV`
 - Input fields accept either form: `B7K-9MV`, `b7k9mv`, `b7k 9mv` all normalize to `B7K9MV` server-side
 
-### Host FK chicken-and-egg resolution
+Rooms retain their code and memberships across replays. Each start after a completed match allocates a new match; completed match configuration, outcomes, final player scores and rounds remain immutable. Round lookups and completion recovery use match identity plus the original round ID, so a replay's round 1 cannot resolve an earlier match. Rando memberships retire on reset and remain available to historical references. See [ADR 0001](docs/adr/0001-room-and-match-identity.md).
+
+### Membership integrity and nullable creation/reset ordering
+
+PostgreSQL owns pointer integrity. Composite foreign keys require room host and
+winner IDs, match winner IDs, and round winner IDs to reference a membership in
+the same room. Current-match pointers and each round's match must also belong to
+that room. A missing, deleted, or cross-room reference is rejected on every write,
+including writes outside the application. Membership and match IDs cannot be
+moved to another room while referenced. These constraints enforce existence and
+room ownership; host eligibility and choosing the match winner remain engine
+rules. Dropped memberships remain valid historical identities.
 
 `game_sessions.host_player_id` is `NULL`-able and unset at row creation. The flow:
 
@@ -784,7 +842,25 @@ INDEX gin_winning_fills ON game_rounds USING gin (winning_submission_fills)  -- 
 2. `INSERT INTO game_players (session_id, username, role, is_host=true) VALUES (sessionId, ...)` returns `playerId`
 3. `UPDATE game_sessions SET host_player_id = playerId WHERE id = sessionId`
 
-If the host leaves before any other players join, the session is marked `abandoned` and the orphan host row is acceptable.
+The host pointer can return to `NULL` when no eligible human remains. Starting a
+match inserts its row before assigning `current_match_id`; finishing it records
+the room and match outcome in one transaction. Reset clears the room's current
+match and winner pointers while retaining completed matches, frozen final rosters,
+rounds, and dropped human/Rando memberships. No deferred constraints are needed.
+
+Foreign keys use `NO ACTION` for deletion/update: deleting a referenced membership
+must fail rather than erase or reassign a historical winner. Explicit room/history
+deletion first clears room host/winner/current-match pointers, then deletes rounds,
+matches, memberships, and the room, preferably in one transaction. The existing
+room-to-match `ON DELETE CASCADE` remains available when deleting a room whose
+memberships and rounds have already been removed.
+
+Migration `0003_membership_integrity.sql` validates existing pointers before adding
+constraints. An invalid legacy row stops and rolls back the upgrade with its table,
+pointer, row ID and target ID (up to ten examples). Review the original room/match
+history and repair references explicitly before retrying `pnpm db:migrate`; the
+migration never silently rewrites outcomes. Back up and rehearse the upgrade using
+the normal reviewed migration procedure.
 
 ### Rando Cardrissian as a synthetic player
 
@@ -809,11 +885,14 @@ Query-time aggregations with `Cache-Control: public, max-age=300`:
 ```
 game:{code}                hash: status, currentRound, totalRounds, czarIndex, hostId, config JSON, lastActivityAt
 game:{code}:players        hash: playerId → GamePlayer JSON (includes discardsUsed)
+game:{code}:czarOrder      list: stable Czar rotation, including dropped memberships
 game:{code}:round          hash with mode-aware fields:
                              blackCardId         (always)
                              czarId              (null in God Is Dead)
                              submissions         (always, JSON: playerId → Submission)
-                             winnerId            (filled at round_won)
+                             winningPlayerId     (filled by every terminal outcome)
+                             winningSubmissionId (opaque answer slot, recorded alongside player identity)
+                             resolvedSubmissions (public result board, retained through pause)
                              ranking             (only in Serious Business: JSON)
                              voteTally           (only in God Is Dead: JSON)
                              eliminationTurnPlayerId (only in Survival: current eliminator)
@@ -828,7 +907,13 @@ game:{code}:grace:{id}     string with PX expiry = GRACE_WINDOW_MS; set on disco
 game:{code}:channel        pub/sub channel
 ```
 
-All keys: 24h TTL on idle. Refreshed on any state mutation.
+### Room idle lifetime
+
+The room root owns one **24-hour idle deadline**. The roster (including dropped-membership tombstones), Czar order, decks, discards, every player's hand, round phase and outcome, submissions, shuffled answer order, reveal cursor, skipped players, ballots/tallies/tiebreak state, and pending drop intents all expire at that same deadline. The round's `resolving` marker is durable completion state and shares it too. New state and internal transitions inherit the current deadline.
+
+An accepted join, lobby configuration change, start, reset, card submission, wager, redraw, confession discard, Czar pick/ranking, vote, elimination, Happy Ending request, or explicit leave renews the entire durable state together. Validation failures and repeated commands that do not mutate state do not renew it. WebSocket authentication, heartbeats, snapshot reads, disconnect/grace handling, automatic round transitions and periodic recovery/sweeper work do not renew it. An unattended connected browser therefore cannot keep a room alive indefinitely. Idle expiry revokes access even while historical SQL rows remain; the sweeper subsequently marks unfinished matches abandoned.
+
+Socket lease timestamps (45 seconds), grace keys (30 seconds), absolute disconnect deadlines and their generation metadata, traffic budgets, and short command locks retain their separate lifetimes. Another participant's activity must never move a socket or disconnect deadline or extend a short lock. Pub/sub channels have no stored lifetime. See `src/lib/room-lifetime.ts` for the bounded durable-state allowlist.
 
 ### Persistence
 
@@ -870,7 +955,7 @@ Test matrix using multi-context (separate browser contexts per player):
     4. Czar context: sees "Start reveal →" button, clicks it
     5. All contexts: assert cards flip in sequence (`REVEAL_STAGGER` apart)
     6. Czar context: clicks the submission marked as winning by the test plan (test plan precomputed from seed) → asserts winner badge appears
-    7. All contexts: scoreboard updates; hands replenish to 10 for submitters via `round_end` event
+    7. All contexts: scoreboard updates; hands replenish to 10 for submitters via recipient-private `hand_update` before public `round_end`
     8. Server holds `ROUND_RESULT_PAUSE_MS` (winner highlighted) → next round starts
     9. Break loop when any context observes `game_over` event
   - Assert: total round count ≤ 20 (sanity bound), winner has exactly 5 points
@@ -953,6 +1038,15 @@ Test matrix using multi-context (separate browser contexts per player):
 
 ## Docker Compose / Deployment — ✅ DONE
 
+Supported runtime ownership is one production app process per private PostgreSQL
+database and dedicated Redis database. After schema validation and before loading
+engines or jobs, the production entry takes a dedicated PostgreSQL session
+advisory lock. A competing app exits before listening or executing room effects;
+loss of the ownership session stops the process and requires supervisor restart.
+Overlapping rolling replicas and transaction-pooling ownership connections are
+unsupported. See [runtime ownership](docs/operations/runtime-ownership.md) for
+failure-detection limits and the separate future per-room lease/fencing design.
+
 ### Services
 
 ```yaml
@@ -962,37 +1056,45 @@ services:
   redis: # valkey/valkey:8-alpine (pinned major), AOF enabled, named volume, healthcheck
 ```
 
-Cloudflare Tunnel runs **outside** the Compose stack — user manages it independently on the host. The app container exposes port 3000 to the host; `cloudflared` on the host (systemd unit or separate container) accesses the app at `http://localhost:3000`.
+Cloudflare Tunnel runs **outside** the Compose stack — user manages it independently on the host. The app container publishes port 3000 on host loopback; `cloudflared` on the host accesses the app at `http://localhost:3000`. A separately managed tunnel container may instead reach the app on a restricted Docker network. Explicitly configure `CAB_TRUSTED_PROXY_IPS` for the immediate tunnel peer as observed by the app socket (host Docker NAT may present the bridge gateway).
+
+### Database storage operations
+
+PostgreSQL requires durable fsync, reliable locking and exclusive PGDATA ownership. The deployment-specific CIFS volume remains unverified; the opt-in `docker-compose.local-storage.yml` selects a distinct local volume on persistent host block storage. See `docs/operations/database-recovery.md` for the assessment limitations, reversible migration, independent backups, restoration checks and DB-only recovery limits. `pnpm test:storage` exercises disposable local-volume crash recovery and logical restore via the reviewed migration CLI.
 
 ### Dockerfile (multi-stage)
 
-- `build` stage: `node:22-alpine` + pnpm, runs `pnpm install --frozen-lockfile` + `pnpm build`
-- `run` stage: `node:22-alpine`, copies `.output/`, runs `node .output/server/index.mjs`, `USER node`, `EXPOSE 3000`
+- `build` stage: `node:22-alpine` + pnpm, runs `pnpm install --frozen-lockfile` + `pnpm build`.
+- `production-deps` stage: installs frozen production dependencies, including `tsx` for the server and deployment CLIs; excludes development-only tooling. Lifecycle scripts are skipped so the missing Husky prepare hook cannot break this install.
+- `run` stage: `node:22-alpine`, copies `dist/`, source required by the production WebSocket entry, production dependencies and reviewed schema tooling. Runs `pnpm start` through `start-prod.sh` as `USER cab`, `EXPOSE 3000`. `db:migrate`, `db:check`, `db:baseline`, `db:signature` and `seed` remain available; Drizzle generation/studio/push run from a development checkout.
+- See [measured image and cold client footprint](docs/operations/deployment-footprint.md) for the baseline, reproduction commands and validation limits.
 
 ### Environment variables
 
-| Var                        | Purpose                                                          |
-| -------------------------- | ---------------------------------------------------------------- |
-| `DATABASE_URL`             | Postgres connection string                                       |
-| `REDIS_URL`                | Redis/Valkey connection string                                   |
-| `SESSION_SECRET`           | HMAC secret for sessionToken                                     |
-| `PORT`                     | App port (default 3000)                                          |
-| `NODE_ENV`                 | `development` \| `production`                                    |
-| `AXIOM_TOKEN`              | API token for Axiom log shipping (prod only)                     |
-| `AXIOM_DATASET`            | Axiom dataset name (default `cab-prod`)                          |
-| `POSTHOG_API_KEY`          | PostHog project API key (public; used by both client and server) |
-| `POSTHOG_HOST`             | PostHog host (default `https://us.i.posthog.com`)                |
-| `POSTHOG_PERSONAL_API_KEY` | PostHog personal API key (build-time only, for sourcemap upload) |
-| `CAB_RNG_SEED`             | Seedable PRNG seed (tests only; unset in prod = crypto-seeded)   |
+| Var                        | Purpose                                                                       |
+| -------------------------- | ----------------------------------------------------------------------------- |
+| `DATABASE_URL`             | Postgres connection string                                                    |
+| `REDIS_URL`                | Redis/Valkey connection string                                                |
+| `SESSION_SECRET`           | HMAC secret for sessionToken                                                  |
+| `PORT`                     | App port (default 3000)                                                       |
+| `APP_BIND_IP`              | Compose host bind address (default `127.0.0.1`)                               |
+| `CAB_TRUSTED_PROXY_IPS`    | Literal immediate tunnel peer IP allowlist, comma-separated; empty by default |
+| `NODE_ENV`                 | `development` \| `production`                                                 |
+| `AXIOM_TOKEN`              | API token for Axiom log shipping (prod only)                                  |
+| `AXIOM_DATASET`            | Axiom dataset name (default `cab-prod`)                                       |
+| `POSTHOG_API_KEY`          | PostHog project API key (public; used by both client and server)              |
+| `POSTHOG_HOST`             | PostHog host (default `https://us.i.posthog.com`)                             |
+| `POSTHOG_PERSONAL_API_KEY` | PostHog personal API key (build-time only, for sourcemap upload)              |
+| `CAB_RNG_SEED`             | Seedable PRNG seed (tests only; unset in prod = crypto-seeded)                |
 
 ### Notes
 
-- App port binding: default `ports: ["3000:3000"]` in compose exposes the app to the host's network interface — **firewall the port or bind to loopback only (`127.0.0.1:3000:3000`)** to avoid public exposure. With Cloudflare Tunnel running on the host, `127.0.0.1:3000:3000` is the safer choice; otherwise the app is reachable on the host's public IP.
+- App port binding defaults to `127.0.0.1:3000:3000`; `APP_BIND_IP` may override it for an intentionally restricted ingress network. Allowlisting a host/NAT gateway trusts all traffic originating through that peer, so restrict local/network access and require ingress to overwrite `CF-Connecting-IP`.
 - Cloudflare Tunnel natively proxies WebSocket upgrades — no special config needed on the app side.
-- A single `docker-compose.yml` is used for dev and prod; production settings (`restart: unless-stopped`, memory limits — app: 512M, postgres: 1G, redis: 256M — and `NODE_ENV=production`) are applied via environment overrides rather than a separate `docker-compose.prod.yml`
+- `docker-compose.yml` is the deployment stack. Local development uses standalone `docker-compose.dev.yml` with project-scoped local volumes, loopback backing-service ports and explicit disposable settings from `.env.local.example`; see the `docs/development.md` quickstart.
 - Health checks: postgres `pg_isready`, redis `redis-cli ping`, app `GET /healthz` (returns 200 with `{ db, redis, activeGames, uptime }` or 503 if any dependency is down)
 - Volumes: `postgres_data`, `redis_data` (both backed up via host volume mount)
-- **DB schema management:** `pnpm db:push` for both dev and prod (no generated migrations). Acceptable risk for an MVP party game where data loss isn't catastrophic and the schema is rarely modified. Always review the diff plan before confirming a push.
+- **DB schema management:** reviewed versioned SQL migrations with a checksummed manifest. Production deployment explicitly runs `pnpm db:migrate` after backup and review. Startup only verifies schema/history compatibility and refuses pending, newer, altered or drifted databases. Existing pre-migration databases require explicit verified `pnpm db:baseline` adoption. See `docs/development.md` for migration generation, rehearsal and restore procedures.
 
 ---
 
@@ -1004,6 +1106,14 @@ Structured JSON logs via [`pino`](https://github.com/pinojs/pino):
 - **Production:** JSON stdout, shipped to [Axiom](https://axiom.co/) using the official `@axiomhq/pino` transport. Env vars: `AXIOM_TOKEN`, `AXIOM_DATASET`. Free tier (500GB ingest/mo) easily covers expected volume.
 
 Loggers (named) per module: `cab.ws`, `cab.api`, `cab.engine`, `cab.seed`, `cab.sweeper`. Log levels: `trace` (per-message WS spam, dev only), `debug` (state transitions), `info` (game lifecycle: created/started/ended), `warn` (recoverable issues like seed retries), `error` (5xx, unhandled exceptions).
+
+Ownership-loss records use the `cab.runtime` logger at `fatal` level with a
+synchronous Pino JSON destination on stderr in every environment. It attempts
+the loss reason before immediate process termination, with no retry if stderr
+rejects the write or is full. No asynchronous pretty/Axiom worker drain delays
+the fail-stop. Capture these terminal records through the supervisor/container
+stderr log collector; in-process Axiom delivery
+is not guaranteed during immediate exit.
 
 Every log line carries `{ roomCode?, playerId? }` when applicable for filtering.
 
@@ -1141,22 +1251,21 @@ PostHog client auto-opts-out on `localhost` to keep dev events out of the prod p
 
 ## Quick Reference
 
-| Command                                    | Purpose                                              |
-| ------------------------------------------ | ---------------------------------------------------- |
-| `pnpm install`                             | Install dependencies                                 |
-| `pnpm dev`                                 | Start dev server with HMR (http://localhost:3000)    |
-| `pnpm build`                               | Production build to `.output/`                       |
-| `pnpm start`                               | Run the production build locally                     |
-| `pnpm db:push`                             | Apply Drizzle schema to Postgres (no migrations)     |
-| `pnpm db:studio`                           | Open Drizzle Studio (DB browser)                     |
-| `pnpm seed`                                | Manually trigger card pack seeding from REST AH      |
-| `pnpm typecheck`                           | Run TypeScript type check                            |
-| `pnpm lint`                                | Run ESLint                                           |
-| `pnpm test:e2e`                            | Run Playwright E2E suite (requires Postgres + Redis) |
-| `pnpm test:e2e:ui`                         | Playwright UI mode for debugging                     |
-| `docker compose up -d`                     | Start full stack locally                             |
-| `docker compose up -d postgres redis`      | Just deps for local dev                              |
-| `NODE_ENV=production docker compose up -d` | Production deploy (single compose file)              |
+| Command                                                                       | Purpose                                              |
+| ----------------------------------------------------------------------------- | ---------------------------------------------------- |
+| `pnpm install`                                                                | Install dependencies                                 |
+| `pnpm dev`                                                                    | Vite page development with HMR; no game WebSocket    |
+| `pnpm build`                                                                  | Build SSR and browser assets to `dist/`              |
+| `pnpm start`                                                                  | Serve the built pages and game WebSocket together    |
+| `pnpm db:migrate`                                                             | Apply reviewed versioned migrations explicitly       |
+| `pnpm db:studio`                                                              | Open Drizzle Studio (DB browser)                     |
+| `pnpm seed`                                                                   | Manually trigger card pack seeding from REST AH      |
+| `pnpm typecheck`                                                              | Run TypeScript type check                            |
+| `pnpm lint`                                                                   | Run ESLint                                           |
+| `pnpm test:e2e`                                                               | Run Playwright E2E suite (requires Postgres + Redis) |
+| `pnpm test:e2e:ui`                                                            | Playwright UI mode for debugging                     |
+| `docker compose --env-file .env.local -f docker-compose.dev.yml up -d --wait` | Start isolated local backing services                |
+| `NODE_ENV=production docker compose up -d`                                    | Production deploy (single compose file)              |
 
 ---
 

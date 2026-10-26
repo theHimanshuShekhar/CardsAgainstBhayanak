@@ -1,0 +1,22 @@
+[
+  {
+    "file": "0000_baseline.sql",
+    "sha256": "68aa3365d574b00e5ea41336ea3a216c9b264ce07a09cee4cb1e2f54ecc34fe5",
+    "schema": "37acbfb5c648413d657bcc5487095c02e0cb10c027cd8c4d9bcd166fc474237a"
+  },
+  {
+    "file": "0001_live_handle_reuse.sql",
+    "sha256": "6e3dab9bedd97abb025600e065b7c1fd86fa183a286c863c6f02acddf5eb4f97",
+    "schema": "efadf615bef78287abf98cde933db0cee3cb9ed0646a63db61a3de78e23f3307"
+  },
+  {
+    "file": "0002_match_history.sql",
+    "sha256": "a772db4ae892d4453a4fb202b3f575251069f3111cdaee257b991587f1861e01",
+    "schema": "decedf6e5a7610f7fc0352a26c013360c9ae9c79f5ea5bb86671ea012dd10f30"
+  },
+  {
+    "file": "0003_membership_integrity.sql",
+    "sha256": "aaef4282477289bc868687f4ddc775d96566c1ae6a8ac991672ce8a0d8bfe95b",
+    "schema": "414ca6260977b31d25c750ee93b390c1bda1353d675b6fcd5da896d284a46830"
+  }
+]

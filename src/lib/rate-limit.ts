@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { redis } from './redis'
 
 export type RateLimitResult = { allowed: boolean; remaining: number; resetAt: number }
@@ -13,7 +14,9 @@ export async function checkRateLimit(
 
   const pipeline = redis.multi()
   pipeline.zremrangebyscore(fullKey, 0, windowStart)
-  pipeline.zadd(fullKey, now, `${now}-${Math.random()}`)
+  // Infrastructure uniqueness must not consume the seeded game PRNG.
+  // A UUID also keeps simultaneous requests distinct across processes.
+  pipeline.zadd(fullKey, now, randomUUID())
   pipeline.zcard(fullKey)
   pipeline.expire(fullKey, windowSeconds)
   const results = await pipeline.exec()

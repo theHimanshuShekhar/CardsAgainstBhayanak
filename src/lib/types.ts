@@ -9,6 +9,9 @@ export type GamePlayer = {
   username: string
   role: Role
   status: PlayerStatus
+  // Connectivity is independent of active/queued/spectator participation.
+  // Omitted on older room entries and new HTTP joins means connected.
+  connectionStatus?: 'connected' | 'grace'
   score: number
   isHost: boolean
   isRando: boolean
@@ -48,6 +51,7 @@ export type Pack = {
 
 export type Submission = {
   submissionId: string
+  // Rejoin snapshots keep shuffled slots but redact fills until reveal.
   fills: Card[]
   playerId?: string
   rank?: 1 | 2 | 3
@@ -70,7 +74,7 @@ export type SessionState = {
   round: number
   prompt: BlackCard
   czarId: string | null
-  // host_changed migrates this mid-game (longest-present active player),
+  // host_changed migrates this when the host departs (longest-present human),
   // so the snapshot is the floor — the client keeps it in sync via the
   // broadcast event.
   hostId: string | null
@@ -82,7 +86,10 @@ export type SessionState = {
   submissions: Submission[]
   scores: PlayerScore[]
   revealIndex: number
+  /** @deprecated Compatibility alias for winningPlayerId; never a submission ID. */
   winnerId: string | null
+  winningPlayerId: string | null
+  winningSubmissionId: string | null
   // Picking-phase progress (server-authoritative); reaches submitted ===
   // expected exactly when the round resolves.
   submitted: number
@@ -92,15 +99,22 @@ export type SessionState = {
   // the sole authority on phase transitions.
   roundTimerExpiresAt: number | null
   eliminationTurnPlayerId?: string
+  // Public answer IDs eligible in the next ballot; absent on the initial ballot.
+  voteCandidateIds?: string[]
   voteTally?: Record<string, number>
   ranking?: Submission[]
   // Never Have I Ever: only the requesting player's count is needed —
   // the button disables at 3, and the engine is authoritative on the cap.
   myDiscardsUsed: number
   // Gambling (base mechanic): the engine flips this when the player wagers
-  // and the round resolves; the rejoin must restore so the player can finish
-  // a gamble across a refresh.
+  // and the round resolves. Snapshots retain the round's wager receipt
+  // through its result pause, then reset it when the next round starts.
   myHasGambled: boolean
+  // Private action receipts let reconnects reconcile a lost acknowledgement.
+  mySubmissionCount: number
+  myVotedSubmissionId: string | null
+  // Recipient-private shuffled answer IDs; never include another player’s attribution.
+  mySubmissionIds: string[]
 }
 
 // ── Session-level status ──────────────────────────────────────────
@@ -133,6 +147,14 @@ export type GameConfig = {
 // ── Game-over outcome ─────────────────────────────────────────────
 
 export type GameOverMode = 'normal' | 'happy_ending' | 'rando_won' | 'deck_exhausted' | 'abandoned'
+
+export type EndedMatchResult = {
+  matchId: string
+  finalScores: PlayerScore[]
+  winnerId: string
+  mode: GameOverMode
+  totalRounds: number
+}
 
 // Post-game host action: replay the same room. 'rematch' goes straight
 // into a fresh game; 'lobby' returns everyone to the lobby to reconfigure.
@@ -185,11 +207,11 @@ export type ServerToClientEvent = ServerMessage
 export type ClientMessage =
   | { type: 'auth'; sessionToken: string; anonId?: string }
   | { type: 'rejoin' }
-  | { type: 'play'; cardIds: string[] }
+  | { type: 'play'; cardIds: string[]; commandId?: string }
   | { type: 'gamble' }
-  | { type: 'pick'; submissionId: string }
+  | { type: 'pick'; submissionId: string; commandId?: string }
   | { type: 'rank'; ranking: string[] }
-  | { type: 'vote'; submissionId: string }
+  | { type: 'vote'; submissionId: string; commandId?: string }
   | { type: 'eliminate'; submissionId: string }
   | { type: 'redraw' }
   | { type: 'confess_discard'; cardId: string }
@@ -203,10 +225,16 @@ export type ServerMessage =
   | { type: 'auth_ok' }
   | { type: 'auth_error'; code: ErrorCode; message: string }
   | { type: 'state_snapshot'; state: SessionState }
-  | { type: 'lobby_snapshot'; players: GamePlayer[]; config: GameConfig; gameStatus: SessionStatus }
+  | {
+      type: 'lobby_snapshot'
+      players: GamePlayer[]
+      config: GameConfig
+      gameStatus: SessionStatus
+      result?: EndedMatchResult
+    }
   | { type: 'player_joined'; player: GamePlayer }
   | { type: 'player_left'; playerId: string }
-  | { type: 'host_changed'; hostId: string }
+  | { type: 'host_changed'; hostId: string | null }
   | { type: 'game_started'; firstRound: number }
   | {
       type: 'round_started'
@@ -223,16 +251,33 @@ export type ServerMessage =
   | { type: 'scores_update'; scores: PlayerScore[] }
   | { type: 'player_gambled'; playerId: string }
   | { type: 'player_skipped'; playerId: string; round: number; submitted: number; expected: number }
-  | { type: 'reveal_start' }
+  | { type: 'my_submission_ids'; playerId: string; submissionIds: string[] }
+  | { type: 'reveal_start'; submissionCount: number }
   | { type: 'card_revealed'; submissionIndex: number; fills: Card[] }
-  | { type: 'round_won'; winnerId: string; submissionId: string; scores: PlayerScore[] }
-  | { type: 'round_ranked'; ranking: Submission[]; scoresDelta: Record<string, number> }
+  | {
+      type: 'round_won'
+      winningPlayerId: string
+      winningSubmissionId: string
+      /** @deprecated Compatibility alias for winningPlayerId. */
+      winnerId: string
+      /** @deprecated Compatibility alias for winningSubmissionId. */
+      submissionId: string
+      scores: PlayerScore[]
+    }
+  | {
+      type: 'round_ranked'
+      winningPlayerId: string
+      winningSubmissionId: string
+      ranking: Submission[]
+      scoresDelta: Record<string, number>
+    }
   | { type: 'elimination_turn'; playerId: string }
   | { type: 'card_eliminated'; submissionId: string; byPlayerId: string }
-  | { type: 'vote_tally'; votes: Record<string, number> }
+  | { type: 'vote_tally'; votes: Record<string, number>; voteCandidateIds?: string[] }
   | { type: 'round_voided'; round: number; reason: string }
-  | { type: 'round_end'; activatedPlayers: string[]; handsRefilled: Record<string, Hand> }
+  | { type: 'round_end'; activatedPlayers: string[] }
   | { type: 'game_over'; finalScores: PlayerScore[]; winnerId: string; mode: GameOverMode }
   | { type: 'game_reset'; mode: ResetMode }
-  | { type: 'error'; code: ErrorCode; message: string }
+  | { type: 'command_accepted'; commandId: string }
+  | { type: 'error'; code: ErrorCode; message: string; commandId?: string; retryAfterMs?: number }
   | { type: 'pong' }

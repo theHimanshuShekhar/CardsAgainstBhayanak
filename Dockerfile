@@ -1,3 +1,11 @@
+FROM node:22-alpine AS production-deps
+WORKDIR /app
+RUN corepack enable
+COPY package.json pnpm-lock.yaml ./
+# Startup and deployment CLIs need tsx, but not lint/test/migration generation
+# tools. Skip prepare (Husky is deliberately absent from this install).
+RUN pnpm install --frozen-lockfile --prod --ignore-scripts
+
 FROM node:22-alpine AS build
 WORKDIR /app
 RUN corepack enable
@@ -21,7 +29,9 @@ COPY --from=build --chown=cab:cab /app/src ./src
 COPY --from=build --chown=cab:cab /app/server.prod.ts ./server.prod.ts
 COPY --from=build --chown=cab:cab /app/tsconfig.json ./tsconfig.json
 COPY --from=build --chown=cab:cab /app/package.json ./package.json
-COPY --from=build --chown=cab:cab /app/node_modules ./node_modules
+COPY --from=production-deps --chown=cab:cab /app/node_modules ./node_modules
+COPY --from=build --chown=cab:cab /app/drizzle ./drizzle
+COPY --from=build --chown=cab:cab /app/scripts ./scripts
 COPY --from=build --chown=cab:cab /app/drizzle.config.ts ./drizzle.config.ts
 COPY --from=build --chown=cab:cab /app/scripts/start-prod.sh ./start-prod.sh
 RUN chmod +x ./start-prod.sh

@@ -4,14 +4,16 @@ import type { Submission } from '~/lib/types'
 
 type Props = {
   submissions: Submission[]
+  pickCount: 1 | 2 | 3
   phase: 'judging' | 'reveal'
   revealIndex: number
-  winnerId: string | null
-  // Winner's display handle, resolved server-side from scores. The
+  winningSubmissionId: string | null
+  // Winner's display handle, resolved separately from player scores. The
   // client never learns submission→playerId (privacy), so this is the
   // only place the winning player's name is available.
   winnerName: string | null
   isCzar: boolean
+  pending?: boolean
   onStartReveal: () => void
   onPickWinner: (submissionId: string) => void
   // God Is Dead extras. `mode` flips judging vs voting affordances;
@@ -22,6 +24,8 @@ type Props = {
   // after a tap. Defaulted so non-godmode callers can omit them.
   mode?: 'normal' | 'godmode' | 'survival' | 'serious_business'
   canVote?: boolean
+  mySubmissionIds?: string[]
+  voteCandidateIds?: string[]
   voteTally?: Record<string, number>
   myVotedSubmissionId?: string | null
   onVote?: (submissionId: string) => void
@@ -45,15 +49,19 @@ type Props = {
 
 export function SubmissionsGrid({
   submissions,
+  pickCount,
   phase,
   revealIndex,
-  winnerId,
+  winningSubmissionId,
   winnerName,
   isCzar,
+  pending = false,
   onStartReveal,
   onPickWinner,
   mode = 'normal',
   canVote = false,
+  mySubmissionIds = [],
+  voteCandidateIds,
   voteTally = {},
   myVotedSubmissionId = null,
   onVote,
@@ -95,14 +103,14 @@ export function SubmissionsGrid({
         <div className="subs-grid subs-grid-large">
           {/* filter(Boolean): a lost reveal frame must never crash every
               client via the error boundary — degrade, don't white-screen. */}
-          {submissions.filter(Boolean).flatMap((s, i) =>
-            s.fills.map((_, fi) => (
+          {submissions.filter(Boolean).flatMap((_, i) =>
+            Array.from({ length: pickCount }, (_, fi) => (
               <div
                 key={`${i}-${fi}`}
-                className={`sub-card ${s.fills.length > 1 ? 'multi-card' : ''} ${isCzar ? 'card-clickable' : ''}`}
+                className={`sub-card ${pickCount > 1 ? 'multi-card' : ''} ${isCzar ? 'card-clickable' : ''}`}
                 onClick={() => isCzar && onStartReveal()}
               >
-                {s.fills.length > 1 && <div className="player-badge">{i + 1}</div>}
+                {pickCount > 1 && <div className="player-badge">{i + 1}</div>}
                 <CardBack size="md" />
               </div>
             )),
@@ -119,8 +127,8 @@ export function SubmissionsGrid({
         <div className="subs-grid subs-grid-large">
           {submissions.filter(Boolean).flatMap((s, i) => {
             const revealed = i < revealIndex
-            const isWinner = s.submissionId === winnerId
-            const isLoser = winnerId != null && !isWinner
+            const isWinner = s.submissionId === winningSubmissionId
+            const isLoser = winningSubmissionId != null && !isWinner
             const votes = voteTally[s.submissionId] ?? 0
             const iVotedThis = myVotedSubmissionId === s.submissionId
             const isEliminated =
@@ -129,15 +137,22 @@ export function SubmissionsGrid({
             // is in the czar's working ranking. 0 = unranked.
             const rankOrdinal = isSerious ? myRanking.indexOf(s.submissionId) + 1 : 0
             const clickable =
-              !isGodmode && !isSurvival && !isSerious && isCzar && revealed && winnerId == null
-            return s.fills.map((card, fi) => (
+              !pending &&
+              !isGodmode &&
+              !isSurvival &&
+              !isSerious &&
+              isCzar &&
+              revealed &&
+              winningSubmissionId == null
+            const slots = revealed ? s.fills : Array.from({ length: pickCount }, () => null)
+            return slots.map((card, fi) => (
               <div
                 key={`${i}-${fi}`}
-                className={`sub-card ${s.fills.length > 1 ? 'multi-card' : ''} ${revealed ? '' : 'hidden-card'} ${isWinner ? 'is-winner' : ''} ${isLoser ? 'is-loser' : ''} ${isEliminated ? 'is-eliminated' : ''} ${rankOrdinal ? 'is-ranked' : ''}`}
+                className={`sub-card ${pickCount > 1 ? 'multi-card' : ''} ${revealed ? '' : 'hidden-card'} ${isWinner ? 'is-winner' : ''} ${isLoser ? 'is-loser' : ''} ${isEliminated ? 'is-eliminated' : ''} ${rankOrdinal ? 'is-ranked' : ''}`}
                 onClick={() => (clickable ? onPickWinner(s.submissionId) : undefined)}
               >
-                {s.fills.length > 1 && <div className="player-badge">{i + 1}</div>}
-                {revealed ? (
+                {pickCount > 1 && <div className="player-badge">{i + 1}</div>}
+                {revealed && card ? (
                   <div className="flip-reveal">
                     <ResponseCard
                       card={card}
@@ -149,10 +164,20 @@ export function SubmissionsGrid({
                         <button
                           className={`btn btn-ghost btn-sm vote-btn${iVotedThis ? ' is-armed' : ''}`}
                           data-testid="vote-btn"
-                          disabled={!canVote}
+                          disabled={
+                            pending ||
+                            !canVote ||
+                            mySubmissionIds.includes(s.submissionId) ||
+                            (voteCandidateIds !== undefined &&
+                              !voteCandidateIds.includes(s.submissionId))
+                          }
                           onClick={() => onVote?.(s.submissionId)}
                         >
-                          {iVotedThis ? 'Voted' : 'Vote'}
+                          {mySubmissionIds.includes(s.submissionId)
+                            ? 'Your answer'
+                            : iVotedThis
+                              ? 'Voted'
+                              : 'Vote'}
                         </button>
                         <span className="vote-tally" data-testid="vote-tally">
                           {votes} {votes === 1 ? 'vote' : 'votes'}
@@ -164,7 +189,7 @@ export function SubmissionsGrid({
                         <button
                           className="btn btn-ghost btn-sm elim-btn"
                           data-testid="eliminate-btn"
-                          disabled={!canEliminate || isEliminated || winnerId != null}
+                          disabled={!canEliminate || isEliminated || winningSubmissionId != null}
                           onClick={() => onEliminate?.(s.submissionId)}
                         >
                           {isEliminated ? 'Eliminated' : 'Eliminate'}

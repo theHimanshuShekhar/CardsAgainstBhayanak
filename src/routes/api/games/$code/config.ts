@@ -1,12 +1,16 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { db } from '~/db'
-import { gameSessions, gamePlayers } from '~/db/schema'
+import { gameSessions } from '~/db/schema'
 import { authenticate } from '~/lib/api-auth'
+import { checkRoomMembership } from '~/lib/room-session'
 import { GameConfigSchema, conflictingModalRules, errorResponse } from '~/lib/api-helpers'
 import { apiLogger } from '~/lib/logger'
-import { eq, and, sql } from 'drizzle-orm'
+import { eq } from 'drizzle-orm'
+import { z } from 'zod'
 import * as state from '~/lib/game-state'
 import type { SessionStatus } from '~/lib/types'
+
+const ConfigRequestSchema = z.object({ config: GameConfigSchema })
 
 export const Route = createFileRoute('/api/games/$code/config')({
   server: {
@@ -14,7 +18,7 @@ export const Route = createFileRoute('/api/games/$code/config')({
       // #3: host edits the room config from the lobby (packs / rules /
       // points / timer). Same validation as create; only while 'lobby'.
       PATCH: async ({ request, params }) => {
-        const auth = await authenticate(request)
+        const auth = await authenticate(request, params.code.toUpperCase())
         if (!auth) return errorResponse(401, 'not_authorized', 'Missing or invalid token')
 
         const code = params.code.toUpperCase()
@@ -25,11 +29,12 @@ export const Route = createFileRoute('/api/games/$code/config')({
         } catch {
           return errorResponse(400, 'internal_error', 'Invalid JSON body')
         }
-        const parsed = GameConfigSchema.safeParse((body as { config?: unknown }).config)
+        const parsed = ConfigRequestSchema.safeParse(body)
         if (!parsed.success)
           return errorResponse(400, 'internal_error', 'Invalid config', parsed.error.flatten())
+        const config = parsed.data.config
 
-        const activeModal = conflictingModalRules(parsed.data.rules)
+        const activeModal = conflictingModalRules(config.rules)
         if (activeModal.length > 1)
           return errorResponse(
             400,
@@ -38,47 +43,56 @@ export const Route = createFileRoute('/api/games/$code/config')({
             { rules: activeModal },
           )
 
-        const [session] = await db.select().from(gameSessions).where(eq(gameSessions.code, code))
-        if (!session) return errorResponse(404, 'room_not_found', 'Room not found')
-        if (session.hostPlayerId !== auth.playerId)
-          return errorResponse(403, 'host_only', 'Only the host can change the config')
-        if (session.status !== 'lobby')
-          return errorResponse(409, 'invalid_state', 'Config can only change in the lobby')
+        // Use the same row lock as admission so capacity edits and joins
+        // validate against one ordered roster/configuration pair.
+        const configured = await db.transaction(async (tx) => {
+          const [session] = await tx
+            .select()
+            .from(gameSessions)
+            .where(eq(gameSessions.code, code))
+            .for('update')
+          if (!session) return errorResponse(404, 'room_not_found', 'Room not found')
+          // Initial authentication already verified the token and performed
+          // pending recovery. Inside the row lock only recheck membership.
+          if (!(await checkRoomMembership(code, auth.playerId)).ok)
+            return errorResponse(401, 'not_authorized', 'Missing or invalid token')
+          if (session.hostPlayerId !== auth.playerId)
+            return errorResponse(403, 'host_only', 'Only the host can change the config')
+          if (session.status !== 'lobby')
+            return errorResponse(409, 'invalid_state', 'Config can only change in the lobby')
 
-        // S3-NEW-C: maxPlayers must not drop below the current player-role
-        // roster — otherwise the next join sees a phantom "room full" and
-        // the existing lobby UI shows more chips than the new cap allows.
-        // Zod already enforces the absolute 3..10 bound; this is the
-        // dynamic floor based on who's already in the room.
-        const [activePlayers] = await db
-          .select({ cnt: sql<number>`count(*)` })
-          .from(gamePlayers)
-          .where(
-            and(
-              eq(gamePlayers.sessionId, session.id),
-              eq(gamePlayers.role, 'player'),
-              sql`${gamePlayers.status} != 'dropped'`,
-            ),
-          )
-        const rosterSize = Number(activePlayers?.cnt ?? 0)
-        if (parsed.data.maxPlayers < rosterSize)
-          return errorResponse(
-            409,
-            'invalid_state',
-            `Cannot set maxPlayers below current roster (${rosterSize})`,
-            { rosterSize, requested: parsed.data.maxPlayers },
-          )
+          // S3-NEW-C: maxPlayers must not drop below the current player-role
+          // roster — otherwise the next join sees a phantom "room full" and
+          // the existing lobby UI shows more chips than the new cap allows.
+          // Zod already enforces the absolute 3..10 bound; this is the
+          // dynamic floor based on who's already in the room.
+          const rosterSize = (await state.getLivePlayers(code)).filter(
+            (player) => player.role === 'player',
+          ).length
 
-        await db
-          .update(gameSessions)
-          .set({ config: parsed.data, lastActivityAt: new Date() })
-          .where(eq(gameSessions.id, session.id))
+          if (config.maxPlayers < rosterSize)
+            return errorResponse(
+              409,
+              'invalid_state',
+              `Cannot set maxPlayers below current roster (${rosterSize})`,
+              { rosterSize, requested: config.maxPlayers },
+            )
+
+          await state.updateLiveRoom(code, {}, auth.playerId, [], undefined, true)
+          await tx
+            .update(gameSessions)
+            .set({ config, lastActivityAt: new Date() })
+            .where(eq(gameSessions.id, session.id))
+          return session
+        })
+        if (configured instanceof Response) return configured
+        const session = configured
 
         // Refresh every connected lobby client with the new config.
         await state.publishEvent(code, {
           type: 'lobby_snapshot',
           players: await state.getAllPlayers(code),
-          config: parsed.data,
+          config,
           gameStatus: session.status as SessionStatus,
         })
 

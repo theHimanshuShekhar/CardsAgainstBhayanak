@@ -214,12 +214,13 @@ round_won(winnerId, submissionId, scores)            // normal + God Is Dead
 round_ranked(ranking, scoresDelta)                   // Serious Business
 elimination_turn(playerId) | card_eliminated(submissionId, byPlayerId)  // Survival
 vote_tally(votes)                                    // God Is Dead live
-round_end(activatedPlayers, handsRefilled)           // every mode ends with this
+hand_update(playerId, hand, discardsUsed?)          // private to owner, including round refills
+round_end(activatedPlayers)                         // public; every mode ends with this
 game_over(finalScores, winnerId, mode: GameOverMode)
 error(code, message) | pong
 ```
 
-**`round_end` is the single source of truth for round termination across all modes** — always carries `handsRefilled`. Mode-specific outcome events (`round_won` / `round_ranked`) precede it.
+**`round_end` is the single source of truth for round termination across all modes**. Each refill is delivered privately to its owner through `hand_update` before public `round_end`. Mode-specific outcome events (`round_won` / `round_ranked`) precede it.
 
 ---
 
@@ -231,7 +232,7 @@ error(code, message) | pong
 2. Each round: rotate Czar, deal black card from shuffled deck.
 3. Non-Czar players submit `pick` white cards. **Order within a player's submission is preserved**; order between players is server-shuffled.
 4. Resolve per mode (normal → Czar picks; God Is Dead → vote; Survival → eliminations; Serious Business → top-3 ranking).
-5. Server emits `round_end` with `handsRefilled` (everyone tops back to 10). All submitted cards → `discard:white`. Black card → `discard:black` (no reshuffle).
+5. Server sends recipient-private `hand_update` refills (everyone tops back to 10), then public `round_end`. All submitted cards → `discard:white`. Black card → `discard:black` (no reshuffle).
 6. First to `roundsToWin` wins → `game_over`.
 
 ### Czar selection

@@ -50,16 +50,17 @@ export function PromptStage({
 }: Props) {
   const isWaiting = phase === 'waiting'
   const isPicking = phase === 'picking'
+  const showTimer = (isPicking || isWaiting) && roundTimerExpiresAt !== null
 
   return (
     <div className="stage-prompt stage-prompt-hero">
-      <div className="eyebrow" style={{ marginBottom: 12 }}>
-        The prompt · {czarName} is judging
+      <div className={`stage-prompt-head${showTimer ? ' has-timer' : ''}`}>
+        <div className="eyebrow">
+          <span className="stage-prompt-label">The prompt · </span>
+          <span className="stage-prompt-czar">{czarName}</span> is judging
+        </div>
+        {showTimer && <StageTimer expiresAt={roundTimerExpiresAt} />}
       </div>
-
-      {(isPicking || isWaiting) && roundTimerExpiresAt !== null && (
-        <StageTimer expiresAt={roundTimerExpiresAt} />
-      )}
 
       <PromptCard card={prompt} size="xl" />
 

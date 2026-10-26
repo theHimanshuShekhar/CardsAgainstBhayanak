@@ -19,9 +19,17 @@
     "seed": "tsx src/lib/seed.ts",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
-    "prepare": "husky"
+    "prepare": "husky",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "tsx scripts/migrate.ts apply",
+    "db:check": "tsx scripts/migrate.ts check",
+    "db:baseline": "tsx scripts/migrate.ts adopt",
+    "db:signature": "tsx scripts/schema-signature.ts",
+    "test:migrations": "node --test tests/deployment/migrations.test.mjs",
+    "test:storage": "node --test tests/deployment/storage.test.mjs"
   },
   "dependencies": {
     "@axiomhq/pino": "^1.6.1",
@@ -43,6 +51,7 @@
     "react-dom": "^19.2.6",
     "seedrandom": "^3.0.5",
     "srvx": "0.11.15",
+    "tsx": "^4.21.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
@@ -63,10 +72,9 @@
     "lint-staged": "^17.0.4",
     "prettier": "^3.8.3",
     "tailwindcss": "^4.3.0",
-    "tsx": "^4.21.0",
     "typescript": "~5.6.3",
     "typescript-eslint": "^8.59.3",
-    "vite": "^7.3.3",
+    "vite": "^7.3.5",
     "vite-tsconfig-paths": "^6.1.1",
     "vitest": "^4.1.11"
   },

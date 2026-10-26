@@ -1,6 +1,7 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { Topbar } from '~/components/ui/Topbar'
+import { CARD_CONTENT_PRIVACY_PROPS } from '~/lib/card-privacy'
 
 export const Route = createFileRoute('/stats')({
   component: StatsScreen,
@@ -252,7 +253,9 @@ function StatsScreen() {
                   {d.topCards.map((c, i) => (
                     <div className="top-card-row" key={c.text}>
                       <div className="top-card-rank">{String(i + 1).padStart(2, '0')}</div>
-                      <div className="top-card-text">{c.text}</div>
+                      <div className="top-card-text" {...CARD_CONTENT_PRIVACY_PROPS}>
+                        {c.text}
+                      </div>
                       <div className="top-card-num">
                         {c.count.toLocaleString()}
                         <span className="muted"> picks</span>
